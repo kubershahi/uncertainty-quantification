@@ -29,11 +29,9 @@ env/
 *.ckpt
 
 # Large project directories (keep folder structure only)
-data/raw/**
-data/nii/**
+data/**
 models/**
-!data/raw/.gitkeep
-!data/nii/.gitkeep
+!data/.gitkeep
 !models/.gitkeep
 
 # NIfTI / pickle outputs
