@@ -138,10 +138,6 @@ Use the visualization helpers to inspect triplets and fivers without training:
 
 ## Report assets
 
-Your LaTeX methodology section is provided in:
-
-- \`assets/methodology_three_stage_workflow.tex\`
-
 Figures used for that section are in:
 
 - \`assets/images/synthetic/\`
