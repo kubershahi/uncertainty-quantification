@@ -10,6 +10,8 @@ __pycache__/
 .mypy_cache/
 .coverage
 htmlcov/
+# Jupyter notebook checkpoint files/folders
+.ipynb_checkpoints/
 
 # Virtual environments
 .venv/
