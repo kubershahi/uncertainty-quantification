@@ -162,13 +162,13 @@ def regenerate_one_triplet(
     Returns (qc_passed, error_or_none).
     """
     img_2d = np.load(raw_npy_path)
-    w, h = img_2d.shape
-    grid_x, grid_y = torch.meshgrid(
-        torch.arange(w, dtype=torch.float32),
+    h, w = int(img_2d.shape[0]), int(img_2d.shape[1])
+    coord_row, coord_col = torch.meshgrid(
         torch.arange(h, dtype=torch.float32),
+        torch.arange(w, dtype=torch.float32),
         indexing="ij",
     )
-    identity_grid = torch.stack([grid_x, grid_y], dim=0).unsqueeze(-1).float()
+    identity_grid = torch.stack([coord_row, coord_col], dim=0).unsqueeze(-1).float()
 
     transform = build_regen_transform()
     warped_img: np.ndarray | None = None
@@ -203,7 +203,7 @@ def regenerate_one_triplet(
     if warped_img is None or phi_true is None:
         return False, "no sample drawn"
 
-    valid_mask = csd.interior_valid_mask(w, h, csd.INTERIOR_MARGIN)
+    valid_mask = csd.interior_valid_mask(h, w, csd.INTERIOR_MARGIN)
     np.savez_compressed(
         out_npz_path,
         image=img_2d,

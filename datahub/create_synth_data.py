@@ -56,11 +56,14 @@ def phi_magnitude(phi: np.ndarray) -> np.ndarray:
     return np.sqrt(phi[0] * phi[0] + phi[1] * phi[1])
 
 
-def interior_valid_mask(w: int, h: int, margin: int) -> np.ndarray:
-    """True where pixel is at least `margin` away from the image boundary (for checks + Phase 3 loss)."""
-    mask = np.zeros((w, h), dtype=bool)
-    if w > 2 * margin and h > 2 * margin:
-        mask[margin : w - margin, margin : h - margin] = True
+def interior_valid_mask(height: int, width: int, margin: int) -> np.ndarray:
+    """True where pixel is at least `margin` away from the image boundary (for checks + Phase 3 loss).
+
+    ``height`` / ``width`` are ``image.shape[0]`` / ``image.shape[1]`` (rows / columns).
+    """
+    mask = np.zeros((height, width), dtype=bool)
+    if height > 2 * margin and width > 2 * margin:
+        mask[margin : height - margin, margin : width - margin] = True
     else:
         mask[:] = True
     return mask
@@ -171,13 +174,14 @@ def process_one_triplet_file(
         _pin_worker_cpu_threads()
 
     img_2d = np.load(in_path)
-    w, h = img_2d.shape
-    grid_x, grid_y = torch.meshgrid(
-        torch.arange(w, dtype=torch.float32),
+    # NumPy image layout: shape (height, width) = (rows, columns).
+    h, w = int(img_2d.shape[0]), int(img_2d.shape[1])
+    coord_row, coord_col = torch.meshgrid(
         torch.arange(h, dtype=torch.float32),
+        torch.arange(w, dtype=torch.float32),
         indexing="ij",
     )
-    identity_grid = torch.stack([grid_x, grid_y], dim=0).unsqueeze(-1).float()
+    identity_grid = torch.stack([coord_row, coord_col], dim=0).unsqueeze(-1).float()
 
     transform = build_transform()
     warped_img: np.ndarray | None = None
@@ -213,7 +217,7 @@ def process_one_triplet_file(
 
     assert warped_img is not None and phi_true is not None
 
-    valid_mask = interior_valid_mask(w, h, INTERIOR_MARGIN)
+    valid_mask = interior_valid_mask(h, w, INTERIOR_MARGIN)
     np.savez_compressed(
         out_path,
         image=img_2d,
@@ -227,7 +231,7 @@ def process_one_triplet_file(
         return True, None
 
     mag = phi_magnitude(phi_true.astype(np.float64))
-    mi = interior_valid_mask(w, h, INTERIOR_MARGIN)
+    mi = interior_valid_mask(h, w, INTERIOR_MARGIN)
     mx_valid = float(np.max(mag[mi])) if mi.any() else float("nan")
     mx_full = float(np.max(mag))
     lim_int = max_phi_interior_px if max_phi_interior_px is not None else "off"
