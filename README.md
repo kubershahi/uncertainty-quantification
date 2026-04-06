@@ -8,7 +8,7 @@ Implementation targets **TransMorph-style preprocessed IXI** axial slices. Phase
 
 | Artifact | Location |
 | --- | --- |
-| **Written report (PDF)** | [`reports/CSE293_Uncertainty_Estimation.pdf`](reports/CSE293_Uncertainty_Estimation.pdf); LaTeX intro snippet: [`reports/CSE293_introduction.tex`](reports/CSE293_introduction.tex) |
+| **Written report (PDF)** | [`reports/CSE293_Uncertainty_Estimation.pdf`](reports/CSE293_Uncertainty_Estimation.pdf) |
 | **Datasets used in the paper** | [Google Drive](https://drive.google.com/drive/folders/1VYUxjbYqrMLb_KWqfJepUZN3i0jNYdU7?usp=sharing) (`IXI_2D*.zip`, `IXI_2D_synth_trip.zip`, `IXI_2D_unigrad_fiver.zip`, etc.) |
 
 ### Pipeline in three stages
