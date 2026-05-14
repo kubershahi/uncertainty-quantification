@@ -1,6 +1,6 @@
 {
   "checkpoint": "/home/kshahi/runs/error_unet_run1/best_model.pt",
-  "eval_dir": "/home/kshahi/data/IXI_2D_unigrad_fiver",
+  "eval_dir": "/home/kshahi/data/IXI_2D_unigrad_synth_fiver",
   "run_path": "/home/kshahi/runs/error_unet_run1",
   "metrics_csv": "/home/kshahi/runs/error_unet_run1/metrics.csv",
   "n_test_files": 1150,

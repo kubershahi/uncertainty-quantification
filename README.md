@@ -9,7 +9,7 @@ Implementation targets **TransMorph-style preprocessed IXI** axial slices. Phase
 | Artifact | Location |
 | --- | --- |
 | **Written report (PDF)** | [`reports/CSE293_Uncertainty_Estimation.pdf`](reports/CSE293_Uncertainty_Estimation.pdf) |
-| **Datasets used in the paper** | [Google Drive](https://drive.google.com/drive/folders/1VYUxjbYqrMLb_KWqfJepUZN3i0jNYdU7?usp=sharing) (`IXI_2D*.zip`, `IXI_2D_synth_trip.zip`, `IXI_2D_unigrad_fiver.zip`, etc.) |
+| **Datasets used in the paper** | [Google Drive](https://drive.google.com/drive/folders/1VYUxjbYqrMLb_KWqfJepUZN3i0jNYdU7?usp=sharing) (`IXI_2D*.zip`, `IXI_2D_synth_trip.zip`, `IXI_2D_unigrad_synth_fiver.zip`, etc.) |
 
 ### Pipeline in three stages
 
@@ -46,7 +46,7 @@ The pipeline assumes local dataset folders match the defaults below (or download
 
 ### Phase I: Ground truth generation (synthetic triplets)
 
-Phase I uses **2D** slices instead of full 3D volumes. The generator `datahub/create_synth_data.py` expects `.npy` images as:
+Phase I uses **2D** slices instead of full 3D volumes. The generator `datahub/synthetic/create_synth_data.py` expects `.npy` images as:
 
 ```text
 ./data/IXI_2D/
@@ -77,7 +77,7 @@ python scripts/visualize_ixi_2d.py --input-dir ./data/IXI_2D --recursive --no-sh
 Create synthetic triplets (`I_fixed`, `I_warped`, `phi`) as `*_triplet.npz`:
 
 ```bash
-python datahub/create_synth_data.py \
+python datahub/synthetic/create_synth_data.py \
   --input-path ./data/IXI_2D/ \
   --output-path ./data/IXI_2D_synth_trip/ \
   --workers 64
@@ -98,9 +98,9 @@ python datahub/data_checks/check_synth_data.py --data-dir ./data/IXI_2D_synth_tr
 ### Phase II: UniGradICON error maps (fivers)
 
 ```bash
-python datahub/create_unigrad_data.py \
+python datahub/synthetic/create_unigrad_synth_data.py \
   --input-path ./data/IXI_2D_synth_trip/ \
-  --output-path ./data/IXI_2D_unigrad_fiver/
+  --output-path ./data/IXI_2D_unigrad_synth_fiver/
 ```
 
 Writes `*_fiver.npz` with `phi_true`, `phi_pred`, `phi_diff`, `error_map`, `valid_mask`, `qc_passed`, etc.
@@ -109,7 +109,7 @@ Writes `*_fiver.npz` with `phi_true`, `phi_pred`, `phi_diff`, `error_map`, `vali
 
 ```bash
 python datahub/train_error_map_unet.py \
-  --data-dir ./data/IXI_2D_unigrad_fiver/ \
+  --data-dir ./data/IXI_2D_unigrad_synth_fiver/ \
   --epochs 50 \
   --batch-size 8 \
   --out-dir ./runs/error_unet_run1
@@ -122,7 +122,7 @@ Produces `metrics.csv`, `best_model.pt` (best **validation** masked MSE), and `r
 ```bash
 python datahub/eval_error_map_unet.py \
   --run-path ./runs/error_unet_run1 \
-  --eval-dir ./data/IXI_2D_unigrad_fiver/ \
+  --eval-dir ./data/IXI_2D_unigrad_synth_fiver/ \
   --no-show
 ```
 
@@ -137,18 +137,19 @@ The repo includes an **example** training/eval snapshot under `assets/runs/error
 
 ### Optional visualization (no training)
 
-- `python datahub/visualize_synth_data.py`
-- `python datahub/visualize_unigrad_data.py`
+- `python datahub/synthetic/visualize_synth_data.py`
+- `python datahub/synthetic/visualize_unigrad_data.py`
+- `python datahub/unigrad-io/visualize_unigrad_io_data.py`
 
 ## Report and figures
 
 - **PDF:** [`reports/CSE293_Uncertainty_Estimation.pdf`](reports/CSE293_Uncertainty_Estimation.pdf)
-- **Figures:** `assets/images/synthetic/`, `assets/images/unigrad/`, `assets/images/synth/`, and `assets/runs/error_unet_run1/` (training curves, Test panels, metrics JSON).
+- **Figures:** `assets/images/synthetic/`, `assets/images/unigrad-synth/`, `assets/images/unigrad-io/`, `assets/images/synth/`, and `assets/runs/error_unet_run1/` (training curves, Test panels, metrics JSON).
 
 ## Notes
 
-- **Units (displacements).** Stored fields are in **pixels** on the 2D slice grid: `phi` in `*_triplet.npz`; `phi_true`, `phi_pred`, `phi_diff`, `error_map` in `*_fiver.npz`; Phase I QC limits in `datahub/create_synth_data.py`.
-- **Units (internals).** TorchIO elastic uses mm only to sample the B-spline; saved `phi` is still grid-based **pixels**. UniGradICON outputs are **normalized** until `create_unigrad_data.py` rescales to **pixels**. Phase III `--phi-scale` rescales `phi_pred` **inputs** to the U-Net; fiver tensors remain in pixels.
+- **Units (displacements).** Stored fields are in **pixels** on the 2D slice grid: `phi` in `*_triplet.npz`; `phi_true`, `phi_pred`, `phi_diff`, `error_map` in `*_fiver.npz`; Phase I QC limits in `datahub/synthetic/create_synth_data.py`.
+- **Units (internals).** TorchIO elastic uses mm only to sample the B-spline; saved `phi` is still grid-based **pixels**. UniGradICON outputs are **normalized** until `create_unigrad_synth_data.py` rescales to **pixels**. Phase III `--phi-scale` rescales `phi_pred` **inputs** to the U-Net; fiver tensors remain in pixels.
 - Run commands from the **repository root** so relative paths resolve.
 - Large artifacts are not committed (`data/`, `models/`, etc.); use the [Drive folder](https://drive.google.com/drive/folders/1VYUxjbYqrMLb_KWqfJepUZN3i0jNYdU7?usp=sharing) or regenerate locally.
 - Legacy helpers in `scripts/` and `docs/` may not track every `datahub/` default.

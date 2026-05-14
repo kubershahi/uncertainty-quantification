@@ -1,5 +1,5 @@
 {
-  "data_dir": "/home/kshahi/data/IXI_2D_unigrad_fiver",
+  "data_dir": "/home/kshahi/data/IXI_2D_unigrad_synth_fiver",
   "train_split": "Train",
   "val_split": "Val",
   "train_files": 4030,

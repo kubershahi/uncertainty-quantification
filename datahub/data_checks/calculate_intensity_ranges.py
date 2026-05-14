@@ -5,13 +5,13 @@ Print per-pixel min / max of ``image`` and ``warped`` on random files per split.
 Datasets (default roots):
   - IXI_2D:        ``*.npy`` — one array per file (reported as ``image`` only; no warped).
   - synth trip:    ``*_triplet.npz`` with ``image``, ``warped``.
-  - unigrad fiver: ``*_fiver.npz`` with ``image``, ``warped``.
+  - unigrad synth fiver: ``*_fiver.npz`` with ``image``, ``warped``.
 
 Examples:
   python calculate_intensity_ranges.py --split Train --num-samples 5
   python calculate_intensity_ranges.py --split Val --num-samples 10 --seed 0 \\
     --ixi2d-dir ./data/IXI_2D --synth-dir ./data/IXI_2D_synth_trip \\
-    --unigrad-dir ./data/IXI_2D_unigrad_fiver
+    --unigrad-dir ./data/IXI_2D_unigrad_synth_fiver
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--unigrad-dir",
         type=Path,
-        default=Path("./data/IXI_2D_unigrad_fiver"),
+        default=Path("./data/IXI_2D_unigrad_synth_fiver"),
         help="Root with *_fiver.npz per split.",
     )
     args = p.parse_args(argv)
@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     # --- UniGrad fivers ---
-    block_title("IXI_2D_unigrad_fiver (*_fiver.npz)")
+    block_title("IXI_2D_unigrad_synth_fiver (*_fiver.npz, synth)")
     uni_dir = args.unigrad_dir / split
     uni_files = collect_unigrad_fivers(uni_dir)
     if not uni_files:
