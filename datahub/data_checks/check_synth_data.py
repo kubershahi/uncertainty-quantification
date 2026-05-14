@@ -9,7 +9,7 @@ Post-generation review for IXI_2D synthetic triplets (*_triplet.npz).
   slice, (3) same on interior (valid_mask), (4) distribution of per-sample max ‖φ‖ (full slice)
   across samples. Same near-identity rule as ``modify_synth_data``.
 
-  Plots: ``datahub/visualize_synth_data.py``
+  Plots: ``datahub/synthetic/visualize_synth_data.py``
 
 Examples:
   python data_checks/check_synth_data.py

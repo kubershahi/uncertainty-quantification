@@ -11,7 +11,7 @@ train/val curves from ``metrics.csv``.
   ``atlas_error_pred_random.png``, ``atlas_error_pred_minmedmax.png``, and ``test_metrics.json`` there.
 
 Example:
-  python eval_error_map_unet.py --run-path ./runs/error_unet_run1 --eval-dir ./data/IXI_2D_unigrad_fiver --no-show
+  python eval_error_map_unet.py --run-path ./runs/error_unet_run1 --eval-dir ./data/IXI_2D_unigrad_synth_fiver --no-show
 """
 
 from __future__ import annotations
@@ -372,7 +372,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--eval-dir",
         type=Path,
-        default=Path("./data/IXI_2D_unigrad_fiver"),
+        default=Path("./data/IXI_2D_unigrad_synth_fiver"),
         help="Fiver root with Test/ (test error) and Atlas/ (plot samples).",
     )
     p.add_argument("--batch-size", type=int, default=8)

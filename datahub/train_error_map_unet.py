@@ -2,7 +2,7 @@
 """
 Train a 2D regression U-Net to predict per-pixel registration error magnitude.
 
-Fiver npz (see create_unigrad_data.py):
+Fiver npz (see create_unigrad_synth_data.py):
   image, warped, phi_pred, error_map, valid_mask, ...
 
 Input channels (default): fixed image, warped image, phi_pred (2 components) -> 4 channels.
@@ -22,7 +22,7 @@ Default ``--image-norm robust``: per-slice min + quantile hi → [0,1] for ``ima
 If inputs are already scaled consistently (e.g. IXI fivers), optionally ``--image-norm none``.
 
 Example:
-  python train_error_map_unet.py --data-dir ./data/IXI_2D_unigrad_fiver \\
+  python train_error_map_unet.py --data-dir ./data/IXI_2D_unigrad_synth_fiver \\
     --epochs 50 --batch-size 8 --out-dir ./runs/error_unet_run1
 """
 
@@ -334,7 +334,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("./data/IXI_2D_unigrad_fiver"),
+        default=Path("./data/IXI_2D_unigrad_synth_fiver"),
         help="Root with Train/Val (and optional Test) subfolders.",
     )
     p.add_argument("--train-split", type=str, default="Train")

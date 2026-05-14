@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Post-generation review for UniGradICON fivers (*_fiver.npz).
+Post-generation review for UniGradICON synth fivers (*_fiver.npz).
 
   1) Integrity: load each archive, required keys, shapes, consistency of phi_diff / error_map.
   2) Summary: per-split counts, qc_passed breakdown (if present), and **mean statistics**:
@@ -9,8 +9,8 @@ Post-generation review for UniGradICON fivers (*_fiver.npz).
      **interior** means.
 
 Examples:
-  python data_checks/check_unigrad_data.py --data-dir ./data/IXI_2D_unigrad_fiver/
-  python data_checks/check_unigrad_data.py --data-dir ./data/IXI_2D_unigrad_fiver/ --verbose
+  python data_checks/check_unigrad_data.py --data-dir ./data/IXI_2D_unigrad_synth_fiver/
+  python data_checks/check_unigrad_data.py --data-dir ./data/IXI_2D_unigrad_synth_fiver/ --verbose
 """
 
 from __future__ import annotations
@@ -268,7 +268,7 @@ def scan_fivers(
 def print_fiver_report(report: FiverScanReport) -> None:
     total = sum(report.per_split[s].n_files for s in SPLITS)
     print("=" * 60)
-    print(f"UniGradICON fiver review: {report.data_dir}")
+    print(f"UniGradICON synth fiver review: {report.data_dir}")
     print(f"Total *_fiver.npz scanned: {total}")
     print("=" * 60)
     print("Per sample: mean over slice (full image) of ‖φ_true‖, ‖φ_pred‖, ‖φ_true−φ_pred‖.")
@@ -357,7 +357,7 @@ def print_fiver_report(report: FiverScanReport) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Review UniGradICON *_fiver.npz: integrity and ‖φ‖ / error mean stats.",
+        description="Review UniGradICON synth *_fiver.npz: integrity and ‖φ‖ / error mean stats.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -366,7 +366,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--input-dir",
         type=Path,
         dest="data_dir",
-        default=Path("./data/IXI_2D_unigrad_fiver/"),
+        default=Path("./data/IXI_2D_unigrad_synth_fiver/"),
         help="Root with Train/Val/Test/Atlas subfolders of *_fiver.npz",
     )
     parser.add_argument(
@@ -389,7 +389,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--corrupt-log",
         type=Path,
-        default=Path("unigrad_fiver_corrupt_list_ixi_2d.txt"),
+        default=Path("unigrad_synth_fiver_corrupt_list_ixi_2d.txt"),
         help=(
             "If the scan finds corrupt/invalid .npz files, write path and errors here "
             "(tab-separated). Not created when everything passes."
