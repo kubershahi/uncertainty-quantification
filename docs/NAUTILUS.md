@@ -45,11 +45,19 @@ If the pod stays **Pending**, loosen GPU names in `pod-dev.yaml` or remove the
 
 ## 3. Inside the pod — one-time setup
 
+The dev image **`pytorch/pytorch:…-devel`** usually does **not** ship with `git`. Install it once in the pod (Debian/apt), then clone onto the PVC so the repo survives pod restarts.
+
 ```bash
-# Clone repo (HTTPS or copy SSH key into pod first)
+# Install git (~30s; harmless if apt already stale)
+sudo apt-get update && sudo apt-get install -y git
+# dev container often runs as root — if sudo is missing and you are root, omit sudo:
+#   apt-get update && apt-get install -y git
+
+# Clone repo (HTTPS; use SSH URL + keys only if you prefer)
+ORG=your-org   # or USER for a personal fork
 mkdir -p /files/repo
 cd /files/repo
-git clone https://github.com/<your-org>/uncertainty-quantification.git
+git clone "https://github.com/${ORG}/uncertainty-quantification.git"
 cd uncertainty-quantification
 
 # Venv on PVC (~15–20 min, only once)
@@ -58,6 +66,15 @@ bash deploy/nautilus/scripts/setup-venv.sh
 # GPU check
 source /files/venvs/unc/bin/activate
 python datahub/resource_checks/diagnose_torch_gpu.py
+```
+
+**No apt / git install blocked?** Unpack from GitHub’s zip on the PVC (no git needed):
+
+```bash
+mkdir -p /files/repo && cd /files/repo
+curl -fsSL -o repo.zip https://github.com/your-org/uncertainty-quantification/archive/refs/heads/main.zip
+unzip -q repo.zip && mv uncertainty-quantification-main uncertainty-quantification
+cd uncertainty-quantification   # unzip may need apt install unzip curl
 ```
 
 ## 4. Transfer IXI_2D onto PVC
@@ -113,6 +130,32 @@ The script skips slices whose `.npz` already exists (resumable). Use
 ```bash
 kubectl delete pod unc-dev          # dev pod only; PVC kept
 kubectl delete job unc-unigrad-io-data
+```
+
+## Troubleshooting
+
+### `PODs without controllers are limited to 16 cores and 32 GB of RAM`
+
+NRP blocks **bare Pods** (created with `kind: Pod` and no parent) above **16 CPU** and **32 Gi RAM** (including memory-backed volumes like `/dev/shm`).
+
+- **Controller** = a Kubernetes object that owns Pods: `Deployment`, `StatefulSet`, `Job`, `CronJob`, etc. Your `unc-dev` manifest is a standalone Pod, so the stricter cap applies.
+- **Fix (dev pod):** `pod-dev.yaml` is sized under the cap (8 CPU, 24 Gi container RAM + 4 Gi shm). Re-apply after pulling the latest manifest.
+- **Need more RAM for a long run?** Use `job-unigrad-io-data.yaml` (`kind: Job`) or a `Deployment` with 1 replica instead of a bare Pod.
+
+### `git: command not found` inside `unc-dev`
+
+The PyTorch CUDA image drops `git` to stay small. Fix: `sudo apt-get update && sudo apt-get install -y git` inside the pod, then clone. Or fetch the repo ZIP with `curl`/`wget` over HTTPS (see step 3). **PVC note:** reinstalling git is only needed inside a fresh container — your clone under `/files/repo/` persists.
+
+### `kubectl cp` tarball instead
+
+You can tar the repo locally and skip git on the cluster:
+
+```bash
+# laptop: from repo root, excluding huge dirs
+tar czf uq-repo.tar.gz --exclude=.git --exclude=data --exclude=venv .
+kubectl cp uq-repo.tar.gz unc-dev:/files/repo/uq-repo.tar.gz
+# pod:
+mkdir -p /files/repo/uncertainty-quantification && cd /files/repo/uncertainty-quantification && tar xzf ../uq-repo.tar.gz
 ```
 
 ## Quick reference
