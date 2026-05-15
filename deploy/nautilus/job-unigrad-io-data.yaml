@@ -1,0 +1,72 @@
+# Batch job: full create_unigrad_io_data.py run (resumable via existing .npz skip).
+#   kubectl apply -f deploy/nautilus/job-unigrad-io-data.yaml
+#   kubectl logs -f job/unc-unigrad-io-data
+#
+# Re-run after interruption: same command; completed slices are skipped.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: unc-unigrad-io-data
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: unc-unigrad-io-data
+    spec:
+      restartPolicy: OnFailure
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - NVIDIA-RTX-A6000
+                      - NVIDIA-A40
+                      - NVIDIA-L40
+                      - NVIDIA-L40S
+                      - NVIDIA-GeForce-RTX-3090
+                      - Tesla-V100-SXM2-32GB
+                      - Tesla-V100-PCIE-32GB
+      containers:
+        - name: main
+          image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              source /files/venvs/unc/bin/activate
+              cd /files/repo/uncertainty-quantification
+              export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+              python datahub/unigrad-io/create_unigrad_io_data.py \
+                --ixi-root /files/datasets/IXI_2D \
+                --output-path /files/outputs/IXI_2D_unigrad_io
+          resources:
+            requests:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "12"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+              ephemeral-storage: 50Gi
+          volumeMounts:
+            - name: files
+              mountPath: /files
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: files
+          persistentVolumeClaim:
+            claimName: unc-files
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
