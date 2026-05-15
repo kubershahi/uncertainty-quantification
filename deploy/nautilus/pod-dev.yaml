@@ -6,6 +6,9 @@
 # Apply in YOUR namespace (not committed to git):
 #   kubectl config set-context --current --namespace=<your-namespace>
 #
+# NRP admission: bare Pods (no controller) are capped at 16 CPU and 32 Gi RAM total.
+# Keep container memory limit + /dev/shm emptyDir under 32 Gi (see resources below).
+#
 # A100/H100 often have per-namespace quota 0 on NRP; this manifest uses generic
 # nvidia.com/gpu with affinity for A40 / A6000 / 3090 / V100.
 apiVersion: v1
@@ -41,12 +44,12 @@ spec:
       command: ["sleep", "infinity"]
       resources:
         requests:
-          cpu: "8"
-          memory: 32Gi
+          cpu: "4"
+          memory: 16Gi
           nvidia.com/gpu: "1"
         limits:
-          cpu: "12"
-          memory: 64Gi
+          cpu: "8"
+          memory: 24Gi
           nvidia.com/gpu: "1"
           ephemeral-storage: 50Gi
       volumeMounts:
@@ -61,4 +64,4 @@ spec:
     - name: shm
       emptyDir:
         medium: Memory
-        sizeLimit: 16Gi
+        sizeLimit: 4Gi

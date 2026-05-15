@@ -1,0 +1,2 @@
+# Shell snippets must use LF — CRLF breaks Linux/bash (set: pipefail errors).
+*.sh text eol=lf
