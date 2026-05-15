@@ -22,6 +22,7 @@ Implementation targets **TransMorph-style preprocessed IXI** axial slices. Phase
 ```text
 .
 ├── datahub/              # Pipeline: synth triplets → UniGradICON fivers → train / eval / viz
+├── deploy/nautilus/      # Kubernetes manifests (PVC /files, venv /files/venvs/unc) for NRP
 ├── reports/              # PDF + LaTeX intro snippet (CSE293_introduction.tex) for the write-up
 ├── assets/               # Figures for the report; example run under assets/runs/error_unet_run1/
 ├── data/                 # Local data outputs (gitignored except .gitkeep; use Drive or regenerate)

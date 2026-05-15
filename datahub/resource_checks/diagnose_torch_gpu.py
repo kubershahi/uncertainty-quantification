@@ -3,11 +3,11 @@
 Print DataHub GPU + PyTorch CUDA info and run a small CUDA op (same family as UniGradICON).
 
 Run inside your venv after setup:
-  source /tmp/unigrad/bin/activate   # or your venv path
+  source ~/venvs/unc/bin/activate   # or your venv path
   python datahub/diagnose_torch_gpu.py
 
 If the probe fails with "no kernel image", reinstall PyTorch with a CUDA wheel that matches
-the driver (see setup_unigrad.sh and https://pytorch.org/get-started/locally/).
+the driver (see datahub/setup_unc.sh and https://pytorch.org/get-started/locally/).
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def main() -> None:
         print(f"capability (major, minor) = {torch.cuda.get_device_capability(0)}")
 
     if not torch.cuda.is_available():
-        print("\nCUDA not available to PyTorch — install a CUDA build of torch (see setup_unigrad.sh).")
+        print("\nCUDA not available to PyTorch — install a CUDA build of torch (see datahub/setup_unc.sh).")
         sys.exit(1)
 
     try:
@@ -63,7 +63,7 @@ def main() -> None:
         print(
             "Typical fix: reinstall PyTorch from https://download.pytorch.org/whl/ "
             "with a cu* tag matching your driver (e.g. cu124, cu121). "
-            "See datahub/setup_unigrad.sh variable CUDA_WHEEL."
+            "See datahub/setup_unc.sh variable CUDA_WHEEL."
         )
         sys.exit(1)
 

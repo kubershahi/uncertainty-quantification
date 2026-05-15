@@ -43,3 +43,11 @@ models/**
 
 # Logs
 *.log
+
+# Kubernetes / cluster (never commit credentials)
+kubeconfig
+*.kubeconfig
+**/kube/config
+
+# Local Nautilus overrides (namespace, personal limits)
+deploy/nautilus/local/
