@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CUDA PyTorch + UniGradICON into ${VENV_DIR:-$HOME/venvs/unc}. Example Nautilus: VENV_DIR=/files/venvs/unc bash experiments/setup_unc.sh
+# CUDA PyTorch + UniGradICON into ${VENV_DIR:-$HOME/venvs/unc}. Example Nautilus: VENV_DIR=/files/venvs/unc bash scripts/setup_unc.sh
 # Vars: CUDA_WHEEL=cu124 (default), FORCE=1 to recreate venv.
 
 set -euo pipefail
@@ -29,8 +29,8 @@ pip install --upgrade pip
 echo "Installing PyTorch + torchvision (GPU) from pytorch.org..."
 pip install --no-cache-dir torch torchvision --index-url "https://download.pytorch.org/whl/${CUDA_WHEEL}"
 
-echo "Installing UniGradICON + ipykernel..."
-pip install --no-cache-dir unigradicon ipykernel torchio
+echo "Installing UniGradICON, JupyterLab, ipykernel, …"
+pip install --no-cache-dir unigradicon ipykernel torchio jupyterlab
 
 echo "Registering Jupyter kernel..."
 python -m ipykernel install --user --name=unc --display-name "unc"

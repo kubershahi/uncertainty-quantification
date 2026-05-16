@@ -47,6 +47,7 @@ import os
 import pickle
 import random
 import sys
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 
@@ -96,6 +97,15 @@ CHECKPOINTS_DEFAULT_2D = "0,50,100,150,200,250"
 CHECKPOINTS_DEFAULT_3D = "0,50,100,200"
 
 
+def _tqdm_common_kwargs() -> dict:
+    """Shared tqdm settings: work in non-TTY (e.g. ``kubectl logs``); set ``TQDM_DISABLE=1`` to hide."""
+    return {
+        "file": sys.stderr,
+        "dynamic_ncols": True,
+        "disable": os.environ.get("TQDM_DISABLE", "").strip().lower() in ("1", "true", "yes"),
+    }
+
+
 def default_ixi_root(mode: str) -> Path:
     """Prefer PVC paths when mounted; else small repo-relative roots."""
     if mode == "3d-pkl":
@@ -110,7 +120,13 @@ def default_save_path() -> Path:
 
 def pkload(path: Path):
     """Load a pickle file (IXI volumes as ``(image, label)`` tuples)."""
-    with path.open("rb") as f:
+    # Pickled ndarrays from older NumPy can reconstruct dtypes with ``align=0``;
+    # NumPy 2.4+ deprecates that and emits a warning during unpickling.
+    with path.open("rb") as f, warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*align should be passed as Python or NumPy boolean.*",
+        )
         return pickle.load(f)
 
 
@@ -377,11 +393,13 @@ def load_ixi_image_volume_from_pkl(pkl_path: Path) -> np.ndarray:
     """Load ``image`` array from an IXI-style pickle ``(image, label)`` tuple."""
     payload = pkload(pkl_path)
     if isinstance(payload, tuple) and len(payload) >= 1:
-        img = np.asarray(payload[0], dtype=np.float32)
+        raw: object = payload[0]
     elif isinstance(payload, np.ndarray):
-        img = payload.astype(np.float32)
+        raw = payload
     else:
         raise ValueError(f"Unexpected pickle structure in {pkl_path}: {type(payload)}")
+    # New float32 allocation so dtype metadata from the pickle cannot leak downstream.
+    img = np.array(raw, dtype=np.float32, copy=True)
     if img.ndim != 3:
         raise ValueError(f"Expected 3D volume in {pkl_path}, got shape {img.shape}")
     return img
@@ -486,7 +504,7 @@ def run_io_with_snapshots(
     net.train()
     cur = 0
     total_iters = pending[-1]
-    pbar = tqdm(total=total_iters, desc="IO iters", dynamic_ncols=True)
+    pbar = tqdm(total=total_iters, desc="IO iters", **_tqdm_common_kwargs())
     last_loss = float("nan")
     try:
         for target_iter in pending:
@@ -1130,8 +1148,13 @@ def run_sweep_volume_pkl(
     net.eval()
 
     print(f"Sweeping IO iterations: {checkpoints}")
-    for i, subj_path in enumerate(subj_paths, start=1):
-        print(f"\n=== [{i}/{len(subj_paths)}] Subject volume: {subj_path.name} ===")
+    for subj_path in tqdm(
+        subj_paths,
+        desc="3d-pkl subjects",
+        unit="vol",
+        **_tqdm_common_kwargs(),
+    ):
+        tqdm.write(f"\n=== Subject volume: {subj_path.name} ===")
         _sweep_one_subject_volume_pkl(
             net=net,
             device=device,
