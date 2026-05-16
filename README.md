@@ -21,14 +21,14 @@ Implementation targets **TransMorph-style preprocessed IXI** axial slices. Phase
 
 ```text
 .
-├── experiments/              # Pipeline: synth triplets → UniGradICON fivers → train / eval / viz
-├── deploy/nautilus/      # Kubernetes manifests (PVC /files, venv /files/venvs/unc) for NRP
-├── reports/              # PDF + LaTeX intro snippet (CSE293_introduction.tex) for the write-up
-├── assets/               # Figures for the report; example run under assets/runs/error_unet_run1/
-├── data/                 # Local data outputs (gitignored except .gitkeep; use Drive or regenerate)
-├── scripts/              # IXI 2D slicing, PKL/NIfTI helpers, registration demos
-├── docs/                 # Legacy / helper documentation
-├── models/               # Optional local weight checkpoints (gitignored)
+├── experiments/           # Pipeline: synth → UniGradICON → train / eval / viz
+├── deploy/nautilus/       # NRP Kubernetes (PVC, GPU pods, Job)
+├── reports/               # PDF + LaTeX intro (CSE293_introduction.tex)
+├── assets/                # Report figures; example run under assets/runs/error_unet_run1/
+├── data/                  # Local tensors (gitignored; use Drive or regenerate)
+├── scripts/               # IXI 2D slicing, PKL/NIfTI helpers
+├── docs/                  # See docs/NAUTILUS.md (cluster runbook), GPU_MEMORY_OPTIMIZATIONS.md, unigrad-io-experiment.md
+├── models/                # Optional local checkpoints (gitignored)
 ├── requirements.txt
 └── README.md
 ```
@@ -153,7 +153,7 @@ The repo includes an **example** training/eval snapshot under `assets/runs/error
 - **Units (internals).** TorchIO elastic uses mm only to sample the B-spline; saved `phi` is still grid-based **pixels**. UniGradICON outputs are **normalized** until `create_unigrad_synth_data.py` rescales to **pixels**. Phase III `--phi-scale` rescales `phi_pred` **inputs** to the U-Net; fiver tensors remain in pixels.
 - Run commands from the **repository root** so relative paths resolve.
 - Large artifacts are not committed (`data/`, `models/`, etc.); use the [Drive folder](https://drive.google.com/drive/folders/1VYUxjbYqrMLb_KWqfJepUZN3i0jNYdU7?usp=sharing) or regenerate locally.
-- Legacy helpers in `scripts/` and `docs/` may not track every `experiments/` default.
+- `scripts/` and older docs may lag `experiments/` defaults; prefer argparse `--help` when in doubt.
 
 ## License
 

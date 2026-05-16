@@ -1,11 +1,6 @@
 # GPU memory optimizations for UniGradICON instance optimization
 
-Notes on the memory fixes that took `experiments/unigrad-io/create_unigrad_io_data.py`
-from CUDA OOM on an 11 GiB GPU to running cleanly at full utilization, while
-keeping the official UniGradICON IO protocol (Adam, `lr=2e-5`, LNCC, 50 iters).
-
-This doc doubles as an interview-style reference for "how do you reduce GPU
-memory in PyTorch training/inference without changing the algorithm?"
+Notes for keeping **`experiments/unigrad-io/create_unigrad_io_data.py`** IO inside VRAM on ~11 GiB GPUs without changing the UniGradICON protocol (Adam `lr=2e-5`, LNCC, 50 steps).
 
 ## TL;DR
 
@@ -21,7 +16,7 @@ memory in PyTorch training/inference without changing the algorithm?"
 Implementation lives in
 [`experiments/unigrad-io/create_unigrad_io_data.py`](../experiments/unigrad-io/create_unigrad_io_data.py),
 specifically `run_io_then_extract_phi_px` and the inner loop of
-`run_atlas_fiver_generation`.
+`run_atlas_io_generation`.
 
 ## Why GPU memory mattered here
 

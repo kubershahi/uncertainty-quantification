@@ -33,6 +33,7 @@ env/
 # Large project directories (keep folder structure only)
 data/**
 models/**
+datasets/**
 !data/.gitkeep
 !models/.gitkeep
 

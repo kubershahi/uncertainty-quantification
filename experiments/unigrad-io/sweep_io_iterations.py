@@ -23,21 +23,15 @@ Outputs per subject (saved next to ``--save-path``)
   - ``<stem>_<subject>_curves.png``  2-panel curves: quality + field health.
   - ``<stem>_<subject>_metrics.csv`` per-iter metrics.
 
-Example
--------
-  python sweep_io_iterations.py \\
-      --split Train --num-subjects 3 \\
+Example (paths from repo root):
+  python experiments/unigrad-io/sweep_io_iterations.py --split Train --num-subjects 3 \\
       --save-path ./assets/images/unigrad-io/sweep_io.png --no-show
-
-  # Full atlas/subject volumes from raw IXI pickles (Train/*.pkl, atlas.pkl)
-  python sweep_io_iterations.py --mode 3d-pkl \\
-      --ixi-root ./data/raw/IXI \\
-      --atlas-pkl ./data/raw/IXI/atlas.pkl \\
-      --split Train --num-subjects 3 \\
-      --save-path ./assets/images/unigrad-io/sweep_io_3d.png \\
+  python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl \\
+      --ixi-root ./data/raw/IXI --atlas-pkl ./data/raw/IXI/atlas.pkl \\
+      --split Train --num-subjects 3 --save-path ./assets/images/unigrad-io/sweep_io_3d.png \\
       --viz-axial-index 111 --no-show
 
-  # (uses default --checkpoints 0,50,100,150,200,250 and --seed 42)
+Defaults: ``--checkpoints 0,50,...,250``, ``--seed 42``.
 """
 
 from __future__ import annotations

@@ -1,9 +1,4 @@
-# Persistent storage for repo, venv, datasets, and experiment outputs.
-# Apply once: kubectl apply -f deploy/nautilus/pvc.yaml
-#
-# Verify storage class for your namespace:
-#   kubectl get storageclass
-# If rook-cephfs is unavailable, change storageClassName below.
+# RWX PVC for /files (rook-cephfs common on NRP). kubectl apply -f deploy/nautilus/pvc.yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
