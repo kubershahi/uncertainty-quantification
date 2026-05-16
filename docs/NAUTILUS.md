@@ -10,12 +10,14 @@ Runbook for **PVC-mounted GPU workloads**: repo + venv + datasets under `/files`
 
 ```text
 /files/
-  repo/uncertainty-quantification/
+  repo/uncertainty-quantification/     # git clone
+    datasets/IXI_2D/                   # input slices
+    datasets/IXI/                      # 3D *.pkl volumes
+    datasets/IXI_2D_unigrad_io/        # generated .npz (large; gitignored)
+    assets/images/                     # sweep PNGs, viz figures
+    assets/runs/                       # training checkpoints, curves, metrics
+    assets/report/                     # report figures
   venvs/unc/
-  datasets/IXI_2D/          # 2D slices (Train/Val/Test/Atlas)
-  datasets/IXI/             # optional raw *.pkl volumes for 3D sweep
-  outputs/IXI_2D_unigrad_io/
-  runs/
 ```
 
 ---
@@ -118,10 +120,10 @@ python experiments/resource_checks/diagnose_torch_gpu.py
 From laptop — **create parent dirs first** (`kubectl cp` unpack needs them):
 
 ```bash
-kubectl exec unc-dev -- mkdir -p /files/datasets
-kubectl cp ixi_2d.tar.gz unc-dev:/files/datasets/ixi_2d.tar.gz
+kubectl exec unc-dev -- mkdir -p /files/repo/uncertainty-quantification/datasets
+kubectl cp ixi_2d.tar.gz unc-dev:/files/repo/uncertainty-quantification/datasets/ixi_2d.tar.gz
 kubectl exec unc-dev -- bash -c \
-  'cd /files/datasets && tar xzf ixi_2d.tar.gz && rm -f ixi_2d.tar.gz'
+  'cd /files/repo/uncertainty-quantification/datasets && tar xzf ixi_2d.tar.gz && rm -f ixi_2d.tar.gz'
 ```
 
 ---
@@ -134,7 +136,7 @@ cd /files/repo/uncertainty-quantification
 bash deploy/nautilus/scripts/run-io-data-smoke.sh
 ```
 
-Paths come from `deploy/nautilus/scripts/env.sh` (`IXI_ROOT`, `UNIGRAD_IO_OUT`, …).
+Paths come from `deploy/nautilus/scripts/env.sh` (`IXI_2D_ROOT`, `UNIGRAD_IO_OUT`, `ASSETS_IMAGES`, `ASSETS_RUNS`, …). Sweep figures land under **`assets/images/`** in the repo so you can **`git pull`** on your laptop instead of `kubectl cp`.
 
 ---
 
@@ -147,8 +149,8 @@ tmux new -s io
 source /files/venvs/unc/bin/activate
 cd /files/repo/uncertainty-quantification
 python experiments/unigrad-io/create_unigrad_io_data.py \
-  --ixi-root /files/datasets/IXI_2D \
-  --output-path /files/outputs/IXI_2D_unigrad_io
+  --ixi-root /files/repo/uncertainty-quantification/datasets/IXI_2D \
+  --output-path /files/repo/uncertainty-quantification/datasets/IXI_2D_unigrad_io
 ```
 
 **Job:**
@@ -164,16 +166,17 @@ Runs are **resumable** (existing `.npz` skipped unless `--overwrite`).
 
 ## 7. Sync laptop ↔ cluster (optional)
 
-If you use **Jupyter Lab** on the cluster, you usually **edit on `/files`** and only pull/push when you want backup or review — no constant loop.
+If you use **Jupyter Lab** on the cluster, you usually **edit on `/files/repo/uncertainty-quantification`** and commit from there (or sync with git).
 
-When you still use a local checkout:
+**Figures and run artifacts** live under **`assets/`** in the repo. On your laptop after work on Nautilus:
 
 ```bash
-git push
-kubectl exec unc-dev -- bash -lc 'cd /files/repo/uncertainty-quantification && git pull --ff-only'
+# on cluster (inside repo): git add assets/ && git commit && git push
+# on laptop:
+git pull
 ```
 
-(Uncommitted edits: stream a tarball or use `kubectl cp` for specific files.)
+Large **`.npz`** IO datasets stay under **`datasets/IXI_2D_unigrad_io/`** in the repo (gitignored by `datasets/**`) — copy separately if needed, not via git.
 
 ---
 
@@ -197,7 +200,7 @@ PVC persists unless deleted separately.
 | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Bare Pod admission (`…limited to 16 cores and 32 GB`) | Use `deployment-heavy.yaml` or `job-unigrad-io-data.yaml`, or shrink `pod-dev.yaml` resources + shm.                                                                                     |
 | Pod **Pending** (GPU)                                 | Check node labels: `kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\t}{.metadata.labels.nvidia\.com/gpu\.product}{\n}{end}'` — add matching strings to YAML `values:`. |
-| `kubectl cp` / tar errors                             | Ensure destination dirs exist (`mkdir -p /files/datasets`).                                                                                                                              |
+| `kubectl cp` / tar errors                             | Ensure destination dirs exist (`mkdir -p …/datasets`).                                                                                                                                   |
 | `git` missing in container                            | Re-apply `pod-dev` / `deployment-heavy` / `deployment-jupyter` (auto-install on start), or `bash deploy/nautilus/scripts/ensure-system-deps.sh`.                                                                 |
 | `set: pipefail` / script errors                       | Shell scripts must use **LF** line endings (see `.gitattributes`).                                                                                                                       |
 
@@ -209,8 +212,8 @@ PVC persists unless deleted separately.
 | --------------------- | ------------------------------------------------------------------------------------------ |
 | Activate venv         | `source /files/venvs/unc/bin/activate`                                                     |
 | Env exports           | `source deploy/nautilus/scripts/env.sh`                                                    |
-| IO sweep (2D)         | `python experiments/unigrad-io/sweep_io_iterations.py --ixi-root /files/datasets/IXI_2D …` |
-| IO sweep (3D pickles) | `--mode 3d-pkl --ixi-root /files/datasets/IXI --atlas-pkl /files/datasets/IXI/atlas.pkl …` |
+| IO sweep (2D)         | `source deploy/nautilus/scripts/env.sh` then sweep (defaults use `$IXI_2D_ROOT`) |
+| IO sweep (3D pickles) | `--mode 3d-pkl` (defaults use `$IXI_ROOT`, `$IXI_ROOT/atlas.pkl`) |
 | Train U-Net           | `python experiments/train_error_map_unet.py`                                               |
 
 ---

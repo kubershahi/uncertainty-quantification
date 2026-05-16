@@ -366,7 +366,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--out-dir", type=Path, default=Path("./runs/error_map_unet"))
+    p.add_argument("--out-dir", type=Path, default=Path("./assets/runs/error_map_unet"))
     p.add_argument("--no-amp", action="store_true", help="Disable mixed precision even on CUDA.")
     p.add_argument(
         "--smooth-weight",

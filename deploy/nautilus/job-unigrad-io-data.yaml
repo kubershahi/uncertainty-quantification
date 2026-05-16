@@ -56,8 +56,8 @@ spec:
               cd /files/repo/uncertainty-quantification
               export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
               python experiments/unigrad-io/create_unigrad_io_data.py \
-                --ixi-root /files/datasets/IXI_2D \
-                --output-path /files/outputs/IXI_2D_unigrad_io
+                --ixi-root /files/repo/uncertainty-quantification/datasets/IXI_2D \
+                --output-path /files/repo/uncertainty-quantification/datasets/IXI_2D_unigrad_io
           resources:
             requests:
               cpu: "8"

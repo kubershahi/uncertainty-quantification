@@ -25,15 +25,15 @@ Outputs per subject (saved next to ``--save-path``)
 
 Example (Nautilus PVC, ``/files`` mounted):
   python experiments/unigrad-io/sweep_io_iterations.py --split Train --num-subjects 3 \\
-      --save-path /files/outputs/images/unigrad-io/sweep_io.png --no-show
+      --save-path /files/repo/uncertainty-quantification/assets/images/unigrad-io/sweep_io.png --no-show
   python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl \\
-      --ixi-root /files/datasets/IXI --atlas-pkl /files/datasets/IXI/atlas.pkl \\
+      --ixi-root /files/repo/uncertainty-quantification/datasets/IXI \\
+      --atlas-pkl /files/repo/uncertainty-quantification/datasets/IXI/atlas.pkl \\
       --split Train --num-subjects 3 \\
-      --save-path /files/outputs/images/unigrad-io/sweep_io_3d.png --no-show
+      --save-path /files/repo/uncertainty-quantification/assets/images/unigrad-io/3d/sweep_io.png --no-show
 
 Omit ``--ixi-root`` / ``--save-path`` to use defaults (see argparse help): on NRP,
-3d-pkl data is ``/files/datasets/IXI`` (no ``raw/`` segment); figures go under
-``/files/outputs/images/unigrad-io/``.
+inputs under ``<repo>/datasets/``; sweep figures under ``<repo>/assets/images/unigrad-io/``.
 
 Defaults: ``--checkpoints`` is ``0,50,100,150,200,250`` for 2d and ``0,50,100,200`` for
 ``3d-pkl`` (four IO snapshots to limit 3d cost). ``--seed 42``.
@@ -85,9 +85,11 @@ from visualize_unigrad_io_data import overlay_deformation_grid  # noqa: E402
 
 # Nautilus ``/files`` PVC layout (see ``deploy/nautilus/scripts/env.sh``).
 _FILES_ROOT = Path("/files")
-NRP_IXI_PKL_ROOT = _FILES_ROOT / "datasets" / "IXI"
-NRP_IXI_2D_ROOT = _FILES_ROOT / "datasets" / "IXI_2D"
-NRP_SWEEP_SAVE = _FILES_ROOT / "outputs" / "images" / "unigrad-io" / "sweep_io.png"
+NRP_REPO = _FILES_ROOT / "repo" / "uncertainty-quantification"
+NRP_DATASETS = NRP_REPO / "datasets"
+NRP_IXI_PKL_ROOT = NRP_DATASETS / "IXI"
+NRP_IXI_2D_ROOT = NRP_DATASETS / "IXI_2D"
+NRP_SWEEP_SAVE = NRP_REPO / "assets" / "images" / "unigrad-io" / "sweep_io.png"
 LOCAL_IXI_PKL = Path("./data/IXI/")
 LOCAL_IXI_2D = Path("./data/IXI_2D/")
 LOCAL_SWEEP_SAVE = Path("./assets/images/unigrad-io/sweep_io.png")
@@ -114,8 +116,10 @@ def default_ixi_root(mode: str) -> Path:
 
 
 def default_save_path() -> Path:
-    """Sweep figure prefix: NRP ``…/outputs/images/unigrad-io/`` when ``/files`` exists."""
-    return NRP_SWEEP_SAVE if _FILES_ROOT.is_dir() else LOCAL_SWEEP_SAVE
+    """Sweep figure prefix: ``<repo>/assets/images/unigrad-io/`` on NRP when repo is on PVC."""
+    if NRP_REPO.is_dir():
+        return NRP_SWEEP_SAVE
+    return LOCAL_SWEEP_SAVE
 
 
 def pkload(path: Path):
@@ -1259,7 +1263,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["2d", "3d-pkl"],
         help="2d: IXI_2D .npy slices + atlas_slice_111 (default). "
         "3d-pkl: IXI Train/*.pkl volumes + atlas.pkl (default root on NRP: "
-        "/files/datasets/IXI).",
+        "<repo>/datasets/IXI).",
     )
     p.add_argument(
         "--ixi-root",
@@ -1267,8 +1271,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         metavar="DIR",
         help="Data root: 2d expects Train/Val/Test/Atlas .npy; 3d-pkl expects "
-        "Train|Val|Test/*.pkl plus atlas.pkl (default: /files/datasets/IXI_2D or "
-        "./data/IXI_2D for 2d; /files/datasets/IXI or ./data/IXI for 3d-pkl when "
+        "Train|Val|Test/*.pkl plus atlas.pkl (default: <repo>/datasets/IXI_2D or "
+        "./data/IXI_2D for 2d; <repo>/datasets/IXI or ./data/IXI for 3d-pkl when "
         "--ixi-root is omitted).",
     )
     p.add_argument(
@@ -1367,7 +1371,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Base path for outputs (parent dirs created). For each swept subject "
         "S, three files are written: <stem>_<S>_images<ext>, <stem>_<S>_curves<ext>, "
         "and <stem>_<S>_metrics.csv. Default on NRP: "
-        "/files/outputs/images/unigrad-io/sweep_io.png. Example with "
+        "/files/repo/uncertainty-quantification/assets/images/unigrad-io/sweep_io.png. Example with "
         "'--save-path ./out/sweep_io.png' and subject 'IXI002_T1_slice_111.npy' -> "
         "sweep_io_IXI002_T1_slice_111_images.png (and matching _curves / _metrics).",
     )
