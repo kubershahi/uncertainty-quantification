@@ -34,7 +34,7 @@ env/
 data/**
 models/**
 datasets/**
-!data/.gitkeep
+!datasets/.gitkeep
 !models/.gitkeep
 
 # NIfTI / pickle outputs
