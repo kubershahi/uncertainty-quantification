@@ -52,6 +52,16 @@ from pathlib import Path
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+# Matplotlib builds a font cache on first import; the default config dir on NRP PVCs
+# (/files, $HOME) is slow — use local tmpfs so the job starts quickly.
+os.environ.setdefault("MPLBACKEND", "Agg")
+_mpl_cfg = os.path.join(os.environ.get("TMPDIR", "/tmp"), "matplotlib-user")
+os.makedirs(_mpl_cfg, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", _mpl_cfg)
+
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -113,7 +123,7 @@ def numpy_volume_hw_d_to_torch5d(vol_hw_d: np.ndarray) -> torch.Tensor:
 def preprocess_volume_for_unigrad(vol_5d: torch.Tensor) -> torch.Tensor:
     """Normalize full 3D volume and resize to ``175³`` (real anatomy, not pseudo-slices)."""
     im_min = torch.min(vol_5d)
-    im_max = torch.quantile(vol_5d.view(-1), 0.99)
+    im_max = torch.quantile(vol_5d.reshape(-1), 0.99)
     denom = torch.clamp(im_max - im_min, min=1e-5)
     img = torch.clip(vol_5d, im_min, im_max)
     img = (img - im_min) / denom
