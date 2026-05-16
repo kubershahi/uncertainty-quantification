@@ -93,7 +93,7 @@ LOCAL_SWEEP_SAVE = Path("./assets/images/unigrad-io/sweep_io.png")
 
 # IO iteration snapshots (UniGradICON default IO length is 50; full 2d sweep adds dense samples).
 CHECKPOINTS_DEFAULT_2D = "0,50,100,150,200,250"
-CHECKPOINTS_DEFAULT_3D = "0,50,100,200"
+CHECKPOINTS_DEFAULT_3D = "0,50,100,150,200,250,300"
 
 
 def _tqdm_common_kwargs() -> dict:

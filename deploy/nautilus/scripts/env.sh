@@ -2,6 +2,7 @@
 export FILES_ROOT=/files
 export REPO_ROOT=/files/repo/uncertainty-quantification
 export VENV_DIR=/files/venvs/unc
+export HOME=/files/home/root
 
 # Data under the repo clone on PVC (gitignored via datasets/** in .gitignore)
 export DATASETS_ROOT="${REPO_ROOT}/datasets"
