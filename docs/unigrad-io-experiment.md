@@ -1,6 +1,6 @@
 # UniGradICON IO Sweep — experiment notes
 
-How to read the outputs of `datahub/unigrad-io/sweep_io_iterations.py`, the
+How to read the outputs of `experiments/unigrad-io/sweep_io_iterations.py`, the
 config it runs under, and the recipe for picking a non-overfitting IO
 iteration count for the downstream `error_map` U-Net.
 
@@ -102,7 +102,7 @@ Anti-patterns to watch for:
 Example: 5 random Train subjects, deterministic via `--seed`:
 
 ```bash
-python datahub/unigrad-io/sweep_io_iterations.py \
+python experiments/unigrad-io/sweep_io_iterations.py \
     --split Train --num-subjects 5 \
     --save-path ./assets/images/unigrad-io/sweep_io.png --no-show
 ```
@@ -116,15 +116,15 @@ subject ID inserted (one PNG pair + one CSV per subject).
 Explicit indices instead of random sampling:
 
 ```bash
-python datahub/unigrad-io/sweep_io_iterations.py \
+python experiments/unigrad-io/sweep_io_iterations.py \
     --split Train --subject-indices 0,17,42,93,128 \
     --save-path ./assets/images/unigrad-io/sweep_io.png --no-show
 ```
 
 ## Related files
 
-- `datahub/unigrad-io/sweep_io_iterations.py` — this experiment.
-- `datahub/unigrad-io/create_unigrad_io_data.py` — full-dataset `error_map` generator that picks one IO iteration count based on what the sweep told you.
-- `datahub/unigrad-io/visualize_unigrad_io_data.py` — visualiser for the resulting NPZs (`source / target / phi_pred / warped_pred / phi_predio / warped_predio / error_map`).
+- `experiments/unigrad-io/sweep_io_iterations.py` — this experiment.
+- `experiments/unigrad-io/create_unigrad_io_data.py` — full-dataset `error_map` generator that picks one IO iteration count based on what the sweep told you.
+- `experiments/unigrad-io/visualize_unigrad_io_data.py` — visualiser for the resulting NPZs (`source / target / phi_pred / warped_pred / phi_predio / warped_predio / error_map`).
 - `docs/GPU_MEMORY_OPTIMIZATIONS.md` — notes on the memory hygiene used in IO.
 - `reports/uniGradICON.pdf` — the paper, Eq. (1) and §2.3 are the relevant bits.

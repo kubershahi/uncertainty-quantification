@@ -10,7 +10,7 @@ export VENV_DIR=/files/venvs/unc
 export CUDA_WHEEL="${CUDA_WHEEL:-cu124}"
 export FORCE="${FORCE:-0}"
 
-bash "${REPO_ROOT}/datahub/setup_unc.sh"
+bash "${REPO_ROOT}/experiments/setup_unc.sh"
 
 echo ""
 echo "Nautilus venv ready at ${VENV_DIR}"

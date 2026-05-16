@@ -4,7 +4,7 @@ This repository supports **ongoing work** on **uncertainty quantification for me
 
 **First step (this codebase and report):** we **study the relationship between registration error and signals we can measure or predict**. Concretely, we use **synthetic 2D slices** with known deformations, run a strong foundation registrator (**UniGradICON**), build a **dense registration error map** from predicted vs.\ true motion, and train a **U-Net** to regress that map from images plus the predicted field. That does not solve full clinical UQ by itself; it isolates how error is structured and whether an observable-driven regressor can track it when supervision is available. That is **essential groundwork** before harder real-world uncertainty models.
 
-Implementation targets **TransMorph-style preprocessed IXI** axial slices. Phase I emits ground-truth triplets; Phase II produces **fiver** archives with `phi_pred` and scalar error; Phase III trains and evaluates the regressor. Code lives in `datahub/`; figures and an example run are under `assets/`. Large tensors (`data/`, `models/`) stay local or on Drive (see below). The PDF’s introduction should state the same bigger-picture framing: see **`reports/CSE293_introduction.tex`** to sync LaTeX with the compiled report.
+Implementation targets **TransMorph-style preprocessed IXI** axial slices. Phase I emits ground-truth triplets; Phase II produces **fiver** archives with `phi_pred` and scalar error; Phase III trains and evaluates the regressor. Code lives in `experiments/`; figures and an example run are under `assets/`. Large tensors (`data/`, `models/`) stay local or on Drive (see below). The PDF’s introduction should state the same bigger-picture framing: see **`reports/CSE293_introduction.tex`** to sync LaTeX with the compiled report.
 
 | Artifact | Location |
 | --- | --- |
@@ -21,7 +21,7 @@ Implementation targets **TransMorph-style preprocessed IXI** axial slices. Phase
 
 ```text
 .
-├── datahub/              # Pipeline: synth triplets → UniGradICON fivers → train / eval / viz
+├── experiments/              # Pipeline: synth triplets → UniGradICON fivers → train / eval / viz
 ├── deploy/nautilus/      # Kubernetes manifests (PVC /files, venv /files/venvs/unc) for NRP
 ├── reports/              # PDF + LaTeX intro snippet (CSE293_introduction.tex) for the write-up
 ├── assets/               # Figures for the report; example run under assets/runs/error_unet_run1/
@@ -47,7 +47,7 @@ The pipeline assumes local dataset folders match the defaults below (or download
 
 ### Phase I: Ground truth generation (synthetic triplets)
 
-Phase I uses **2D** slices instead of full 3D volumes. The generator `datahub/synthetic/create_synth_data.py` expects `.npy` images as:
+Phase I uses **2D** slices instead of full 3D volumes. The generator `experiments/synthetic/create_synth_data.py` expects `.npy` images as:
 
 ```text
 ./data/IXI_2D/
@@ -78,7 +78,7 @@ python scripts/visualize_ixi_2d.py --input-dir ./data/IXI_2D --recursive --no-sh
 Create synthetic triplets (`I_fixed`, `I_warped`, `phi`) as `*_triplet.npz`:
 
 ```bash
-python datahub/synthetic/create_synth_data.py \
+python experiments/synthetic/create_synth_data.py \
   --input-path ./data/IXI_2D/ \
   --output-path ./data/IXI_2D_synth_trip/ \
   --workers 64
@@ -87,19 +87,19 @@ python datahub/synthetic/create_synth_data.py \
 Near-identity resampling (optional):
 
 ```bash
-python datahub/modify_synth_data.py --near-zero-keep-frac 0.10 --near-zero-eps 1e-4
+python experiments/synthetic/modify_synth_data.py --near-zero-keep-frac 0.10 --near-zero-eps 1e-4
 ```
 
 QC:
 
 ```bash
-python datahub/data_checks/check_synth_data.py --data-dir ./data/IXI_2D_synth_trip/
+python experiments/data_checks/check_synth_data.py --data-dir ./data/IXI_2D_synth_trip/
 ```
 
 ### Phase II: UniGradICON error maps (fivers)
 
 ```bash
-python datahub/synthetic/create_unigrad_synth_data.py \
+python experiments/synthetic/create_unigrad_synth_data.py \
   --input-path ./data/IXI_2D_synth_trip/ \
   --output-path ./data/IXI_2D_unigrad_synth_fiver/
 ```
@@ -109,7 +109,7 @@ Writes `*_fiver.npz` with `phi_true`, `phi_pred`, `phi_diff`, `error_map`, `vali
 ### Phase III: Supervised error-map training
 
 ```bash
-python datahub/train_error_map_unet.py \
+python experiments/train_error_map_unet.py \
   --data-dir ./data/IXI_2D_unigrad_synth_fiver/ \
   --epochs 50 \
   --batch-size 8 \
@@ -121,7 +121,7 @@ Produces `metrics.csv`, `best_model.pt` (best **validation** masked MSE), and `r
 ### Evaluation + qualitative figures
 
 ```bash
-python datahub/eval_error_map_unet.py \
+python experiments/eval_error_map_unet.py \
   --run-path ./runs/error_unet_run1 \
   --eval-dir ./data/IXI_2D_unigrad_synth_fiver/ \
   --no-show
@@ -138,9 +138,9 @@ The repo includes an **example** training/eval snapshot under `assets/runs/error
 
 ### Optional visualization (no training)
 
-- `python datahub/synthetic/visualize_synth_data.py`
-- `python datahub/synthetic/visualize_unigrad_data.py`
-- `python datahub/unigrad-io/visualize_unigrad_io_data.py`
+- `python experiments/synthetic/visualize_synth_data.py`
+- `python experiments/synthetic/visualize_unigrad_data.py`
+- `python experiments/unigrad-io/visualize_unigrad_io_data.py`
 
 ## Report and figures
 
@@ -149,11 +149,11 @@ The repo includes an **example** training/eval snapshot under `assets/runs/error
 
 ## Notes
 
-- **Units (displacements).** Stored fields are in **pixels** on the 2D slice grid: `phi` in `*_triplet.npz`; `phi_true`, `phi_pred`, `phi_diff`, `error_map` in `*_fiver.npz`; Phase I QC limits in `datahub/synthetic/create_synth_data.py`.
+- **Units (displacements).** Stored fields are in **pixels** on the 2D slice grid: `phi` in `*_triplet.npz`; `phi_true`, `phi_pred`, `phi_diff`, `error_map` in `*_fiver.npz`; Phase I QC limits in `experiments/synthetic/create_synth_data.py`.
 - **Units (internals).** TorchIO elastic uses mm only to sample the B-spline; saved `phi` is still grid-based **pixels**. UniGradICON outputs are **normalized** until `create_unigrad_synth_data.py` rescales to **pixels**. Phase III `--phi-scale` rescales `phi_pred` **inputs** to the U-Net; fiver tensors remain in pixels.
 - Run commands from the **repository root** so relative paths resolve.
 - Large artifacts are not committed (`data/`, `models/`, etc.); use the [Drive folder](https://drive.google.com/drive/folders/1VYUxjbYqrMLb_KWqfJepUZN3i0jNYdU7?usp=sharing) or regenerate locally.
-- Legacy helpers in `scripts/` and `docs/` may not track every `datahub/` default.
+- Legacy helpers in `scripts/` and `docs/` may not track every `experiments/` default.
 
 ## License
 

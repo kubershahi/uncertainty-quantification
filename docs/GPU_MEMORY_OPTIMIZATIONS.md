@@ -1,6 +1,6 @@
 # GPU memory optimizations for UniGradICON instance optimization
 
-Notes on the memory fixes that took `datahub/unigrad-io/create_unigrad_io_data.py`
+Notes on the memory fixes that took `experiments/unigrad-io/create_unigrad_io_data.py`
 from CUDA OOM on an 11 GiB GPU to running cleanly at full utilization, while
 keeping the official UniGradICON IO protocol (Adam, `lr=2e-5`, LNCC, 50 iters).
 
@@ -19,7 +19,7 @@ memory in PyTorch training/inference without changing the algorithm?"
 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | Possible small allocator overhead | Fixes fragmentation when many different allocation sizes appear | Workloads with large, varied tensors (3D vision, transformers with dynamic shapes) |
 
 Implementation lives in
-[`datahub/unigrad-io/create_unigrad_io_data.py`](../datahub/unigrad-io/create_unigrad_io_data.py),
+[`experiments/unigrad-io/create_unigrad_io_data.py`](../experiments/unigrad-io/create_unigrad_io_data.py),
 specifically `run_io_then_extract_phi_px` and the inner loop of
 `run_atlas_fiver_generation`.
 

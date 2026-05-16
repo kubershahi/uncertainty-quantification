@@ -44,7 +44,7 @@ spec:
               source /files/venvs/unc/bin/activate
               cd /files/repo/uncertainty-quantification
               export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-              python datahub/unigrad-io/create_unigrad_io_data.py \
+              python experiments/unigrad-io/create_unigrad_io_data.py \
                 --ixi-root /files/datasets/IXI_2D \
                 --output-path /files/outputs/IXI_2D_unigrad_io
           resources:

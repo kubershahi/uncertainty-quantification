@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
 
 cd "${REPO_ROOT}"
-python datahub/unigrad-io/create_unigrad_io_data.py \
+python experiments/unigrad-io/create_unigrad_io_data.py \
   --ixi-root "${IXI_ROOT}" \
   --output-path "${UNIGRAD_IO_OUT}_smoke" \
   --splits Train \
