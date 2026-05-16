@@ -1,7 +1,7 @@
 # Interactive dev pod: setup venv, transfer data, smoke tests, tmux long runs.
 #   kubectl apply -f deploy/nautilus/pod-dev.yaml
 #   kubectl wait --for=condition=Ready pod/unc-dev --timeout=15m
-#   kubectl exec -it unc-dev -- bash
+#   kubectl exec -it unc-dev -- bash   # cwd is /files (workingDir)
 #
 # Apply in YOUR namespace (not committed to git):
 #   kubectl config set-context --current --namespace=<your-namespace>
@@ -41,6 +41,7 @@ spec:
   containers:
     - name: main
       image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
+      workingDir: /files
       command: ["sleep", "infinity"]
       resources:
         requests:
