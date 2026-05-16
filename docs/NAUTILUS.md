@@ -43,6 +43,20 @@ kubectl exec -it unc-dev -- bash
 If the pod stays **Pending**, loosen GPU names in `pod-dev.yaml` or remove the
 `nodeAffinity` block temporarily.
 
+### More CPU/RAM for long jobs (e.g. `sweep_io_iterations.py`)
+
+Bare Pods (`pod-dev.yaml`) hit NRP limits (~16 CPU, ~32 Gi including shm). For heavier
+interactive runs, apply **`deployment-heavy.yaml`**: it uses the same PVC but requests **up to
+16 CPU / 64 Gi** RAM (matches the batch Job manifest pattern).
+
+```bash
+kubectl apply -f deploy/nautilus/deployment-heavy.yaml
+kubectl rollout status deployment/unc-heavy --timeout=25m
+kubectl exec -it deployment/unc-heavy -- bash
+```
+
+Stop it when idle: `kubectl delete deployment unc-heavy` (PVC is unchanged).
+
 ## 3. Inside the pod — one-time setup
 
 The dev image **`pytorch/pytorch:…-devel`** usually does **not** ship with `git`. Install it once in the pod (Debian/apt), then clone onto the PVC so the repo survives pod restarts.
@@ -65,7 +79,7 @@ bash deploy/nautilus/scripts/setup-venv.sh
 
 # GPU check
 source /files/venvs/unc/bin/activate
-python datahub/resource_checks/diagnose_torch_gpu.py
+python experiments/resource_checks/diagnose_torch_gpu.py
 ```
 
 **No apt / git install blocked?** Unpack from GitHub’s zip on the PVC (no git needed):
@@ -108,7 +122,7 @@ bash deploy/nautilus/scripts/run-io-data-smoke.sh
 tmux new -s io
 source /files/venvs/unc/bin/activate
 cd /files/repo/uncertainty-quantification
-python datahub/unigrad-io/create_unigrad_io_data.py \
+python experiments/unigrad-io/create_unigrad_io_data.py \
   --ixi-root /files/datasets/IXI_2D \
   --output-path /files/outputs/IXI_2D_unigrad_io
 # Ctrl-b d to detach; kubectl exec back in later
@@ -164,8 +178,8 @@ mkdir -p /files/repo/uncertainty-quantification && cd /files/repo/uncertainty-qu
 |------|---------|
 | Activate env | `source /files/venvs/unc/bin/activate` |
 | Env vars | `source deploy/nautilus/scripts/env.sh` |
-| IO sweep | `python datahub/unigrad-io/sweep_io_iterations.py --ixi-root /files/datasets/IXI_2D ...` |
-| Train U-Net | `python datahub/train_error_map_unet.py` (point `--data-dir` at outputs path) |
+| IO sweep | `python experiments/unigrad-io/sweep_io_iterations.py --ixi-root /files/datasets/IXI_2D ...` |
+| Train U-Net | `python experiments/train_error_map_unet.py` (point `--data-dir` at outputs path) |
 
 ## Vertex vs Nautilus
 

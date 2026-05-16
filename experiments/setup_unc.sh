@@ -3,13 +3,13 @@
 # does not leave you with a CPU-only or mismatched torch.
 #
 # Default venv: ${HOME}/venvs/unc (DataHub). On Nautilus use:
-#   VENV_DIR=/files/venvs/unc bash datahub/setup_unc.sh
+#   VENV_DIR=/files/venvs/unc bash experiments/setup_unc.sh
 #
 # 1) Check driver:    nvidia-smi
 # 2) Pick a wheel tag (https://pytorch.org/get-started/locally/) — common: cu124
 # 3) First-time setup:
-#      CUDA_WHEEL=cu124 bash datahub/setup_unc.sh
-# 4) Re-run is safe (reuses venv). Rebuild: FORCE=1 bash datahub/setup_unc.sh
+#      CUDA_WHEEL=cu124 bash experiments/setup_unc.sh
+# 4) Re-run is safe (reuses venv). Rebuild: FORCE=1 bash experiments/setup_unc.sh
 #
 # Activate: source ${VENV_DIR:-$HOME/venvs/unc}/bin/activate
 
@@ -50,4 +50,4 @@ echo ""
 echo "Setup complete. Activate with:"
 echo "  source ${VENV_DIR}/bin/activate"
 echo "Then verify GPU:"
-echo "  python datahub/resource_checks/diagnose_torch_gpu.py"
+echo "  python experiments/resource_checks/diagnose_torch_gpu.py"
