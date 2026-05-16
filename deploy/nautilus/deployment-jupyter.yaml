@@ -80,6 +80,8 @@ spec:
           args:
             - |
               set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*; }
               SCRIPT=/files/repo/uncertainty-quantification/deploy/nautilus/scripts/start-jupyter-lab.sh
               if [[ ! -f "${SCRIPT}" ]]; then
                 echo "ERROR: ${SCRIPT} not found. Clone the repo onto PVC under /files/repo/ (see docs/NAUTILUS.md), then: kubectl rollout restart deployment unc-jupyter" >&2
