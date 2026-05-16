@@ -1,29 +1,20 @@
 #!/usr/bin/env python3
 """
-Visualize atlas-based UniGradICON IO data (one ``.npz`` per subject slice).
+Visualize 3D UniGrad ICON IO ``.npz`` volumes (``create_unigrad_io_data.py``).
 
-Schema (created by create_unigrad_io_data.py):
-  source, target, phi_pred (2,H,W), warped_pred,
-  phi_predio (2,H,W), warped_predio, error_map (H,W)
+Axial slice panels per subject: source | target | ||phi_pred|| | ||phi_predio|| | error_map.
 
-Default panels per sample (paper-style):
-  1) source (subject, moving)
-  2) target (atlas, fixed)
-  3) warped_pred    (source warped by phi_pred)    [+ deformation grid overlay]
-  4) warped_predio  (source warped by phi_predio)  [+ deformation grid overlay]
-  5) warped diff    (warped_predio - warped_pred, signed intensity)
-  6) error_map      (per-pixel L2 norm of phi_predio - phi_pred)
+``--selection`` chooses which subjects to show from a split:
+  - ``easy_normal_hard`` — lowest / median / highest by ``--rank-by`` (default: ``mean_error_map``)
+  - ``random``           — ``--num-samples`` random subjects (``--seed``)
 
-The grid overlay is on by default (paper Fig. 2 style). Disable with ``--no-grid``.
-
-Optional ``--phi`` swaps columns 3-4 for ``||phi_pred||`` / ``||phi_predio||``.
-
-The display-only ``--io-iterations`` flag annotates the figure suptitle so the
-IO step count used to generate the data is visible in saved images.
+Use ``--split Train`` or ``--split Train,Test``. With multiple subjects, writes one PNG each
+under ``--save-dir`` (``{split}_{label}.png``). Use ``--combined`` for a single multi-row figure.
 
 Examples:
-  python visualize_unigrad_io_data.py --split Train --io-iterations 50 --save-path ./assets/images/unigrad-io/io_train_minmedmax.png --no-show
-  python visualize_unigrad_io_data.py --split Val --selection random --num-samples 4 --phi --io-iterations 50
+  python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Train,Test --selection easy_normal_hard --save-dir assets/images/unigrad-io/3d/ --no-show
+  python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Val --selection random --num-samples 4 --save-dir assets/images/unigrad-io/3d/ --no-show
+  python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Train --selection easy_normal_hard --combined --save-path assets/images/unigrad-io/3d/train_easy_normal_hard.png --no-show
 """
 
 from __future__ import annotations
@@ -49,50 +40,56 @@ REQUIRED_KEYS = frozenset(
 )
 SPLITS = ("Train", "Val", "Test")
 DATA_GLOB = "*.npz"
+SELECTION_MODES = ("easy_normal_hard", "random")
 
 
 def phi_magnitude(phi: np.ndarray) -> np.ndarray:
-    """Return per-pixel L2 magnitude of a 2-channel displacement field."""
-    return np.sqrt(phi[0] * phi[0] + phi[1] * phi[1])
+    """``(3, D, H, W)`` → ``(D, H, W)`` magnitude."""
+    if phi.ndim != 4 or phi.shape[0] != 3:
+        raise ValueError(f"Expected phi (3, D, H, W), got {phi.shape}")
+    return np.sqrt(np.sum(phi.astype(np.float64) ** 2, axis=0))
 
 
-def overlay_deformation_grid(
-    ax,
-    phi_px: np.ndarray,
-    *,
-    stride: int = 12,
-    color: str = "cyan",
-    linewidth: float = 0.5,
-    alpha: float = 0.7,
-) -> None:
-    """Overlay a deformed grid (paper Fig. 2 style) on the current axis.
-
-    The grid is the level sets of the position map ``identity + phi_px`` taken
-    at integer multiples of ``stride`` pixels. Channel 0 of ``phi_px`` is the
-    column (x) displacement, channel 1 is the row (y) displacement.
-    """
-    _, h, w = phi_px.shape
-    rows = np.arange(h)
-    cols = np.arange(w)
-    grid_row, grid_col = np.meshgrid(rows, cols, indexing="ij")
-    pos_col = grid_col + phi_px[0]
-    pos_row = grid_row + phi_px[1]
-    levels_col = np.arange(0, w + stride, stride)
-    levels_row = np.arange(0, h + stride, stride)
-    ax.contour(pos_col, levels=levels_col, colors=color, linewidths=linewidth, alpha=alpha)
-    ax.contour(pos_row, levels=levels_row, colors=color, linewidths=linewidth, alpha=alpha)
+def default_slice_index(depth: int) -> int:
+    return depth // 2
 
 
-def collect_files(data_dir: Path, split: str, pattern: str) -> list[Path]:
-    """Collect generated ``.npz`` files for one split."""
+def axial_slice_volume(vol: np.ndarray, slice_idx: int | None) -> np.ndarray:
+    """``(H, W, D)`` → 2D axial slice."""
+    if vol.ndim != 3:
+        raise ValueError(f"Expected volume (H, W, D), got {vol.shape}")
+    d = int(vol.shape[2])
+    z = default_slice_index(d) if slice_idx is None else int(slice_idx)
+    z = int(np.clip(z, 0, d - 1))
+    return vol[:, :, z]
+
+
+def axial_slice_error_map(err: np.ndarray, slice_idx: int | None) -> np.ndarray:
+    """``(D, H, W)`` → 2D slice."""
+    if err.ndim != 3:
+        raise ValueError(f"Expected error_map (D, H, W), got {err.shape}")
+    d = int(err.shape[0])
+    z = default_slice_index(d) if slice_idx is None else int(slice_idx)
+    z = int(np.clip(z, 0, d - 1))
+    return err[z]
+
+
+def axial_slice_phi_mag(phi: np.ndarray, slice_idx: int | None) -> np.ndarray:
+    mag = phi_magnitude(phi)
+    d = int(mag.shape[0])
+    z = default_slice_index(d) if slice_idx is None else int(slice_idx)
+    z = int(np.clip(z, 0, d - 1))
+    return mag[z]
+
+
+def collect_files(data_dir: Path, split: str) -> list[Path]:
     split_dir = data_dir / split
     if not split_dir.is_dir():
         raise FileNotFoundError(f"Missing split directory: {split_dir}")
-    return sorted(split_dir.glob(pattern))
+    return sorted(split_dir.glob(DATA_GLOB))
 
 
 def load_record(path: Path) -> dict[str, np.ndarray]:
-    """Load one ``.npz`` record and validate required keys."""
     with np.load(path) as data:
         missing = REQUIRED_KEYS - set(data.files)
         if missing:
@@ -100,45 +97,209 @@ def load_record(path: Path) -> dict[str, np.ndarray]:
         return {k: np.asarray(data[k]) for k in REQUIRED_KEYS}
 
 
+def score_file(path: Path, rank_by: str) -> float:
+    if rank_by == "mean_error_map":
+        with np.load(path) as data:
+            return float(np.mean(data["error_map"]))
+    return rank_scalar(load_record(path), rank_by)
+
+
 def rank_scalar(blob: dict[str, np.ndarray], rank_by: str) -> float:
-    """Compute scalar score for min/median/max selection."""
-    pp = blob["phi_pred"].astype(np.float64)
-    pio = blob["phi_predio"].astype(np.float64)
     err = blob["error_map"].astype(np.float64)
-    if rank_by == "mean_error":
+    if rank_by == "mean_error_map":
         return float(np.mean(err))
-    if rank_by == "max_error":
+    if rank_by == "max_error_map":
         return float(np.max(err))
     if rank_by == "mean_phi_pred":
-        return float(np.mean(phi_magnitude(pp)))
+        return float(np.mean(phi_magnitude(blob["phi_pred"])))
     if rank_by == "mean_phi_predio":
-        return float(np.mean(phi_magnitude(pio)))
+        return float(np.mean(phi_magnitude(blob["phi_predio"])))
     raise ValueError(f"Unknown rank_by: {rank_by}")
 
 
-def select_min_median_max(
-    files: list[Path], rank_by: str
+def select_ranked(
+    files: list[Path],
+    rank_by: str,
+    labels: tuple[str, str, str],
 ) -> list[tuple[Path, str, float]]:
-    """Pick min/median/max files by ranking scalar."""
     if not files:
         return []
-    scored: list[tuple[Path, float]] = [
-        (fp, rank_scalar(load_record(fp), rank_by)) for fp in files
-    ]
+    scored = [(fp, score_file(fp, rank_by)) for fp in files]
     scored.sort(key=lambda x: x[1])
     n = len(scored)
     if n == 1:
-        return [(scored[0][0], "min", scored[0][1])]
+        return [(scored[0][0], labels[0], scored[0][1])]
     if n == 2:
-        return [(scored[0][0], "min", scored[0][1]), (scored[1][0], "max", scored[1][1])]
+        return [
+            (scored[0][0], labels[0], scored[0][1]),
+            (scored[1][0], labels[2], scored[1][1]),
+        ]
     return [
-        (scored[0][0], "min", scored[0][1]),
-        (scored[n // 2][0], "median", scored[n // 2][1]),
-        (scored[-1][0], "max", scored[-1][1]),
+        (scored[0][0], labels[0], scored[0][1]),
+        (scored[n // 2][0], labels[1], scored[n // 2][1]),
+        (scored[-1][0], labels[2], scored[-1][1]),
     ]
 
 
-def visualize(
+def pick_samples(
+    files: list[Path],
+    *,
+    selection: str,
+    rank_by: str,
+    num_samples: int,
+    seed: int,
+) -> list[tuple[Path, str, float]]:
+    if selection == "random":
+        rng = random.Random(seed)
+        chosen = rng.sample(files, min(num_samples, len(files)))
+        return [(fp, fp.stem, float("nan")) for fp in chosen]
+    if selection == "easy_normal_hard":
+        return select_ranked(files, rank_by, ("easy", "normal", "hard"))
+    raise ValueError(f"Unknown selection: {selection}")
+
+
+def resolve_slice_index(record: dict[str, np.ndarray], slice_idx: int | None) -> int:
+    d = int(record["source"].shape[2])
+    z = default_slice_index(d) if slice_idx is None else int(slice_idx)
+    return int(np.clip(z, 0, d - 1))
+
+
+def panel_limits(
+    record: dict[str, np.ndarray],
+    slice_idx: int | None,
+    *,
+    err_vmax: float | None,
+    err_percentile: float,
+    phi_vmax: float | None,
+    phi_percentile: float,
+) -> tuple[float, float]:
+    err_s = axial_slice_error_map(record["error_map"], slice_idx)
+    phi_p = axial_slice_phi_mag(record["phi_pred"], slice_idx)
+    phi_io = axial_slice_phi_mag(record["phi_predio"], slice_idx)
+    err_v = (
+        float(err_vmax)
+        if err_vmax is not None
+        else max(float(np.percentile(err_s, err_percentile)), 1e-6)
+    )
+    phi_v = (
+        float(phi_vmax)
+        if phi_vmax is not None
+        else max(
+            float(np.percentile(phi_p, phi_percentile)),
+            float(np.percentile(phi_io, phi_percentile)),
+            1e-6,
+        )
+    )
+    return err_v, phi_v
+
+
+def render_subject_row(
+    axes,
+    record: dict[str, np.ndarray],
+    fp: Path,
+    label: str,
+    score: float,
+    slice_z: int,
+    *,
+    err_v: float,
+    phi_v: float,
+    rank_by: str | None,
+) -> None:
+    source = axial_slice_volume(record["source"], slice_z)
+    target = axial_slice_volume(record["target"], slice_z)
+    phi_pred_s = axial_slice_phi_mag(record["phi_pred"], slice_z)
+    phi_predio_s = axial_slice_phi_mag(record["phi_predio"], slice_z)
+    err_s = axial_slice_error_map(record["error_map"], slice_z)
+
+    score_note = ""
+    if label and np.isfinite(score) and rank_by:
+        score_note = f"\n{label} {rank_by}={score:.4f}"
+    elif label:
+        score_note = f"\n{label}"
+
+    panels = [
+        (source, "gray", None, None, f"source\n{fp.stem}{score_note}"),
+        (target, "gray", None, None, "target (atlas)"),
+        (phi_pred_s, "hot", 0.0, phi_v, "||phi_pred||"),
+        (phi_predio_s, "hot", 0.0, phi_v, "||phi_predio||"),
+        (err_s, "hot", 0.0, err_v, "error_map"),
+    ]
+    for ax, (img, cmap, vmin, vmax, title) in zip(axes, panels):
+        if vmin is None:
+            ax.imshow(img, cmap=cmap)
+        else:
+            im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax)
+            ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+        ax.set_title(title, fontsize=8)
+        ax.axis("off")
+
+
+def render_figure(
+    picked: list[tuple[Path, str, float]],
+    *,
+    split: str,
+    selection: str,
+    rank_by: str,
+    slice_idx: int | None,
+    err_vmax: float | None,
+    err_percentile: float,
+    phi_vmax: float | None,
+    phi_percentile: float,
+) -> plt.Figure:
+    records = [load_record(fp) for fp, _, _ in picked]
+    z = resolve_slice_index(records[0], slice_idx)
+
+    err_v, phi_v = panel_limits(
+        records[0],
+        z,
+        err_vmax=err_vmax,
+        err_percentile=err_percentile,
+        phi_vmax=phi_vmax,
+        phi_percentile=phi_percentile,
+    )
+    for rec in records[1:]:
+        ev, pv = panel_limits(
+            rec,
+            z,
+            err_vmax=err_vmax,
+            err_percentile=err_percentile,
+            phi_vmax=phi_vmax,
+            phi_percentile=phi_percentile,
+        )
+        err_v = max(err_v, ev)
+        phi_v = max(phi_v, pv)
+
+    nrows = len(picked)
+    fig, axes = plt.subplots(nrows, 5, figsize=(18, 3.6 * nrows))
+    axes = np.atleast_2d(axes)
+    for row, ((fp, label, score), rec) in enumerate(zip(picked, records)):
+        render_subject_row(
+            axes[row],
+            rec,
+            fp,
+            label,
+            score,
+            z,
+            err_v=err_v,
+            phi_v=phi_v,
+            rank_by=rank_by if selection == "easy_normal_hard" else None,
+        )
+
+    fig.suptitle(
+        f"{split} — {selection} (z={z}, n={nrows})",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    return fig
+
+
+def save_figure(fig: plt.Figure, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"Saved figure: {path}")
+
+
+def visualize_split(
     data_dir: Path,
     split: str,
     *,
@@ -146,241 +307,180 @@ def visualize(
     rank_by: str,
     num_samples: int,
     seed: int,
-    show_phi: bool,
-    show_grid: bool,
-    grid_stride: int,
-    io_iterations: int | None,
+    slice_idx: int | None,
+    save_dir: Path | None,
+    save_path: Path | None,
+    combined: bool,
     err_vmax: float | None,
     err_percentile: float,
     phi_vmax: float | None,
     phi_percentile: float,
-    save_path: Path | None,
     no_show: bool,
 ) -> None:
-    """Render a 5-column figure per selected record."""
-    files = collect_files(data_dir, split, DATA_GLOB)
+    files = collect_files(data_dir, split)
     if not files:
         raise FileNotFoundError(f"No .npz under {data_dir / split}")
 
-    if selection == "random":
-        rng = random.Random(seed)
-        chosen = rng.sample(files, min(num_samples, len(files)))
-        picked = [(p, "", float("nan")) for p in chosen]
-        title_suffix = f"random {len(picked)} of {len(files)} (seed={seed})"
-    else:
-        picked = select_min_median_max(files, rank_by)
-        title_suffix = f"min/median/max by {rank_by} ({len(picked)} of {len(files)})"
-
-    err_stack: list[np.ndarray] = []
-    phi_pred_stack: list[np.ndarray] = []
-    phi_predio_stack: list[np.ndarray] = []
-    intensity_diff_stack: list[np.ndarray] = []
-    for fp, _, _ in picked:
-        d = load_record(fp)
-        err_stack.append(d["error_map"].astype(np.float64).ravel())
-        intensity_diff_stack.append(
-            (d["warped_predio"].astype(np.float64) - d["warped_pred"].astype(np.float64)).ravel()
-        )
-        if show_phi:
-            phi_pred_stack.append(phi_magnitude(d["phi_pred"]).ravel())
-            phi_predio_stack.append(phi_magnitude(d["phi_predio"]).ravel())
-
-    err_v = (
-        float(err_vmax)
-        if err_vmax is not None
-        else max(float(np.percentile(np.concatenate(err_stack), err_percentile)), 1e-6)
+    picked = pick_samples(
+        files,
+        selection=selection,
+        rank_by=rank_by,
+        num_samples=num_samples,
+        seed=seed,
     )
-    diff_concat = np.concatenate(intensity_diff_stack)
-    diff_v = max(
-        float(np.percentile(np.abs(diff_concat), err_percentile)),
-        1e-6,
-    )
-    if show_phi:
-        phi_v = (
-            float(phi_vmax)
-            if phi_vmax is not None
-            else max(
-                float(np.percentile(np.concatenate(phi_pred_stack), phi_percentile)),
-                float(np.percentile(np.concatenate(phi_predio_stack), phi_percentile)),
-                1e-6,
-            )
-        )
-
-    nrows = len(picked)
-    fig, axes = plt.subplots(nrows, 6, figsize=(21, 3.2 * nrows))
-    axes = np.atleast_2d(axes)
-
-    for row, (fp, rank_label, score) in enumerate(picked):
-        d = load_record(fp)
-        source = d["source"]
-        target = d["target"]
-        warped_pred = d["warped_pred"]
-        warped_predio = d["warped_predio"]
-        err_map = d["error_map"].astype(np.float64)
-
-        rank_note = (
-            f" [{rank_label} {rank_by}={score:.4f}]"
-            if (rank_label and np.isfinite(score))
-            else ""
-        )
-        stem = fp.stem
-        stem_title = stem if len(stem) <= 44 else f"{stem[:41]}..."
-
-        axes[row, 0].imshow(source, cmap="gray")
-        axes[row, 0].set_title(f"source — {stem_title}{rank_note}", fontsize=8)
-        axes[row, 0].axis("off")
-
-        axes[row, 1].imshow(target, cmap="gray")
-        axes[row, 1].set_title("target (atlas)", fontsize=9)
-        axes[row, 1].axis("off")
-
-        if show_phi:
-            pred_plot = phi_magnitude(d["phi_pred"].astype(np.float64))
-            predio_plot = phi_magnitude(d["phi_predio"].astype(np.float64))
-            im2 = axes[row, 2].imshow(pred_plot, cmap="hot", vmin=0.0, vmax=phi_v)
-            axes[row, 2].set_title("||phi_pred|| (px)", fontsize=9)
-            im3 = axes[row, 3].imshow(predio_plot, cmap="hot", vmin=0.0, vmax=phi_v)
-            axes[row, 3].set_title("||phi_predio|| (px)", fontsize=9)
-            for ax, im in ((axes[row, 2], im2), (axes[row, 3], im3)):
-                ax.axis("off")
-                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+    print(f"{split}: {len(files)} volumes — {selection} → {len(picked)} figure(s)")
+    for fp, label, score in picked:
+        if np.isfinite(score):
+            print(f"  {label:8s}  score={score:.6f}  {fp.name}")
         else:
-            axes[row, 2].imshow(warped_pred, cmap="gray")
-            title_pred = "warped_pred + grid" if show_grid else "warped_pred"
-            axes[row, 2].set_title(title_pred, fontsize=9)
-            axes[row, 2].axis("off")
-            if show_grid:
-                overlay_deformation_grid(
-                    axes[row, 2], d["phi_pred"].astype(np.float64), stride=grid_stride
-                )
-            axes[row, 3].imshow(warped_predio, cmap="gray")
-            title_predio = "warped_predio + grid" if show_grid else "warped_predio"
-            axes[row, 3].set_title(title_predio, fontsize=9)
-            axes[row, 3].axis("off")
-            if show_grid:
-                overlay_deformation_grid(
-                    axes[row, 3], d["phi_predio"].astype(np.float64), stride=grid_stride
-                )
+            print(f"  {label:8s}  {fp.name}")
 
-        intensity_diff = (
-            warped_predio.astype(np.float64) - warped_pred.astype(np.float64)
+    if combined:
+        fig = render_figure(
+            picked,
+            split=split,
+            selection=selection,
+            rank_by=rank_by,
+            slice_idx=slice_idx,
+            err_vmax=err_vmax,
+            err_percentile=err_percentile,
+            phi_vmax=phi_vmax,
+            phi_percentile=phi_percentile,
         )
-        im_id = axes[row, 4].imshow(
-            intensity_diff, cmap="coolwarm", vmin=-diff_v, vmax=diff_v
+        out = save_path or (save_dir / f"{split.lower()}_{selection}.png" if save_dir else None)
+        if out is not None:
+            save_figure(fig, out)
+        if no_show:
+            plt.close(fig)
+        else:
+            plt.show()
+        return
+
+    for fp, label, score in picked:
+        fig = render_figure(
+            [(fp, label, score)],
+            split=split,
+            selection=selection,
+            rank_by=rank_by,
+            slice_idx=slice_idx,
+            err_vmax=err_vmax,
+            err_percentile=err_percentile,
+            phi_vmax=phi_vmax,
+            phi_percentile=phi_percentile,
         )
-        axes[row, 4].set_title("warped_predio - warped_pred", fontsize=9)
-        axes[row, 4].axis("off")
-        fig.colorbar(im_id, ax=axes[row, 4], fraction=0.046, pad=0.02)
-
-        im_e = axes[row, 5].imshow(err_map, cmap="hot", vmin=0.0, vmax=err_v)
-        axes[row, 5].set_title("error_map (px)", fontsize=9)
-        axes[row, 5].axis("off")
-        fig.colorbar(im_e, ax=axes[row, 5], fraction=0.046, pad=0.02)
-
-    mode_tag = "phi-magnitudes" if show_phi else "warped views"
-    if not show_phi and show_grid:
-        mode_tag += " + grid"
-    io_note = f"  |  IO iters: {io_iterations}" if io_iterations is not None else ""
-    fig.suptitle(
-        f"Atlas UniGradICON IO — {split} ({title_suffix}, {mode_tag}){io_note}",
-        fontsize=12,
-    )
-    fig.tight_layout()
-
-    if save_path is not None:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"Saved figure: {save_path}")
-
-    if no_show:
-        plt.close(fig)
-    else:
-        plt.show()
+        if save_dir is not None:
+            safe = label.replace("/", "_") if label else fp.stem
+            save_figure(fig, save_dir / f"{split.lower()}_{safe}.png")
+        elif save_path is not None and len(picked) == 1:
+            save_figure(fig, save_path)
+        if no_show:
+            plt.close(fig)
+        else:
+            plt.show()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments."""
     p = argparse.ArgumentParser(
-        description=(
-            "Visualize atlas UniGradICON IO data: "
-            "source, target, warped_pred, warped_predio, error_map."
-        ),
+        description="Visualize 3D UniGrad ICON IO .npz volumes.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("--data-dir", type=Path, default=Path("./data/IXI_2D_unigrad_io"))
-    p.add_argument("--split", type=str, default="Train", choices=list(SPLITS))
+    p.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("datasets/IXI_unigrad_io"),
+    )
+    p.add_argument(
+        "--split",
+        type=str,
+        default="Train",
+        help="One split or comma-separated (e.g. Train,Test).",
+    )
     p.add_argument(
         "--selection",
         type=str,
-        default="min_median_max",
-        choices=["min_median_max", "random"],
+        default="easy_normal_hard",
+        choices=list(SELECTION_MODES),
+        help="How to pick subjects from each split.",
     )
     p.add_argument(
         "--rank-by",
         type=str,
-        default="mean_error",
-        choices=["mean_error", "max_error", "mean_phi_pred", "mean_phi_predio"],
+        default="mean_error_map",
+        choices=["mean_error_map", "max_error_map", "mean_phi_pred", "mean_phi_predio"],
+        help="Metric to rank easy / normal / hard (default: mean over error_map volume).",
     )
-    p.add_argument("--num-samples", type=int, default=3)
+    p.add_argument(
+        "--num-samples",
+        type=int,
+        default=3,
+        help="Number of random subjects when --selection random.",
+    )
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--slice-index", type=int, default=None, metavar="Z")
     p.add_argument(
-        "--phi",
-        action="store_true",
-        help="Show ||phi_pred|| and ||phi_predio|| in columns 3-4 instead of warped images.",
-    )
-    p.add_argument(
-        "--grid",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Overlay deformation grid contours on warped_pred and warped_predio "
-        "(paper Fig. 2 style). Use --no-grid to disable.",
-    )
-    p.add_argument(
-        "--grid-stride",
-        type=int,
-        default=12,
-        help="Grid line spacing in pixels for the deformation overlay (default: 12).",
-    )
-    p.add_argument(
-        "--io-iterations",
-        type=int,
+        "--save-dir",
+        type=Path,
         default=None,
-        help="Display-only: IO iterations used during data generation. Shown in suptitle.",
+        help="Directory for per-subject PNGs (default: assets/images/unigrad-io/3d/viz).",
+    )
+    p.add_argument(
+        "--save-path",
+        type=Path,
+        default=None,
+        help="Single output path (use with --combined or one subject).",
+    )
+    p.add_argument(
+        "--combined",
+        action="store_true",
+        help="Stack all selected subjects in one multi-row figure.",
     )
     p.add_argument("--err-vmax", type=float, default=None)
     p.add_argument("--err-percentile", type=float, default=99.0)
     p.add_argument("--phi-vmax", type=float, default=None)
     p.add_argument("--phi-percentile", type=float, default=99.0)
-    p.add_argument("--save-path", type=Path, default=None)
     p.add_argument("--no-show", action="store_true")
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run CLI."""
     args = parse_args(argv)
     if not args.data_dir.is_dir():
         print(f"ERROR: data dir not found: {args.data_dir}", file=sys.stderr)
         return 2
-    visualize(
-        data_dir=args.data_dir,
-        split=args.split,
-        selection=args.selection,
-        rank_by=args.rank_by,
-        num_samples=args.num_samples,
-        seed=args.seed,
-        show_phi=args.phi,
-        show_grid=args.grid,
-        grid_stride=args.grid_stride,
-        io_iterations=args.io_iterations,
-        err_vmax=args.err_vmax,
-        err_percentile=args.err_percentile,
-        phi_vmax=args.phi_vmax,
-        phi_percentile=args.phi_percentile,
-        save_path=args.save_path,
-        no_show=args.no_show,
-    )
+
+    splits = [s.strip() for s in args.split.split(",") if s.strip()]
+    for s in splits:
+        if s not in SPLITS:
+            print(f"ERROR: unknown split {s!r} (choose {SPLITS})", file=sys.stderr)
+            return 2
+
+    save_dir = args.save_dir
+    if save_dir is None and args.save_path is None and args.no_show:
+        save_dir = Path("assets/images/unigrad-io/3d/viz")
+
+    for split in splits:
+        try:
+            visualize_split(
+                args.data_dir,
+                split,
+                selection=args.selection,
+                rank_by=args.rank_by,
+                num_samples=args.num_samples,
+                seed=args.seed,
+                slice_idx=args.slice_index,
+                save_dir=save_dir,
+                save_path=args.save_path if len(splits) == 1 else None,
+                combined=args.combined,
+                err_vmax=args.err_vmax,
+                err_percentile=args.err_percentile,
+                phi_vmax=args.phi_vmax,
+                phi_percentile=args.phi_percentile,
+                no_show=args.no_show,
+            )
+        except FileNotFoundError as e:
+            print(f"Skip {split}: {e}", file=sys.stderr)
+
     return 0
 
 

@@ -11,9 +11,11 @@ Per-subject NPZ keys
 - ``error_map``: ``(D, H, W)`` float32 — ``||phi_predio - phi_pred||_2`` (U-Net target)
 - ``io_iterations``: scalar (default 50)
 
-Example::
+Examples (from repo root)::
 
-  python create_unigrad_io_data.py --ixi-root ./datasets/IXI --atlas-pkl ./datasets/IXI/atlas.pkl --output-path ./datasets/IXI_unigrad_io/
+  python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/IXI_unigrad_io/
+
+  python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/IXI_unigrad_io/ --splits Val --max-per-split 2
 """
 
 from __future__ import annotations
@@ -304,8 +306,8 @@ def run_atlas_io_generation(
 def parse_args() -> argparse.Namespace:
     ex = """
 Examples:
-  python create_unigrad_io_data.py --ixi-root ./datasets/IXI --atlas-pkl ./datasets/IXI/atlas.pkl --output-path ./datasets/IXI_unigrad_io/
-  python create_unigrad_io_data.py --ixi-root ./datasets/IXI --max-per-split 2 --splits Train
+  python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/IXI_unigrad_io/
+  python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/IXI_unigrad_io/ --splits Val --max-per-split 2
 """.strip()
     p = argparse.ArgumentParser(
         description="IXI 3D volume UniGradICON IO data: one .npz per subject .pkl.",
