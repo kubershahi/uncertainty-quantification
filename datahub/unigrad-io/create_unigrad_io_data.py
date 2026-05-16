@@ -180,6 +180,8 @@ def run_atlas_io_generation(
     *,
     splits: list[str],
     max_per_split: int | None,
+    shard_id: int,
+    num_shards: int,
     io_iterations: int,
     io_lr: float,
     io_sim: str,
@@ -211,6 +213,9 @@ def run_atlas_io_generation(
         if max_per_split is not None:
             files = files[:max_per_split]
 
+        if num_shards > 1:
+            files = [f for i, f in enumerate(files) if i % num_shards == shard_id]
+
         # Resumability: skip subjects whose NPZ already exists. A run that gets
         # killed mid-split (DataHub session timeout, OOM, power blip) can be
         # restarted with the same command and will pick up where it left off.
@@ -224,8 +229,9 @@ def run_atlas_io_generation(
             skipped = 0
 
         cap_note = f" (cap {max_per_split})" if max_per_split else ""
+        shard_note = f", shard {shard_id}/{num_shards}" if num_shards > 1 else ""
         skip_note = f", skipping {skipped} already-done" if skipped else ""
-        print(f"{split}: {len(files)} slice(s) to process{cap_note}{skip_note}")
+        print(f"{split}: {len(files)} slice(s) to process{cap_note}{shard_note}{skip_note}")
         if not files:
             continue
 
@@ -286,6 +292,11 @@ def parse_args() -> argparse.Namespace:
 Examples:
   python create_unigrad_io_data.py --ixi-root ./data/IXI_2D/ --output-path ./data/IXI_2D_unigrad_io/
   python create_unigrad_io_data.py --ixi-root ./data/IXI_2D/ --max-per-split 2
+
+Four disjoint GPUs on shared NFS/PVC (same output-path; script skips finished .npz)::
+
+  python create_unigrad_io_data.py --ixi-root ./data/IXI_2D/ --output-path ./out/ \\
+      --num-shards 4 --shard-id 0   # plus shards 1,2,3 on other pods
 """.strip()
     p = argparse.ArgumentParser(
         description=(
@@ -319,6 +330,21 @@ Examples:
         default=None,
         metavar="N",
         help="Process at most N files per split (sorted by name).",
+    )
+    p.add_argument(
+        "--shard-id",
+        type=int,
+        default=0,
+        metavar="K",
+        help="Parallel pods: keep slice i iff i modulo num-shards equals this id (0-based).",
+    )
+    p.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Parallel pods: split sorted slice list into N disjoint shards (same output-path on "
+        "shared storage is OK; default 1 = single worker).",
     )
     p.add_argument(
         "--io-iterations",
@@ -363,12 +389,18 @@ Examples:
 def main() -> None:
     """Entrypoint for command-line execution."""
     args = parse_args()
+    if args.num_shards < 1:
+        raise SystemExit("--num-shards must be >= 1")
+    if args.shard_id < 0 or args.shard_id >= args.num_shards:
+        raise SystemExit(f"--shard-id must satisfy 0 <= shard-id < num-shards (got {args.shard_id}, {args.num_shards})")
     splits = [s.strip() for s in args.splits.split(",") if s.strip()]
     run_atlas_io_generation(
         args.ixi_root.resolve(),
         args.output_path.resolve(),
         splits=splits,
         max_per_split=args.max_per_split,
+        shard_id=args.shard_id,
+        num_shards=args.num_shards,
         io_iterations=args.io_iterations,
         io_lr=args.io_lr,
         io_sim=args.io_sim,
