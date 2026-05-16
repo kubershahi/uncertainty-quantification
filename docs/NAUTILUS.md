@@ -86,6 +86,7 @@ Open **http://127.0.0.1:8888**. With the default empty `JUPYTER_TOKEN` in the ma
 
 - **Kernel:** choose **“unc”** (registered by `setup_unc.sh`).
 - **GPU:** same GPU-node rules as `unc-heavy`; verify inside a notebook with `import torch; torch.cuda.is_available()`.
+- **Terminal:** Jupyter may start `/bin/sh`, which has no `source`. Use `bash` first, or `. /files/venvs/unc/bin/activate` (dot = POSIX). Full paths from `/files`: `source /files/venvs/unc/bin/activate`.
 
 Stop when idle:
 
@@ -203,6 +204,7 @@ PVC persists unless deleted separately.
 | `kubectl cp` / tar errors                             | Ensure destination dirs exist (`mkdir -p …/datasets`).                                                                                                                                   |
 | `git` missing in container                            | Re-apply `pod-dev` / `deployment-heavy` / `deployment-jupyter` (auto-install on start), or `bash deploy/nautilus/scripts/ensure-system-deps.sh`.                                                                 |
 | `set: pipefail` / script errors                       | Shell scripts must use **LF** line endings (see `.gitattributes`).                                                                                                                       |
+| Terminal `source: not found`                          | Shell is `sh`, not bash — run `bash`, or use `. /files/venvs/unc/bin/activate`. Restart deployment after `start-jupyter-lab.sh` sets `SHELL=/bin/bash`.                                  |
 
 ---
 
