@@ -24,13 +24,10 @@ Outputs per subject (saved next to ``--save-path``)
   - ``<stem>_<subject>_metrics.csv`` per-iter metrics.
 
 Example (Nautilus PVC, ``/files`` mounted):
-  python experiments/unigrad-io/sweep_io_iterations.py --split Train --num-subjects 3 \\
-      --save-path /files/repo/uncertainty-quantification/assets/images/unigrad-io/sweep_io.png --no-show
-  python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl \\
-      --ixi-root /files/repo/uncertainty-quantification/datasets/IXI \\
-      --atlas-pkl /files/repo/uncertainty-quantification/datasets/IXI/atlas.pkl \\
-      --split Train --num-subjects 3 \\
-      --save-path /files/repo/uncertainty-quantification/assets/images/unigrad-io/3d/sweep_io.png --no-show
+
+    python experiments/unigrad-io/sweep_io_iterations.py --split Train --num-subjects 3 --save-path /files/repo/ /assets/images/unigrad-io/sweep_io.png --no-show
+  
+    python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl --ixi-root /datasets/IXI --atlas-pkl /datasets   IXI/atlas.pkl --split Train --num-subjects 3 --save-path /assets/images/unigrad-io/3d/sweep_io.png --no-show
 
 Omit ``--ixi-root`` / ``--save-path`` to use defaults (see argparse help): on NRP,
 inputs under ``<repo>/datasets/``; sweep figures under ``<repo>/assets/images/unigrad-io/``.
