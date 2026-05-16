@@ -27,9 +27,9 @@ For each subject we emit:
 | -------------------- | ------------- | ----------------------------------------------------------------- |
 | optimiser            | Adam          | `icon_registration.itk_wrapper.finetune_execute`                  |
 | learning rate        | `2e-5`        | `DEFAULT_FINETUNE_LEARNING_RATE`                                  |
-| similarity           | LNCC          | paper §2.3, "We use 1 − LNCC as similarity measure"               |
-| regulariser          | gradICON, λ=1.5 | paper §2.3 / Eq. (1)                                            |
-| input preprocessing  | clip 99th %ile → `[0, 1]`, resample to `175 × 175 × 175` (pseudo-volume = 5-slice replication) | paper §2.1 |
+| similarity           | LNCC          | paper section 2.3 ("We use 1 − LNCC as similarity measure")               |
+| regulariser          | gradICON, λ=1.5 | paper section 2.3 / Eq. (1)                                            |
+| input preprocessing  | clip 99th %ile → `[0, 1]`, resample to `175 × 175 × 175` (pseudo-volume = 5-slice replication) | paper section 2.1 |
 | atlas slice          | index 111     | this repo (`ATLAS_SLICE_INDEX` in `create_unigrad_io_data.py`)   |
 | LNCC window (eval)   | σ = 5  ⇒ 11-px window | `icon_registration.losses.LNCC` default; `--lncc-sigma` flag |
 
@@ -97,9 +97,9 @@ Anti-patterns to watch for:
 - `io_loss` falling while `LNCC` is flat → the gradICON regulariser term is dropping (more invertible) but 2D similarity isn't moving. Usually benign, but it means you're past the "useful sim improvement" regime.
 - `neg_jac_pct` close to zero but `error_map` is all noise → either IO is doing essentially nothing (zero-shot already perfect for this pair) or the dynamic range is just below visibility. Check `mean_error_map_px` in the CSV.
 
-## Reproducing the runs
+## Reproducing
 
-Example: 5 random Train subjects, deterministic via `--seed`:
+Defaults: `--checkpoints 0,50,100,150,200,250`, `--seed 42`.
 
 ```bash
 python experiments/unigrad-io/sweep_io_iterations.py \
@@ -107,13 +107,7 @@ python experiments/unigrad-io/sweep_io_iterations.py \
     --save-path ./assets/images/unigrad-io/sweep_io.png --no-show
 ```
 
-This uses the script's defaults `--checkpoints 0,50,100,150,200,250` (centred
-on the official UniGradICON IO default of 50 iterations) and `--seed 42`.
-
-Outputs land next to `./assets/images/unigrad-io/sweep_io.png` with the
-subject ID inserted (one PNG pair + one CSV per subject).
-
-Explicit indices instead of random sampling:
+Fixed indices instead of `--num-subjects`:
 
 ```bash
 python experiments/unigrad-io/sweep_io_iterations.py \
@@ -121,10 +115,12 @@ python experiments/unigrad-io/sweep_io_iterations.py \
     --save-path ./assets/images/unigrad-io/sweep_io.png --no-show
 ```
 
+Outputs are `<stem>_<subject_stem>_images.png`, `_curves.png`, `_metrics.csv` beside `--save-path`.
+
 ## Related files
 
 - `experiments/unigrad-io/sweep_io_iterations.py` — this experiment.
 - `experiments/unigrad-io/create_unigrad_io_data.py` — full-dataset `error_map` generator that picks one IO iteration count based on what the sweep told you.
 - `experiments/unigrad-io/visualize_unigrad_io_data.py` — visualiser for the resulting NPZs (`source / target / phi_pred / warped_pred / phi_predio / warped_predio / error_map`).
 - `docs/GPU_MEMORY_OPTIMIZATIONS.md` — notes on the memory hygiene used in IO.
-- `reports/uniGradICON.pdf` — the paper, Eq. (1) and §2.3 are the relevant bits.
+- `reports/uniGradICON.pdf` — Eq. (1) and section 2.3.

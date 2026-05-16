@@ -1,53 +1,61 @@
-# Nautilus (Kubernetes) deployment
+# Nautilus (NRP Kubernetes)
 
-## Layout on `/files`
+Runbook for **PVC-mounted GPU workloads**: repo + venv + datasets under `/files`, manifests without hard-coded namespaces (use local kube context).
+
+**Related repo choices:** pipeline code lives in **`experiments/`** (formerly `datahub/`). Manifests prefer **Ampere/Ada** GPUs via `nvidia.com/gpu.product`; **V100 is excluded** — widen the list in YAML if jobs stay Pending.
+
+---
+
+## `/files` layout
 
 ```text
 /files/
-  repo/uncertainty-quantification/   # git clone
-  venvs/unc/                          # pip env (setup once)
-  datasets/IXI_2D/                    # Train/ Val/ Test/ Atlas/
-  outputs/IXI_2D_unigrad_io/            # create_unigrad_io_data.py
-  runs/                               # U-Net checkpoints (later)
+  repo/uncertainty-quantification/
+  venvs/unc/
+  datasets/IXI_2D/          # 2D slices (Train/Val/Test/Atlas)
+  datasets/IXI/             # optional raw *.pkl volumes for 3D sweep
+  outputs/IXI_2D_unigrad_io/
+  runs/
 ```
+
+---
 
 ## Prerequisites
 
-- `kubectl` configured for Nautilus (download kubeconfig from the portal; keep it **local only**).
-- Access to a namespace where you can create PVCs and GPU pods.
+- `kubectl` + kubeconfig from the portal (keep local; do not commit).
+- Namespace with PVC + GPU quota.
 
 ```bash
-# Replace with your namespace (do not commit this value to a public repo)
-export KUBE_NS=your-namespace-here
-kubectl config set-context --current --namespace="${KUBE_NS}"
+kubectl config set-context --current --namespace=<your-namespace>
 ```
 
-## 1. Claim storage (once)
+---
+
+## 1. PVC (once)
 
 ```bash
 kubectl apply -f deploy/nautilus/pvc.yaml
 kubectl get pvc unc-files
 ```
 
-If `rook-cephfs` is wrong for your namespace, check `kubectl get storageclass` and edit
-`pvc.yaml`.
+Adjust `storageClassName` in `pvc.yaml` if `rook-cephfs` is wrong (`kubectl get storageclass`).
 
-## 2. Start dev pod
+---
+
+## 2. Pods
+
+| Goal | Manifest | Shell |
+|------|-----------|--------|
+| Interactive dev (limits ~16 CPU / ~32 Gi incl. shm) | `pod-dev.yaml` | `kubectl exec -it unc-dev -- bash` |
+| More CPU/RAM (e.g. long IO sweep) | `deployment-heavy.yaml` | `kubectl exec -it deployment/unc-heavy -- bash` |
+| Batch IO NPZ generation | `job-unigrad-io-data.yaml` | `kubectl logs -f job/unc-unigrad-io-data` |
 
 ```bash
 kubectl apply -f deploy/nautilus/pod-dev.yaml
 kubectl wait --for=condition=Ready pod/unc-dev --timeout=20m
-kubectl exec -it unc-dev -- bash
 ```
 
-If the pod stays **Pending**, loosen GPU names in `pod-dev.yaml` or remove the
-`nodeAffinity` block temporarily.
-
-### More CPU/RAM for long jobs (e.g. `sweep_io_iterations.py`)
-
-Bare Pods (`pod-dev.yaml`) hit NRP limits (~16 CPU, ~32 Gi including shm). For heavier
-interactive runs, apply **`deployment-heavy.yaml`**: it uses the same PVC but requests **up to
-16 CPU / 64 Gi** RAM (matches the batch Job manifest pattern).
+Heavy interactive pod:
 
 ```bash
 kubectl apply -f deploy/nautilus/deployment-heavy.yaml
@@ -55,58 +63,47 @@ kubectl rollout status deployment/unc-heavy --timeout=25m
 kubectl exec -it deployment/unc-heavy -- bash
 ```
 
-Stop it when idle: `kubectl delete deployment unc-heavy` (PVC is unchanged).
+Delete deployment when idle: `kubectl delete deployment unc-heavy`.
 
-## 3. Inside the pod — one-time setup
+---
 
-The dev image **`pytorch/pytorch:…-devel`** usually does **not** ship with `git`. Install it once in the pod (Debian/apt), then clone onto the PVC so the repo survives pod restarts.
+## 3. One-time setup in the container
+
+Image may lack `git`:
 
 ```bash
-# Install git (~30s; harmless if apt already stale)
-sudo apt-get update && sudo apt-get install -y git
-# dev container often runs as root — if sudo is missing and you are root, omit sudo:
-#   apt-get update && apt-get install -y git
+apt-get update && apt-get install -y git   # root shell typical
+```
 
-# Clone repo (HTTPS; use SSH URL + keys only if you prefer)
-ORG=your-org   # or USER for a personal fork
-mkdir -p /files/repo
-cd /files/repo
-git clone "https://github.com/${ORG}/uncertainty-quantification.git"
+Clone onto PVC:
+
+```bash
+mkdir -p /files/repo && cd /files/repo
+git clone https://github.com/<org>/uncertainty-quantification.git
 cd uncertainty-quantification
-
-# Venv on PVC (~15–20 min, only once)
 bash deploy/nautilus/scripts/setup-venv.sh
-
-# GPU check
 source /files/venvs/unc/bin/activate
 python experiments/resource_checks/diagnose_torch_gpu.py
 ```
 
-**No apt / git install blocked?** Unpack from GitHub’s zip on the PVC (no git needed):
+**Zip instead of git:** unpack GitHub `main.zip` under `/files/repo/` (may need `apt-get install -y unzip curl`).
+
+---
+
+## 4. Copy data to PVC
+
+From laptop — **create parent dirs first** (`kubectl cp` unpack needs them):
 
 ```bash
-mkdir -p /files/repo && cd /files/repo
-curl -fsSL -o repo.zip https://github.com/your-org/uncertainty-quantification/archive/refs/heads/main.zip
-unzip -q repo.zip && mv uncertainty-quantification-main uncertainty-quantification
-cd uncertainty-quantification   # unzip may need apt install unzip curl
-```
-
-## 4. Transfer IXI_2D onto PVC
-
-From your **laptop** (while `unc-dev` is running):
-
-```bash
-# On machine that has IXI_2D/
-tar czf ixi_2d.tar.gz -C /path/to/parent IXI_2D
+kubectl exec unc-dev -- mkdir -p /files/datasets
 kubectl cp ixi_2d.tar.gz unc-dev:/files/datasets/ixi_2d.tar.gz
 kubectl exec unc-dev -- bash -c \
-  'mkdir -p /files/datasets && cd /files/datasets && tar xzf ixi_2d.tar.gz && \
-   rm -f ixi_2d.tar.gz && ls IXI_2D/Train | wc -l'
+  'cd /files/datasets && tar xzf ixi_2d.tar.gz && rm -f ixi_2d.tar.gz'
 ```
 
-Expected layout: `/files/datasets/IXI_2D/{Train,Val,Test,Atlas}/`.
+---
 
-## 5. Smoke test (inside pod)
+## 5. Smoke test
 
 ```bash
 source /files/venvs/unc/bin/activate
@@ -114,9 +111,13 @@ cd /files/repo/uncertainty-quantification
 bash deploy/nautilus/scripts/run-io-data-smoke.sh
 ```
 
-## 6. Full data generation
+Paths come from `deploy/nautilus/scripts/env.sh` (`IXI_ROOT`, `UNIGRAD_IO_OUT`, …).
 
-**Option A — tmux in dev pod** (easy to watch logs):
+---
+
+## 6. Full IO generation
+
+**Interactive (tmux):**
 
 ```bash
 tmux new -s io
@@ -125,66 +126,72 @@ cd /files/repo/uncertainty-quantification
 python experiments/unigrad-io/create_unigrad_io_data.py \
   --ixi-root /files/datasets/IXI_2D \
   --output-path /files/outputs/IXI_2D_unigrad_io
-# Ctrl-b d to detach; kubectl exec back in later
 ```
 
-**Option B — Kubernetes Job** (keeps running if you disconnect):
+**Job:**
 
 ```bash
-# From laptop
 kubectl apply -f deploy/nautilus/job-unigrad-io-data.yaml
 kubectl logs -f job/unc-unigrad-io-data
 ```
 
-The script skips slices whose `.npz` already exists (resumable). Use
-`--overwrite` only when regenerating.
+Runs are **resumable** (existing `.npz` skipped unless `--overwrite`).
 
-## 7. Cleanup
+---
+
+## 7. Sync laptop → cluster
+
+From repo root on laptop after committing:
 
 ```bash
-kubectl delete pod unc-dev          # dev pod only; PVC kept
+git push
+kubectl exec unc-dev -- bash -lc 'cd /files/repo/uncertainty-quantification && git pull --ff-only'
+```
+
+(Uncommitted edits: stream a tarball or use `kubectl cp` for specific files.)
+
+---
+
+## 8. Cleanup
+
+```bash
+kubectl delete pod unc-dev
+kubectl delete deployment unc-heavy
 kubectl delete job unc-unigrad-io-data
 ```
 
+PVC persists unless deleted separately.
+
+---
+
 ## Troubleshooting
 
-### `PODs without controllers are limited to 16 cores and 32 GB of RAM`
+| Issue | What to do |
+|-------|------------|
+| Bare Pod admission (`…limited to 16 cores and 32 GB`) | Use `deployment-heavy.yaml` or `job-unigrad-io-data.yaml`, or shrink `pod-dev.yaml` resources + shm. |
+| Pod **Pending** (GPU) | Check node labels: `kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\t}{.metadata.labels.nvidia\.com/gpu\.product}{\n}{end}'` — add matching strings to YAML `values:`. |
+| `kubectl cp` / tar errors | Ensure destination dirs exist (`mkdir -p /files/datasets`). |
+| `git` missing in container | `apt-get install -y git`. |
+| `set: pipefail` / script errors | Shell scripts must use **LF** line endings (see `.gitattributes`). |
 
-NRP blocks **bare Pods** (created with `kind: Pod` and no parent) above **16 CPU** and **32 Gi RAM** (including memory-backed volumes like `/dev/shm`).
-
-- **Controller** = a Kubernetes object that owns Pods: `Deployment`, `StatefulSet`, `Job`, `CronJob`, etc. Your `unc-dev` manifest is a standalone Pod, so the stricter cap applies.
-- **Fix (dev pod):** `pod-dev.yaml` is sized under the cap (8 CPU, 24 Gi container RAM + 4 Gi shm). Re-apply after pulling the latest manifest.
-- **Need more RAM for a long run?** Use `job-unigrad-io-data.yaml` (`kind: Job`) or a `Deployment` with 1 replica instead of a bare Pod.
-
-### `git: command not found` inside `unc-dev`
-
-The PyTorch CUDA image drops `git` to stay small. Fix: `sudo apt-get update && sudo apt-get install -y git` inside the pod, then clone. Or fetch the repo ZIP with `curl`/`wget` over HTTPS (see step 3). **PVC note:** reinstalling git is only needed inside a fresh container — your clone under `/files/repo/` persists.
-
-### `kubectl cp` tarball instead
-
-You can tar the repo locally and skip git on the cluster:
-
-```bash
-# laptop: from repo root, excluding huge dirs
-tar czf uq-repo.tar.gz --exclude=.git --exclude=data --exclude=venv .
-kubectl cp uq-repo.tar.gz unc-dev:/files/repo/uq-repo.tar.gz
-# pod:
-mkdir -p /files/repo/uncertainty-quantification && cd /files/repo/uncertainty-quantification && tar xzf ../uq-repo.tar.gz
-```
+---
 
 ## Quick reference
 
 | Task | Command |
 |------|---------|
-| Activate env | `source /files/venvs/unc/bin/activate` |
-| Env vars | `source deploy/nautilus/scripts/env.sh` |
-| IO sweep | `python experiments/unigrad-io/sweep_io_iterations.py --ixi-root /files/datasets/IXI_2D ...` |
-| Train U-Net | `python experiments/train_error_map_unet.py` (point `--data-dir` at outputs path) |
+| Activate venv | `source /files/venvs/unc/bin/activate` |
+| Env exports | `source deploy/nautilus/scripts/env.sh` |
+| IO sweep (2D) | `python experiments/unigrad-io/sweep_io_iterations.py --ixi-root /files/datasets/IXI_2D …` |
+| IO sweep (3D pickles) | `--mode 3d-pkl --ixi-root /files/datasets/IXI --atlas-pkl /files/datasets/IXI/atlas.pkl …` |
+| Train U-Net | `python experiments/train_error_map_unet.py` |
+
+---
 
 ## Vertex vs Nautilus
 
-| Vertex | Nautilus (this setup) |
-|--------|------------------------|
-| Custom Docker image per revision | Stock `pytorch/pytorch` image |
-| Deps in image | Deps in `/files/venvs/unc` on PVC |
-| New image per experiment | New pod/job, same image + same `/files` |
+| Vertex | Nautilus |
+|--------|----------|
+| Custom image per revision | Stock `pytorch/pytorch` |
+| Deps baked in image | Venv on PVC |
+| Per revision image | New Pod/Job, same `/files` |
