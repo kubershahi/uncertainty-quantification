@@ -93,6 +93,8 @@ spec:
               containerPort: 8888
               protocol: TCP
           env:
+            - name: JUPYTER_ROOT
+              value: "/files"
             - name: JUPYTER_TOKEN
               value: ""
           resources:

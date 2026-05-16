@@ -19,19 +19,24 @@ if [[ ! -x "${VENV_PY}" ]]; then
   err "Missing ${VENV_PY}"
 fi
 
-REPO="${UNC_REPO:-/files/repo/uncertainty-quantification}"
-if [[ ! -d "${REPO}" ]]; then
-  echo "WARNING: ${REPO} missing — using /files as notebook root until you git clone there." >&2
-  REPO=/files
+# File browser root (default: whole PVC). Override with JUPYTER_ROOT on the Deployment.
+JUPYTER_ROOT="${JUPYTER_ROOT:-/files}"
+if [[ ! -d "${JUPYTER_ROOT}" ]]; then
+  err "JUPYTER_ROOT is not a directory: ${JUPYTER_ROOT}"
 fi
-export PYTHONPATH="${REPO}"
-cd "${REPO}"
 
-_ENV="${REPO}/deploy/nautilus/scripts/env.sh"
-if [[ -f "${_ENV}" ]]; then
-  # shellcheck source=env.sh
-  source "${_ENV}"
+REPO="${UNC_REPO:-/files/repo/uncertainty-quantification}"
+if [[ -d "${REPO}" ]]; then
+  export PYTHONPATH="${REPO}${PYTHONPATH:+:${PYTHONPATH}}"
+  _ENV="${REPO}/deploy/nautilus/scripts/env.sh"
+  if [[ -f "${_ENV}" ]]; then
+    # shellcheck source=env.sh
+    source "${_ENV}"
+  fi
+else
+  echo "WARNING: ${REPO} missing — notebooks still open at ${JUPYTER_ROOT}; clone repo for experiments/ imports." >&2
 fi
+cd "${JUPYTER_ROOT}"
 
 # Prefer venv Jupyter (avoid conda/image "jupyter" on PATH).
 if [[ -x "${VENV_JUPYTER}" ]]; then
@@ -50,13 +55,13 @@ else
   TOKEN_ARGS=(--ServerApp.token="" --ServerApp.password="")
 fi
 
-echo "Starting Jupyter Lab on 0.0.0.0:8888, root=${REPO}" >&2
+echo "Starting Jupyter Lab on 0.0.0.0:8888, file browser root=${JUPYTER_ROOT}" >&2
 # NRP pods run as root; Jupyter refuses to start without this flag.
 exec "${JLAUNCH[@]}" \
   --allow-root \
   --ip=0.0.0.0 \
   --port=8888 \
   --no-browser \
-  --ServerApp.root_dir="${REPO}" \
+  --ServerApp.root_dir="${JUPYTER_ROOT}" \
   --ServerApp.allow_origin="*" \
   "${TOKEN_ARGS[@]}"
