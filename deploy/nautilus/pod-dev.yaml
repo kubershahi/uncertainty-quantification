@@ -46,7 +46,12 @@ spec:
     - name: main
       image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
       workingDir: /files
-      command: ["sleep", "infinity"]
+      command: ["/bin/bash", "-lc"]
+      args:
+        - |
+          export DEBIAN_FRONTEND=noninteractive
+          command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*; }
+          exec sleep infinity
       resources:
         requests:
           cpu: "4"

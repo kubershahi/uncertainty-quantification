@@ -44,12 +44,12 @@ Adjust `storageClassName` in `pvc.yaml` if `rook-cephfs` is wrong (`kubectl get 
 
 ## 2. Pods
 
-| Goal | Manifest | Shell |
-|------|-----------|--------|
-| Interactive dev (limits ~16 CPU / ~32 Gi incl. shm) | `pod-dev.yaml` | `kubectl exec -it unc-dev -- bash` |
-| More CPU/RAM (e.g. long IO sweep) | `deployment-heavy.yaml` | `kubectl exec -it deployment/unc-heavy -- bash` |
-| Jupyter Lab on PVC (edit/run without laptop git loop) | `deployment-jupyter.yaml` | See **Jupyter Lab** below |
-| Batch IO NPZ generation | `job-unigrad-io-data.yaml` | `kubectl logs -f job/unc-unigrad-io-data` |
+| Goal                                                  | Manifest                   | Shell                                           |
+| ----------------------------------------------------- | -------------------------- | ----------------------------------------------- |
+| Interactive dev (limits ~16 CPU / ~32 Gi incl. shm)   | `pod-dev.yaml`             | `kubectl exec -it unc-dev -- bash`              |
+| More CPU/RAM (e.g. long IO sweep)                     | `deployment-heavy.yaml`    | `kubectl exec -it deployment/unc-heavy -- bash` |
+| Jupyter Lab on PVC (edit/run without laptop git loop) | `deployment-jupyter.yaml`  | See **Jupyter Lab** below                       |
+| Batch IO NPZ generation                               | `job-unigrad-io-data.yaml` | `kubectl logs -f job/unc-unigrad-io-data`       |
 
 ```bash
 kubectl apply -f deploy/nautilus/pod-dev.yaml
@@ -96,11 +96,7 @@ kubectl delete svc unc-jupyter
 
 ## 3. One-time setup in the container
 
-Image may lack `git`:
-
-```bash
-apt-get update && apt-get install -y git   # root shell typical
-```
+**Git:** the stock `pytorch/pytorch` image has no `git`. `pod-dev`, `unc-heavy`, and `unc-jupyter` **install it on container start** (ephemeral layer — not on the PVC). You only need a manual `apt-get install -y git` if you use a custom image without that entrypoint.
 
 Clone onto PVC:
 
@@ -197,32 +193,32 @@ PVC persists unless deleted separately.
 
 ## Troubleshooting
 
-| Issue | What to do |
-|-------|------------|
-| Bare Pod admission (`…limited to 16 cores and 32 GB`) | Use `deployment-heavy.yaml` or `job-unigrad-io-data.yaml`, or shrink `pod-dev.yaml` resources + shm. |
-| Pod **Pending** (GPU) | Check node labels: `kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\t}{.metadata.labels.nvidia\.com/gpu\.product}{\n}{end}'` — add matching strings to YAML `values:`. |
-| `kubectl cp` / tar errors | Ensure destination dirs exist (`mkdir -p /files/datasets`). |
-| `git` missing in container | `apt-get install -y git`. |
-| `set: pipefail` / script errors | Shell scripts must use **LF** line endings (see `.gitattributes`). |
+| Issue                                                 | What to do                                                                                                                                                                               |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bare Pod admission (`…limited to 16 cores and 32 GB`) | Use `deployment-heavy.yaml` or `job-unigrad-io-data.yaml`, or shrink `pod-dev.yaml` resources + shm.                                                                                     |
+| Pod **Pending** (GPU)                                 | Check node labels: `kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\t}{.metadata.labels.nvidia\.com/gpu\.product}{\n}{end}'` — add matching strings to YAML `values:`. |
+| `kubectl cp` / tar errors                             | Ensure destination dirs exist (`mkdir -p /files/datasets`).                                                                                                                              |
+| `git` missing in container                            | Re-apply `pod-dev` / `deployment-heavy` / `deployment-jupyter` (auto-install on start), or `bash deploy/nautilus/scripts/ensure-system-deps.sh`.                                                                 |
+| `set: pipefail` / script errors                       | Shell scripts must use **LF** line endings (see `.gitattributes`).                                                                                                                       |
 
 ---
 
 ## Quick reference
 
-| Task | Command |
-|------|---------|
-| Activate venv | `source /files/venvs/unc/bin/activate` |
-| Env exports | `source deploy/nautilus/scripts/env.sh` |
-| IO sweep (2D) | `python experiments/unigrad-io/sweep_io_iterations.py --ixi-root /files/datasets/IXI_2D …` |
+| Task                  | Command                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------ |
+| Activate venv         | `source /files/venvs/unc/bin/activate`                                                     |
+| Env exports           | `source deploy/nautilus/scripts/env.sh`                                                    |
+| IO sweep (2D)         | `python experiments/unigrad-io/sweep_io_iterations.py --ixi-root /files/datasets/IXI_2D …` |
 | IO sweep (3D pickles) | `--mode 3d-pkl --ixi-root /files/datasets/IXI --atlas-pkl /files/datasets/IXI/atlas.pkl …` |
-| Train U-Net | `python experiments/train_error_map_unet.py` |
+| Train U-Net           | `python experiments/train_error_map_unet.py`                                               |
 
 ---
 
 ## Vertex vs Nautilus
 
-| Vertex | Nautilus |
-|--------|----------|
-| Custom image per revision | Stock `pytorch/pytorch` |
-| Deps baked in image | Venv on PVC |
-| Per revision image | New Pod/Job, same `/files` |
+| Vertex                    | Nautilus                   |
+| ------------------------- | -------------------------- |
+| Custom image per revision | Stock `pytorch/pytorch`    |
+| Deps baked in image       | Venv on PVC                |
+| Per revision image        | New Pod/Job, same `/files` |

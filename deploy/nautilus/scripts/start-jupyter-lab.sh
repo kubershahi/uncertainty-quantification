@@ -51,7 +51,9 @@ else
 fi
 
 echo "Starting Jupyter Lab on 0.0.0.0:8888, root=${REPO}" >&2
+# NRP pods run as root; Jupyter refuses to start without this flag.
 exec "${JLAUNCH[@]}" \
+  --allow-root \
   --ip=0.0.0.0 \
   --port=8888 \
   --no-browser \
