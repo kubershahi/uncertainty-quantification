@@ -1,0 +1,118 @@
+# Jupyter Lab on the same PVC as unc-heavy — edit notebooks under /files/repo without laptop git push/pull.
+# Requires venv + repo on PVC (setup-venv + clone). Optional env JUPYTER_TOKEN for auth when not only using port-forward.
+#   kubectl apply -f deploy/nautilus/deployment-jupyter.yaml
+#   kubectl port-forward svc/unc-jupyter 8888:8888
+# Open http://127.0.0.1:8888 - pick kernel "unc" (ipykernel).
+apiVersion: v1
+kind: Service
+metadata:
+  name: unc-jupyter
+  labels:
+    app: unc-jupyter
+spec:
+  type: ClusterIP
+  selector:
+    app: unc-jupyter
+  ports:
+    - name: http
+      port: 8888
+      targetPort: 8888
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unc-jupyter
+  labels:
+    app: unc-jupyter
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 1800
+  revisionHistoryLimit: 2
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: unc-jupyter
+  template:
+    metadata:
+      labels:
+        app: unc-jupyter
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - NVIDIA-A10
+                      - NVIDIA-A100-80GB-PCIe
+                      - NVIDIA-A100-PCIE-40GB
+                      - NVIDIA-A100-SXM4-80GB
+                      - NVIDIA-A40
+                      - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-GeForce-RTX-4090
+                      - NVIDIA-GH200-480GB
+                      - NVIDIA-H200-NVL
+                      - NVIDIA-L4
+                      - NVIDIA-L40
+                      - NVIDIA-L40S
+                      - NVIDIA-RTX-4000-Ada-Generation
+                      - NVIDIA-RTX-5000-Ada-Generation
+                      - NVIDIA-RTX-A4000
+                      - NVIDIA-RTX-A5000
+                      - NVIDIA-RTX-A6000
+                      - NVIDIA-RTX-PRO-6000-Blackwell-Max-Q-Workstation-Edition
+                      - NVIDIA-TITAN-RTX
+                      - Quadro-RTX-6000
+                      - Quadro-RTX-8000
+                      - Tesla-V100-SXM2-32GB
+      containers:
+        - name: jupyter
+          image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
+          workingDir: /files
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              SCRIPT=/files/repo/uncertainty-quantification/deploy/nautilus/scripts/start-jupyter-lab.sh
+              if [[ ! -f "${SCRIPT}" ]]; then
+                echo "ERROR: ${SCRIPT} not found. Clone the repo onto PVC under /files/repo/ (see docs/NAUTILUS.md), then: kubectl rollout restart deployment unc-jupyter" >&2
+                exit 1
+              fi
+              exec bash "${SCRIPT}"
+          ports:
+            - name: http
+              containerPort: 8888
+              protocol: TCP
+          env:
+            - name: JUPYTER_TOKEN
+              value: ""
+          resources:
+            requests:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+              ephemeral-storage: 50Gi
+          volumeMounts:
+            - name: files
+              mountPath: /files
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: files
+          persistentVolumeClaim:
+            claimName: unc-files
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi

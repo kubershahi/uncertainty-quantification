@@ -48,6 +48,7 @@ Adjust `storageClassName` in `pvc.yaml` if `rook-cephfs` is wrong (`kubectl get 
 |------|-----------|--------|
 | Interactive dev (limits ~16 CPU / ~32 Gi incl. shm) | `pod-dev.yaml` | `kubectl exec -it unc-dev -- bash` |
 | More CPU/RAM (e.g. long IO sweep) | `deployment-heavy.yaml` | `kubectl exec -it deployment/unc-heavy -- bash` |
+| Jupyter Lab on PVC (edit/run without laptop git loop) | `deployment-jupyter.yaml` | See **Jupyter Lab** below |
 | Batch IO NPZ generation | `job-unigrad-io-data.yaml` | `kubectl logs -f job/unc-unigrad-io-data` |
 
 ```bash
@@ -67,6 +68,32 @@ Delete deployment when idle: `kubectl delete deployment unc-heavy`.
 
 ---
 
+## Jupyter Lab (edit on cluster)
+
+Use this when you prefer **notebooks and a browser** on the repo under `/files` instead of syncing every change from your laptop.
+
+**Prerequisites:** same as below — `pvc.yaml`, clone repo to `/files/repo/uncertainty-quantification`, run `deploy/nautilus/scripts/setup_venv.sh` so `/files/venvs/unc` exists and includes **JupyterLab** (installed by `setup_unc.sh`, which `setup_venv.sh` calls). If your venv is older, activate it and run `pip install jupyterlab` once.
+
+```bash
+kubectl apply -f deploy/nautilus/deployment-jupyter.yaml
+kubectl rollout status deployment/unc-jupyter --timeout=25m
+kubectl port-forward svc/unc-jupyter 8888:8888
+```
+
+Open **http://127.0.0.1:8888**. With the default empty `JUPYTER_TOKEN` in the manifest, Jupyter runs **without a password** (fine when traffic is only via **localhost** from `port-forward`). To set a token, edit the deployment `env` value for `JUPYTER_TOKEN` (or `kubectl set env deployment/unc-jupyter JUPYTER_TOKEN=...`) and roll out again.
+
+- **Kernel:** choose **“unc”** (registered by `setup_unc.sh`).
+- **GPU:** same GPU-node rules as `unc-heavy`; verify inside a notebook with `import torch; torch.cuda.is_available()`.
+
+Stop when idle:
+
+```bash
+kubectl delete deployment unc-jupyter
+kubectl delete svc unc-jupyter
+```
+
+---
+
 ## 3. One-time setup in the container
 
 Image may lack `git`:
@@ -81,7 +108,7 @@ Clone onto PVC:
 mkdir -p /files/repo && cd /files/repo
 git clone https://github.com/<org>/uncertainty-quantification.git
 cd uncertainty-quantification
-bash deploy/nautilus/scripts/setup-venv.sh
+bash deploy/nautilus/scripts/setup_venv.sh
 source /files/venvs/unc/bin/activate
 python experiments/resource_checks/diagnose_torch_gpu.py
 ```
@@ -139,9 +166,11 @@ Runs are **resumable** (existing `.npz` skipped unless `--overwrite`).
 
 ---
 
-## 7. Sync laptop → cluster
+## 7. Sync laptop ↔ cluster (optional)
 
-From repo root on laptop after committing:
+If you use **Jupyter Lab** on the cluster, you usually **edit on `/files`** and only pull/push when you want backup or review — no constant loop.
+
+When you still use a local checkout:
 
 ```bash
 git push
@@ -157,6 +186,8 @@ kubectl exec unc-dev -- bash -lc 'cd /files/repo/uncertainty-quantification && g
 ```bash
 kubectl delete pod unc-dev
 kubectl delete deployment unc-heavy
+kubectl delete deployment unc-jupyter
+kubectl delete svc unc-jupyter
 kubectl delete job unc-unigrad-io-data
 ```
 
