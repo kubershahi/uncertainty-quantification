@@ -17,7 +17,10 @@ if [[ -d /files/.ssh ]]; then
   done
 fi
 if [[ -f /files/.ssh/id_ed25519 ]]; then
-  export GIT_SSH_COMMAND="ssh -i /files/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"
+  _ssh_cmd="ssh -i /files/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"
+  export GIT_SSH_COMMAND="${_ssh_cmd}"
+  # Persist for all pods/shells (kubectl exec does not always source this file).
+  git config --global core.sshCommand "${_ssh_cmd}" 2>/dev/null || true
 fi
 
 # Data under the repo clone on PVC (gitignored via datasets/** in .gitignore)
