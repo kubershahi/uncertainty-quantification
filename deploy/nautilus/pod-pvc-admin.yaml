@@ -1,0 +1,54 @@
+# Lightweight admin pod — PVC /files, git, SSH, kubectl cp. No GPU (use deployment-gpu / deployment-jupyter-lab for compute).
+# NRP bare-Pod cap ~16 CPU / ~32 Gi (incl. shm); this manifest stays well under that.
+# kubectl apply -f deploy/nautilus/pod-pvc-admin.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unc-dev
+  labels:
+    app: unc-dev
+spec:
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: ubuntu:22.04
+      workingDir: /files
+      env:
+        - name: HOME
+          value: /files/home/root
+        - name: DEBIAN_FRONTEND
+          value: noninteractive
+      command: ["/bin/bash", "-lc"]
+      args:
+        - |
+          export HOME=/files/home/root
+          mkdir -p "$HOME"
+          command -v git >/dev/null && command -v ssh >/dev/null || {
+            apt-get update -qq &&
+            apt-get install -y -qq --no-install-recommends git ca-certificates openssh-client &&
+            rm -rf /var/lib/apt/lists/*;
+          }
+          ENV_SH=/files/repo/uncertainty-quantification/deploy/nautilus/scripts/env.sh
+          if [[ -f "${ENV_SH}" ]]; then
+            MARK="# unc-nautilus-env"
+            if ! grep -qF "${MARK}" "${HOME}/.bashrc" 2>/dev/null; then
+              { echo "${MARK}"; echo "source \"${ENV_SH}\""; } >> "${HOME}/.bashrc"
+            fi
+            # shellcheck source=/dev/null
+            source "${ENV_SH}"
+          fi
+          exec sleep infinity
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+      volumeMounts:
+        - name: files
+          mountPath: /files
+  volumes:
+    - name: files
+      persistentVolumeClaim:
+        claimName: unc-files

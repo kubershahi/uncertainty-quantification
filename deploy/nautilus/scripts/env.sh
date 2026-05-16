@@ -2,24 +2,34 @@
 export FILES_ROOT=/files
 export REPO_ROOT=/files/repo/uncertainty-quantification
 export VENV_DIR=/files/venvs/unc
-# Persistent $HOME on PVC (git config, SSH known_hosts, credential store — not in the container layer).
+# Persistent $HOME on PVC (git config, SSH keys, known_hosts — not in the container layer).
 export HOME=/files/home/root
-mkdir -p "${HOME}" /files/.ssh
+mkdir -p "${HOME}"
 
-# SSH keys + optional config on PVC at /files/.ssh/ (not under $HOME by default).
-# Symlink into ${HOME}/.ssh so plain `ssh -T git@github.com` finds them after `source env.sh`.
-if [[ -d /files/.ssh ]]; then
-  mkdir -p "${HOME}/.ssh"
-  chmod 700 /files/.ssh "${HOME}/.ssh" 2>/dev/null || true
-  for f in /files/.ssh/*; do
+_ssh_dir="${HOME}/.ssh"
+mkdir -p "${_ssh_dir}"
+chmod 700 "${_ssh_dir}" 2>/dev/null || true
+
+# One-time migration from legacy /files/.ssh/ (remove after all PVCs are migrated).
+_legacy_ssh=/files/.ssh
+if [[ -d "${_legacy_ssh}" ]]; then
+  for f in "${_legacy_ssh}"/*; do
     [[ -e "${f}" ]] || continue
-    ln -sfn "${f}" "${HOME}/.ssh/$(basename "${f}")"
+    _dest="${_ssh_dir}/$(basename "${f}")"
+    if [[ -L "${_dest}" ]]; then
+      rm -f "${_dest}"
+    fi
+    if [[ ! -e "${_dest}" ]]; then
+      mv "${f}" "${_dest}"
+    fi
   done
+  rmdir "${_legacy_ssh}" 2>/dev/null || true
 fi
-if [[ -f /files/.ssh/id_ed25519 ]]; then
-  _ssh_cmd="ssh -i /files/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"
+
+_ssh_key="${_ssh_dir}/id_ed25519"
+if [[ -f "${_ssh_key}" ]]; then
+  _ssh_cmd="ssh -i ${_ssh_key} -o StrictHostKeyChecking=accept-new"
   export GIT_SSH_COMMAND="${_ssh_cmd}"
-  # Persist for all pods/shells (kubectl exec does not always source this file).
   git config --global core.sshCommand "${_ssh_cmd}" 2>/dev/null || true
 fi
 
