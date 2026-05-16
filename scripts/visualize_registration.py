@@ -8,13 +8,7 @@ Visualizes:
 3. Before/after registration comparison
 
 Usage:
-python visualize_registration.py --atlas path/to/atlas.nii.gz \
-                                 --subject path/to/subject.nii.gz \
-                                 --registered path/to/registered.nii.gz \
-                                 --deformation path/to/deformation.h5 \
-                                 --compare-all \
-                                 --slice 90 \
-                                 -o assets/images/registration_comparison.png
+python visualize_registration.py --atlas path/to/atlas.nii.gz --subject path/to/subject.nii.gz --registered path/to/registered.nii.gz --deformation path/to/deformation.h5 --compare-all --slice 90 -o assets/images/registration_comparison.png
 """
 
 import argparse

@@ -149,9 +149,7 @@ Paths come from `deploy/nautilus/scripts/env.sh` (`IXI_2D_ROOT`, `UNIGRAD_IO_OUT
 tmux new -s io
 source /files/venvs/unc/bin/activate
 cd /files/repo/uncertainty-quantification
-python experiments/unigrad-io/create_unigrad_io_data.py \
-  --ixi-root /files/repo/uncertainty-quantification/datasets/IXI_2D \
-  --output-path /files/repo/uncertainty-quantification/datasets/IXI_2D_unigrad_io
+python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root /files/repo/uncertainty-quantification/datasets/IXI --atlas-pkl /files/repo/uncertainty-quantification/datasets/IXI/atlas.pkl --output-path /files/repo/uncertainty-quantification/datasets/IXI_unigrad_io --io-iterations 50
 ```
 
 **Job:**
@@ -179,6 +177,41 @@ git pull
 
 Large **`.npz`** IO datasets stay under **`datasets/IXI_2D_unigrad_io/`** in the repo (gitignored by `datasets/**`) — copy separately if needed, not via git.
 
+### Persistent git & SSH (all pods on the PVC)
+
+Git and SSH **do not** live in the container image. Store them **on the PVC under `/files`**:
+
+| What | Path on PVC |
+|------|-------------|
+| `git config --global` (name, email) | `/files/home/root/.gitconfig` |
+| Stored HTTPS credentials (if used) | `/files/home/root/.git-credentials` |
+| SSH private key | `/files/.ssh/id_ed25519` |
+| SSH public key | `/files/.ssh/id_ed25519.pub` |
+| SSH config (optional) | `/files/.ssh/config` |
+| `known_hosts` (github.com) | `/files/.ssh/known_hosts` or `${HOME}/.ssh/known_hosts` after `source env.sh` |
+
+`source env.sh` symlinks `/files/.ssh/*` → `/files/home/root/.ssh/` so `ssh -T git@github.com` works without `-i`.
+
+`deploy/nautilus/scripts/env.sh` sets **`HOME=/files/home/root`** and **`GIT_SSH_COMMAND`** when the key exists. Jupyter loads `env.sh` at start; in **unc-dev** / **unc-heavy** run:
+
+```bash
+source /files/repo/uncertainty-quantification/deploy/nautilus/scripts/env.sh
+```
+
+**One-time setup** (any pod with `/files` mounted):
+
+```bash
+export HOME=/files/home/root
+mkdir -p "$HOME" /files/.ssh
+git config --global user.name "Your Name"
+git config --global user.email "YOUR_ID+kubershahi@users.noreply.github.com"
+# SSH remote (after ssh-keygen + GitHub key):
+cd /files/repo/uncertainty-quantification
+git remote set-url origin git@github.com:kubershahi/uncertainty-quantification.git
+```
+
+New **unc-jupyter** / **unc-heavy** / **unc-dev** pods reuse the same files; no re-setup unless you delete the PVC.
+
 ---
 
 ## 8. Cleanup
@@ -205,6 +238,7 @@ PVC persists unless deleted separately.
 | `git` missing in container                            | Re-apply `pod-dev` / `deployment-heavy` / `deployment-jupyter` (auto-install on start), or `bash deploy/nautilus/scripts/ensure-system-deps.sh`.                                                                 |
 | `set: pipefail` / script errors                       | Shell scripts must use **LF** line endings (see `.gitattributes`).                                                                                                                       |
 | Terminal `source: not found`                          | Shell is `sh`, not bash — run `bash`, or use `. /files/venvs/unc/bin/activate`. Restart deployment after `start-jupyter-lab.sh` sets `SHELL=/bin/bash`.                                  |
+| `ssh-keygen: not found`                               | `apt-get install -y openssh-client` (root), or restart pod after manifests install `openssh-client` on start.                                                                            |
 
 ---
 

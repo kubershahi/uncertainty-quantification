@@ -2,7 +2,23 @@
 export FILES_ROOT=/files
 export REPO_ROOT=/files/repo/uncertainty-quantification
 export VENV_DIR=/files/venvs/unc
+# Persistent $HOME on PVC (git config, SSH known_hosts, credential store — not in the container layer).
 export HOME=/files/home/root
+mkdir -p "${HOME}" /files/.ssh
+
+# SSH keys + optional config on PVC at /files/.ssh/ (not under $HOME by default).
+# Symlink into ${HOME}/.ssh so plain `ssh -T git@github.com` finds them after `source env.sh`.
+if [[ -d /files/.ssh ]]; then
+  mkdir -p "${HOME}/.ssh"
+  chmod 700 /files/.ssh "${HOME}/.ssh" 2>/dev/null || true
+  for f in /files/.ssh/*; do
+    [[ -e "${f}" ]] || continue
+    ln -sfn "${f}" "${HOME}/.ssh/$(basename "${f}")"
+  done
+fi
+if [[ -f /files/.ssh/id_ed25519 ]]; then
+  export GIT_SSH_COMMAND="ssh -i /files/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"
+fi
 
 # Data under the repo clone on PVC (gitignored via datasets/** in .gitignore)
 export DATASETS_ROOT="${REPO_ROOT}/datasets"

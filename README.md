@@ -78,10 +78,7 @@ python scripts/visualize_ixi_2d.py --input-dir ./data/IXI_2D --recursive --no-sh
 Create synthetic triplets (`I_fixed`, `I_warped`, `phi`) as `*_triplet.npz`:
 
 ```bash
-python experiments/synthetic/create_synth_data.py \
-  --input-path ./data/IXI_2D/ \
-  --output-path ./data/IXI_2D_synth_trip/ \
-  --workers 64
+python experiments/synthetic/create_synth_data.py --input-path ./data/IXI_2D/ --output-path ./data/IXI_2D_synth_trip/ --workers 64
 ```
 
 Near-identity resampling (optional):
@@ -99,9 +96,7 @@ python experiments/data_checks/check_synth_data.py --data-dir ./data/IXI_2D_synt
 ### Phase II: UniGradICON error maps (fivers)
 
 ```bash
-python experiments/synthetic/create_unigrad_synth_data.py \
-  --input-path ./data/IXI_2D_synth_trip/ \
-  --output-path ./data/IXI_2D_unigrad_synth_fiver/
+python experiments/synthetic/create_unigrad_synth_data.py --input-path ./data/IXI_2D_synth_trip/ --output-path ./data/IXI_2D_unigrad_synth_fiver/
 ```
 
 Writes `*_fiver.npz` with `phi_true`, `phi_pred`, `phi_diff`, `error_map`, `valid_mask`, `qc_passed`, etc.
@@ -109,11 +104,7 @@ Writes `*_fiver.npz` with `phi_true`, `phi_pred`, `phi_diff`, `error_map`, `vali
 ### Phase III: Supervised error-map training
 
 ```bash
-python experiments/train_error_map_unet.py \
-  --data-dir ./data/IXI_2D_unigrad_synth_fiver/ \
-  --epochs 50 \
-  --batch-size 8 \
-  --out-dir ./runs/error_unet_run1
+python experiments/train_error_map_unet.py --data-dir ./data/IXI_2D_unigrad_synth_fiver/ --epochs 50 --batch-size 8 --out-dir ./runs/error_unet_run1
 ```
 
 Produces `metrics.csv`, `best_model.pt` (best **validation** masked MSE), and `run_config.json`.
@@ -121,10 +112,7 @@ Produces `metrics.csv`, `best_model.pt` (best **validation** masked MSE), and `r
 ### Evaluation + qualitative figures
 
 ```bash
-python experiments/eval_error_map_unet.py \
-  --run-path ./runs/error_unet_run1 \
-  --eval-dir ./data/IXI_2D_unigrad_synth_fiver/ \
-  --no-show
+python experiments/eval_error_map_unet.py --run-path ./runs/error_unet_run1 --eval-dir ./data/IXI_2D_unigrad_synth_fiver/ --no-show
 ```
 
 Typical outputs under `--run-path`:

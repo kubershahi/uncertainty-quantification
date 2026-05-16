@@ -22,8 +22,7 @@ The display-only ``--io-iterations`` flag annotates the figure suptitle so the
 IO step count used to generate the data is visible in saved images.
 
 Examples:
-  python visualize_unigrad_io_data.py --split Train --io-iterations 50 \\
-      --save-path ./assets/images/unigrad-io/io_train_minmedmax.png --no-show
+  python visualize_unigrad_io_data.py --split Train --io-iterations 50 --save-path ./assets/images/unigrad-io/io_train_minmedmax.png --no-show
   python visualize_unigrad_io_data.py --split Val --selection random --num-samples 4 --phi --io-iterations 50
 """
 

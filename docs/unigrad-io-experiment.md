@@ -102,17 +102,13 @@ Anti-patterns to watch for:
 Defaults: `--checkpoints 0,50,100,150,200,250`, `--seed 42`.
 
 ```bash
-python experiments/unigrad-io/sweep_io_iterations.py \
-    --split Train --num-subjects 5 \
-    --save-path ./assets/images/unigrad-io/sweep_io.png --no-show
+python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl --split Train --num-subjects 5 --save-path ./assets/images/unigrad-io/3d/sweep_io.png --no-show
 ```
 
 Fixed indices instead of `--num-subjects`:
 
 ```bash
-python experiments/unigrad-io/sweep_io_iterations.py \
-    --split Train --subject-indices 0,17,42,93,128 \
-    --save-path ./assets/images/unigrad-io/sweep_io.png --no-show
+python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl --split Train --subject-indices 0,17,42,93,128 --save-path ./assets/images/unigrad-io/3d/sweep_io.png --no-show
 ```
 
 Outputs are `<stem>_<subject_stem>_images.png`, `_curves.png`, `_metrics.csv` beside `--save-path`.

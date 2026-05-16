@@ -48,31 +48,22 @@ Shows three side-by-side images: atlas, original subject, and registered subject
 
 **Examples:**
 
-```bash
-# Basic comparison with default middle slice
-python scripts/visualize_registration.py --compare \
-  --atlas data/nii/IXI/atlas_image.nii.gz \
-  --subject data/nii/IXI/Test/subject_1_image.nii.gz \
-  --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz
-```
+Basic comparison with default middle slice:
 
 ```bash
-# Compare at specific slice
-python scripts/visualize_registration.py --compare \
-  --atlas data/nii/IXI/atlas_image.nii.gz \
-  --subject data/nii/IXI/Test/subject_1_image.nii.gz \
-  --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz \
-  --slice 50
+python scripts/visualize_registration.py --compare --atlas data/nii/IXI/atlas_image.nii.gz --subject data/nii/IXI/Test/subject_1_image.nii.gz --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz
 ```
 
+Compare at specific slice:
+
 ```bash
-# Save figure to file
-python scripts/visualize_registration.py --compare \
-  --atlas data/nii/IXI/atlas_image.nii.gz \
-  --subject data/nii/IXI/Test/subject_1_image.nii.gz \
-  --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz \
-  --slice 45 \
-  -o assets/images/comparison_subject_1.png
+python scripts/visualize_registration.py --compare --atlas data/nii/IXI/atlas_image.nii.gz --subject data/nii/IXI/Test/subject_1_image.nii.gz --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz --slice 50
+```
+
+Save figure to file:
+
+```bash
+python scripts/visualize_registration.py --compare --atlas data/nii/IXI/atlas_image.nii.gz --subject data/nii/IXI/Test/subject_1_image.nii.gz --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz --slice 45 -o assets/images/comparison_subject_1.png
 ```
 
 ---
@@ -90,34 +81,22 @@ Displays four panels: atlas, moving image, deformation magnitude, and registered
 
 **Examples:**
 
-```bash
-# Complete visualization with default middle slice
-python scripts/visualize_registration.py --compare-all \
-  --atlas data/nii/IXI/atlas_image.nii.gz \
-  --subject data/nii/IXI/Test/subject_1_image.nii.gz \
-  --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5
-```
+Complete visualization with default middle slice:
 
 ```bash
-# Complete visualization at specific slice
-python scripts/visualize_registration.py --compare-all \
-  --atlas data/nii/IXI/atlas_image.nii.gz \
-  --subject data/nii/IXI/Test/subject_1_image.nii.gz \
-  --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 \
-  --slice 50
+python scripts/visualize_registration.py --compare-all --atlas data/nii/IXI/atlas_image.nii.gz --subject data/nii/IXI/Test/subject_1_image.nii.gz --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5
 ```
 
+Complete visualization at specific slice:
+
 ```bash
-# Save publication-ready figure
-python scripts/visualize_registration.py --compare-all \
-  --atlas data/nii/IXI/atlas_image.nii.gz \
-  --subject data/nii/IXI/Test/subject_1_image.nii.gz \
-  --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 \
-  --slice 48 \
-  -o assets/images/publication_figure.png
+python scripts/visualize_registration.py --compare-all --atlas data/nii/IXI/atlas_image.nii.gz --subject data/nii/IXI/Test/subject_1_image.nii.gz --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 --slice 50
+```
+
+Save publication-ready figure:
+
+```bash
+python scripts/visualize_registration.py --compare-all --atlas data/nii/IXI/atlas_image.nii.gz --subject data/nii/IXI/Test/subject_1_image.nii.gz --registered data/nii/IXI/registered/subject_1/image_to_atlas.nii.gz --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 --slice 48 -o assets/images/publication_figure.png
 ```
 ---
 
@@ -132,28 +111,22 @@ Overlays two images with transparency for precise alignment visualization.
 
 **Examples:**
 
-```bash
-# Basic overlay with default middle slice
-python scripts/visualize_registration.py --overlay \
-  --atlas data/nii/IXI/atlas_image.nii.gz \
-  --subject data/nii/IXI/Test/subject_1_image.nii.gz
-```
+Basic overlay with default middle slice:
 
 ```bash
-# Overlay at specific slice
-python scripts/visualize_registration.py --overlay \
-  --atlas data/nii/IXI/atlas_image.nii.gz \
-  --subject data/nii/IXI/Test/subject_1_image.nii.gz \
-  --slice 55
+python scripts/visualize_registration.py --overlay --atlas data/nii/IXI/atlas_image.nii.gz --subject data/nii/IXI/Test/subject_1_image.nii.gz
 ```
 
+Overlay at specific slice:
+
 ```bash
-# Save overlay comparison
-python scripts/visualize_registration.py --overlay \
-  --atlas data/nii/IXI/atlas_image.nii.gz \
-  --subject data/nii/IXI/Test/subject_1_image.nii.gz \
-  --slice 55 \
-  -o assets/images/overlay_subject_1.png
+python scripts/visualize_registration.py --overlay --atlas data/nii/IXI/atlas_image.nii.gz --subject data/nii/IXI/Test/subject_1_image.nii.gz --slice 55
+```
+
+Save overlay comparison:
+
+```bash
+python scripts/visualize_registration.py --overlay --atlas data/nii/IXI/atlas_image.nii.gz --subject data/nii/IXI/Test/subject_1_image.nii.gz --slice 55 -o assets/images/overlay_subject_1.png
 ```
 
 
@@ -169,33 +142,28 @@ Visualizes the magnitude of displacement vectors at each voxel.
 
 **Examples:**
 
-```bash
-# View deformation magnitude at default middle slice
-python scripts/visualize_registration.py --deformation-magnitude \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5
-```
+View deformation magnitude at default middle slice:
 
 ```bash
-# Deformation magnitude at specific slice
-python scripts/visualize_registration.py --deformation-magnitude \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 \
-  --slice 50
+python scripts/visualize_registration.py --deformation-magnitude --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5
 ```
 
-```bash
-# Save deformation magnitude heatmap
-python scripts/visualize_registration.py --deformation-magnitude \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 \
-  --slice 50 \
-  -o assets/images/deformation_magnitude_slice_50.png
-```
+Deformation magnitude at specific slice:
 
 ```bash
-# Verbose output to see deformation field statistics
-python scripts/visualize_registration.py --deformation-magnitude \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 \
-  --slice 50 \
-  -v
+python scripts/visualize_registration.py --deformation-magnitude --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 --slice 50
+```
+
+Save deformation magnitude heatmap:
+
+```bash
+python scripts/visualize_registration.py --deformation-magnitude --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 --slice 50 -o assets/images/deformation_magnitude_slice_50.png
+```
+
+Verbose output to see deformation field statistics:
+
+```bash
+python scripts/visualize_registration.py --deformation-magnitude --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 --slice 50 -v
 ```
 
 ---
@@ -210,33 +178,28 @@ Displays deformation as 2D vectors (arrows) showing direction and magnitude of d
 
 **Examples:**
 
-```bash
-# View deformation vectors at default middle slice
-python scripts/visualize_registration.py --deformation-vectors \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5
-```
+View deformation vectors at default middle slice:
 
 ```bash
-# Deformation vectors at specific slice
-python scripts/visualize_registration.py --deformation-vectors \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 \
-  --slice 50
+python scripts/visualize_registration.py --deformation-vectors --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5
 ```
 
-```bash
-# Save vector field visualization
-python scripts/visualize_registration.py --deformation-vectors \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 \
-  --slice 50 \
-  -o assets/images/deformation_vectors_slice_50.png
-```
+Deformation vectors at specific slice:
 
 ```bash
-# Verbose output for vector field information
-python scripts/visualize_registration.py --deformation-vectors \
-  --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 \
-  --slice 50 \
-  -v
+python scripts/visualize_registration.py --deformation-vectors --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 --slice 50
+```
+
+Save vector field visualization:
+
+```bash
+python scripts/visualize_registration.py --deformation-vectors --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 --slice 50 -o assets/images/deformation_vectors_slice_50.png
+```
+
+Verbose output for vector field information:
+
+```bash
+python scripts/visualize_registration.py --deformation-vectors --deformation data/nii/IXI/registered/subject_1/transform_to_atlas.hdf5 --slice 50 -v
 ```
 
 ---
