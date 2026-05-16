@@ -1,5 +1,5 @@
-# Dev Pod — PVC /files; NRP caps bare Pods (~16 CPU / ~32 Gi incl. shm). GPU list is Ampere/Ada-focused (edit if Pending).
-# kubectl apply -f deploy/nautilus/pod-dev.yaml && kubectl wait --for=condition=Ready pod/unc-dev --timeout=20m
+# Dev Pod — PVC /files; bare-Pod CPU/RAM cap on NRP. GPU list = training-tier subset (same as deployment-heavy).
+# kubectl apply -f deploy/nautilus/pod-dev.yaml
 apiVersion: v1
 kind: Pod
 metadata:
@@ -20,13 +20,28 @@ spec:
               - key: nvidia.com/gpu.product
                 operator: In
                 values:
-                  - NVIDIA-GeForce-RTX-4090
-                  - NVIDIA-GeForce-RTX-4080
-                  - NVIDIA-RTX-A6000
+                  - NVIDIA-A10
+                  - NVIDIA-A100-80GB-PCIe
+                  - NVIDIA-A100-PCIE-40GB
+                  - NVIDIA-A100-SXM4-80GB
                   - NVIDIA-A40
+                  - NVIDIA-GeForce-RTX-3090
+                  - NVIDIA-GeForce-RTX-4090
+                  - NVIDIA-GH200-480GB
+                  - NVIDIA-H200-NVL
+                  - NVIDIA-L4
                   - NVIDIA-L40
                   - NVIDIA-L40S
-                  - NVIDIA-GeForce-RTX-3090
+                  - NVIDIA-RTX-4000-Ada-Generation
+                  - NVIDIA-RTX-5000-Ada-Generation
+                  - NVIDIA-RTX-A4000
+                  - NVIDIA-RTX-A5000
+                  - NVIDIA-RTX-A6000
+                  - NVIDIA-RTX-PRO-6000-Blackwell-Max-Q-Workstation-Edition
+                  - NVIDIA-TITAN-RTX
+                  - Quadro-RTX-6000
+                  - Quadro-RTX-8000
+                  - Tesla-V100-SXM2-32GB
   containers:
     - name: main
       image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
