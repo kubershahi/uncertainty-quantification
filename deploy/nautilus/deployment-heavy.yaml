@@ -58,6 +58,9 @@ spec:
         - name: main
           image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
           workingDir: /files
+          env:
+            - name: HOME
+              value: /files/home/root
           command: ["/bin/bash", "-lc"]
           args:
             - |
@@ -69,6 +72,15 @@ spec:
                 apt-get install -y -qq --no-install-recommends git ca-certificates openssh-client &&
                 rm -rf /var/lib/apt/lists/*;
               }
+              ENV_SH=/files/repo/uncertainty-quantification/deploy/nautilus/scripts/env.sh
+              if [[ -f "${ENV_SH}" ]]; then
+                MARK="# unc-nautilus-env"
+                if ! grep -qF "${MARK}" "${HOME}/.bashrc" 2>/dev/null; then
+                  { echo "${MARK}"; echo "source \"${ENV_SH}\""; } >> "${HOME}/.bashrc"
+                fi
+                # shellcheck source=/dev/null
+                source "${ENV_SH}"
+              fi
               exec sleep infinity
           resources:
             requests:

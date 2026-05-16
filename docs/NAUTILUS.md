@@ -239,6 +239,7 @@ PVC persists unless deleted separately.
 | `set: pipefail` / script errors                       | Shell scripts must use **LF** line endings (see `.gitattributes`).                                                                                                                       |
 | Terminal `source: not found`                          | Shell is `sh`, not bash — run `bash`, or use `. /files/venvs/unc/bin/activate`. Restart deployment after `start-jupyter-lab.sh` sets `SHELL=/bin/bash`.                                  |
 | `ssh-keygen: not found`                               | `apt-get install -y openssh-client` (root), or restart pod after manifests install `openssh-client` on start.                                                                            |
+| `git pull` → `Permission denied (publickey)`          | Key is on the PVC at `/files/.ssh/`; run `source deploy/nautilus/scripts/env.sh` (sets `HOME`, `GIT_SSH_COMMAND`, `core.sshCommand`). Or `git config --global core.sshCommand 'ssh -i /files/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new'`. Recreate `unc-dev` after updating `pod-dev.yaml` so `HOME` and `.bashrc` bootstrap apply. |
 
 ---
 
