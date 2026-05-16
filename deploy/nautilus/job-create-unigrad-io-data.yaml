@@ -1,25 +1,18 @@
-# unc-heavy — same PVC; higher CPU/RAM. gpu.product list = NRP inventory minus low-tier / MIG slice.
-# Refresh: kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.nvidia\.com/gpu\.product}{"\n"}{end}' | sort -u
-apiVersion: apps/v1
-kind: Deployment
+# Batch job — full 3D UniGrad IO NPZ generation (resumable).
+# kubectl apply -f deploy/nautilus/job-create-unigrad-io-data.yaml
+# kubectl logs -f job/unc-unigrad-io-data
+apiVersion: batch/v1
+kind: Job
 metadata:
-  name: unc-heavy
-  labels:
-    app: unc-heavy
+  name: unc-unigrad-io-data
 spec:
-  replicas: 1
-  progressDeadlineSeconds: 1800
-  revisionHistoryLimit: 2
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: unc-heavy
+  backoffLimit: 3
   template:
     metadata:
       labels:
-        app: unc-heavy
+        app: unc-unigrad-io-data
     spec:
+      restartPolicy: OnFailure
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
@@ -57,38 +50,21 @@ spec:
       containers:
         - name: main
           image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
-          workingDir: /files
-          env:
-            - name: HOME
-              value: /files/home/root
-          command: ["/bin/bash", "-lc"]
+          command: ["bash", "-lc"]
           args:
             - |
-              export HOME=/files/home/root
-              mkdir -p "$HOME"
-              export DEBIAN_FRONTEND=noninteractive
-              command -v git >/dev/null && command -v ssh-keygen >/dev/null || {
-                apt-get update -qq &&
-                apt-get install -y -qq --no-install-recommends git ca-certificates openssh-client &&
-                rm -rf /var/lib/apt/lists/*;
-              }
-              ENV_SH=/files/repo/uncertainty-quantification/deploy/nautilus/scripts/env.sh
-              if [[ -f "${ENV_SH}" ]]; then
-                MARK="# unc-nautilus-env"
-                if ! grep -qF "${MARK}" "${HOME}/.bashrc" 2>/dev/null; then
-                  { echo "${MARK}"; echo "source \"${ENV_SH}\""; } >> "${HOME}/.bashrc"
-                fi
-                # shellcheck source=/dev/null
-                source "${ENV_SH}"
-              fi
-              exec sleep infinity
+              set -euo pipefail
+              source /files/venvs/unc/bin/activate
+              cd /files/repo/uncertainty-quantification
+              export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+              python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root /files/repo/uncertainty-quantification/datasets/IXI --atlas-pkl /files/repo/uncertainty-quantification/datasets/IXI/atlas.pkl --output-path /files/repo/uncertainty-quantification/datasets/IXI_unigrad_io --io-iterations 50
           resources:
             requests:
               cpu: "8"
               memory: 32Gi
               nvidia.com/gpu: "1"
             limits:
-              cpu: "16"
+              cpu: "12"
               memory: 64Gi
               nvidia.com/gpu: "1"
               ephemeral-storage: 50Gi
