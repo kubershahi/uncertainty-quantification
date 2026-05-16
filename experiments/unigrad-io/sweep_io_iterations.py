@@ -23,15 +23,20 @@ Outputs per subject (saved next to ``--save-path``)
   - ``<stem>_<subject>_curves.png``  2-panel curves: quality + field health.
   - ``<stem>_<subject>_metrics.csv`` per-iter metrics.
 
-Example (paths from repo root):
+Example (Nautilus PVC, ``/files`` mounted):
   python experiments/unigrad-io/sweep_io_iterations.py --split Train --num-subjects 3 \\
-      --save-path ./assets/images/unigrad-io/sweep_io.png --no-show
+      --save-path /files/outputs/images/unigrad-io/sweep_io.png --no-show
   python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl \\
-      --ixi-root ./data/raw/IXI --atlas-pkl ./data/raw/IXI/atlas.pkl \\
-      --split Train --num-subjects 3 --save-path ./assets/images/unigrad-io/sweep_io_3d.png \\
-      --viz-axial-index 111 --no-show
+      --ixi-root /files/datasets/IXI --atlas-pkl /files/datasets/IXI/atlas.pkl \\
+      --split Train --num-subjects 3 \\
+      --save-path /files/outputs/images/unigrad-io/sweep_io_3d.png --no-show
 
-Defaults: ``--checkpoints 0,50,...,250``, ``--seed 42``.
+Omit ``--ixi-root`` / ``--save-path`` to use defaults (see argparse help): on NRP,
+3d-pkl data is ``/files/datasets/IXI`` (no ``raw/`` segment); figures go under
+``/files/outputs/images/unigrad-io/``.
+
+Defaults: ``--checkpoints`` is ``0,50,100,150,200,250`` for 2d and ``0,50,100,200`` for
+``3d-pkl`` (four IO snapshots to limit 3d cost). ``--seed 42``.
 """
 
 from __future__ import annotations
@@ -67,9 +72,34 @@ from create_unigrad_io_data import (  # noqa: E402
 )
 from visualize_unigrad_io_data import overlay_deformation_grid  # noqa: E402
 
+# Nautilus ``/files`` PVC layout (see ``deploy/nautilus/scripts/env.sh``).
+_FILES_ROOT = Path("/files")
+NRP_IXI_PKL_ROOT = _FILES_ROOT / "datasets" / "IXI"
+NRP_IXI_2D_ROOT = _FILES_ROOT / "datasets" / "IXI_2D"
+NRP_SWEEP_SAVE = _FILES_ROOT / "outputs" / "images" / "unigrad-io" / "sweep_io.png"
+LOCAL_IXI_PKL = Path("./data/IXI/")
+LOCAL_IXI_2D = Path("./data/IXI_2D/")
+LOCAL_SWEEP_SAVE = Path("./assets/images/unigrad-io/sweep_io.png")
+
+# IO iteration snapshots (UniGradICON default IO length is 50; full 2d sweep adds dense samples).
+CHECKPOINTS_DEFAULT_2D = "0,50,100,150,200,250"
+CHECKPOINTS_DEFAULT_3D = "0,50,100,200"
+
+
+def default_ixi_root(mode: str) -> Path:
+    """Prefer PVC paths when mounted; else small repo-relative roots."""
+    if mode == "3d-pkl":
+        return NRP_IXI_PKL_ROOT if NRP_IXI_PKL_ROOT.is_dir() else LOCAL_IXI_PKL
+    return NRP_IXI_2D_ROOT if NRP_IXI_2D_ROOT.is_dir() else LOCAL_IXI_2D
+
+
+def default_save_path() -> Path:
+    """Sweep figure prefix: NRP ``…/outputs/images/unigrad-io/`` when ``/files`` exists."""
+    return NRP_SWEEP_SAVE if _FILES_ROOT.is_dir() else LOCAL_SWEEP_SAVE
+
 
 def pkload(path: Path):
-    """Load a pickle file (IXI raw volumes: ``image``, ``label`` tuples)."""
+    """Load a pickle file (IXI volumes as ``(image, label)`` tuples)."""
     with path.open("rb") as f:
         return pickle.load(f)
 
@@ -302,7 +332,7 @@ def resolve_subject_paths_pkl(
     num_subjects: int | None,
     seed: int,
 ) -> list[Path]:
-    """Same as ``resolve_subject_paths`` but for ``Train/*.pkl`` (raw IXI volumes)."""
+    """Same as ``resolve_subject_paths`` but for ``Train/*.pkl`` (IXI volume pickles)."""
     if subject_path is not None:
         if not subject_path.is_file():
             raise FileNotFoundError(f"--subject-path not found: {subject_path}")
@@ -1195,14 +1225,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="2d",
         choices=["2d", "3d-pkl"],
         help="2d: IXI_2D .npy slices + atlas_slice_111 (default). "
-        "3d-pkl: raw IXI Train/*.pkl volumes registered to atlas.pkl.",
+        "3d-pkl: IXI Train/*.pkl volumes + atlas.pkl (default root on NRP: "
+        "/files/datasets/IXI).",
     )
     p.add_argument(
         "--ixi-root",
         type=Path,
-        default=Path("./data/IXI_2D/"),
-        help="Data root: 2d mode expects Train/Val/Test/Atlas .npy; "
-        "3d-pkl expects Train|Val|Test/*.pkl plus atlas.pkl (see --atlas-pkl).",
+        default=None,
+        metavar="DIR",
+        help="Data root: 2d expects Train/Val/Test/Atlas .npy; 3d-pkl expects "
+        "Train|Val|Test/*.pkl plus atlas.pkl (default: /files/datasets/IXI_2D or "
+        "./data/IXI_2D for 2d; /files/datasets/IXI or ./data/IXI for 3d-pkl when "
+        "--ixi-root is omitted).",
     )
     p.add_argument(
         "--atlas-pkl",
@@ -1255,9 +1289,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--checkpoints",
         type=str,
-        default="0,50,100,150,200,250",
-        help="Comma-separated IO iteration counts to snapshot. Default 0,50,100,150,200,250 "
-        "centres the sweep on the official UniGradICON IO default of 50 iterations.",
+        default=None,
+        metavar="I,I,...",
+        help="Comma-separated IO iteration counts to snapshot. If omitted: 2d uses "
+        f"{CHECKPOINTS_DEFAULT_2D}; 3d-pkl uses {CHECKPOINTS_DEFAULT_3D} (four snapshots).",
     )
     p.add_argument(
         "--io-lr",
@@ -1298,9 +1333,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Base path for outputs (parent dirs created). For each swept subject "
         "S, three files are written: <stem>_<S>_images<ext>, <stem>_<S>_curves<ext>, "
-        "and <stem>_<S>_metrics.csv. E.g. '--save-path ./out/sweep_io.png' with "
-        "subject 'IXI002_T1_slice_111.npy' -> sweep_io_IXI002_T1_slice_111_images.png "
-        "(and the matching _curves.png / _metrics.csv).",
+        "and <stem>_<S>_metrics.csv. Default on NRP: "
+        "/files/outputs/images/unigrad-io/sweep_io.png. Example with "
+        "'--save-path ./out/sweep_io.png' and subject 'IXI002_T1_slice_111.npy' -> "
+        "sweep_io_IXI002_T1_slice_111_images.png (and matching _curves / _metrics).",
     )
     p.add_argument("--no-show", action="store_true")
     return p.parse_args(argv)
@@ -1309,7 +1345,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint."""
     args = parse_args(argv)
-    checkpoints = parse_checkpoints(args.checkpoints)
+    if args.ixi_root is None:
+        args.ixi_root = default_ixi_root(args.mode)
+    if args.save_path is None:
+        args.save_path = default_save_path()
+    ck_spec = args.checkpoints
+    if ck_spec is None:
+        ck_spec = (
+            CHECKPOINTS_DEFAULT_3D
+            if args.mode == "3d-pkl"
+            else CHECKPOINTS_DEFAULT_2D
+        )
+    checkpoints = parse_checkpoints(ck_spec)
     subject_indices: list[int] | None = None
     if args.subject_indices is not None:
         subject_indices = sorted({int(x.strip()) for x in args.subject_indices.split(",") if x.strip()})

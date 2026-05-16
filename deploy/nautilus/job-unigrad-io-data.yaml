@@ -1,5 +1,6 @@
 # Job — full IO dataset generation (resumable). Logs: kubectl logs -f job/unc-unigrad-io-data
-apiVersion: batch/v1kind: Job
+apiVersion: batch/v1
+kind: Job
 metadata:
   name: unc-unigrad-io-data
 spec:
@@ -22,13 +23,28 @@ spec:
                   - key: nvidia.com/gpu.product
                     operator: In
                     values:
-                      - NVIDIA-GeForce-RTX-4090
-                      - NVIDIA-GeForce-RTX-4080
-                      - NVIDIA-RTX-A6000
+                      - NVIDIA-A10
+                      - NVIDIA-A100-80GB-PCIe
+                      - NVIDIA-A100-PCIE-40GB
+                      - NVIDIA-A100-SXM4-80GB
                       - NVIDIA-A40
+                      - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-GeForce-RTX-4090
+                      - NVIDIA-GH200-480GB
+                      - NVIDIA-H200-NVL
+                      - NVIDIA-L4
                       - NVIDIA-L40
                       - NVIDIA-L40S
-                      - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-RTX-4000-Ada-Generation
+                      - NVIDIA-RTX-5000-Ada-Generation
+                      - NVIDIA-RTX-A4000
+                      - NVIDIA-RTX-A5000
+                      - NVIDIA-RTX-A6000
+                      - NVIDIA-RTX-PRO-6000-Blackwell-Max-Q-Workstation-Edition
+                      - NVIDIA-TITAN-RTX
+                      - Quadro-RTX-6000
+                      - Quadro-RTX-8000
+                      - Tesla-V100-SXM2-32GB
       containers:
         - name: main
           image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
