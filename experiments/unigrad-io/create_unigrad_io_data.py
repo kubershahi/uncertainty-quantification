@@ -1,36 +1,27 @@
 """
-Build atlas-vs-subject UniGradICON registration data (one ``.npz`` per subject slice).
+Build atlas-vs-subject UniGradICON 3D registration data (one ``.npz`` per IXI volume).
 
-Nomenclature (matches the UniGradICON paper Fig. 2 columns)
-----------------------------------------------------------
-- ``source``        : subject slice (moving, gets warped) from Train / Val / Test ``.npy``.
-- ``target``        : atlas slice (fixed reference, ``Atlas/atlas_slice_111.npy``).
-- ``phi_pred``      : UniGradICON zero-shot displacement field (pixels, channel order [col, row]).
-- ``warped_pred``   : ``source`` warped by ``phi_pred`` (should look like ``target``).
-- ``phi_predio``    : same model after instance optimization (IO) on this pair.
-- ``warped_predio`` : ``source`` warped by ``phi_predio``.
-- ``error_map``     : per-pixel L2 norm of ``phi_predio - phi_pred`` (scalar, shape (H, W)).
+Reads ``Train|Val|Test/*.pkl`` subject volumes + ``atlas.pkl``, runs zero-shot registration
+and **50-step** instance optimization (IO: Adam, lr ``2e-5``, LNCC), writes compressed NPZ.
 
-Default IO protocol matches the official UniGradICON setup:
-  Adam optimizer, lr = 2e-5, LNCC similarity, 50 iterations
-(see ``icon_registration.itk_wrapper.finetune_execute`` and ``unigradicon-register``).
+Per-subject NPZ keys
+--------------------
+- ``source``, ``target``, ``warped_pred``, ``warped_predio``: ``(H, W, D)`` float32
+- ``phi_pred``, ``phi_predio``: ``(3, D, H, W)`` float32 — channels D, H, W voxel shifts
+- ``error_map``: ``(D, H, W)`` float32 — ``||phi_predio - phi_pred||_2`` (U-Net target)
+- ``io_iterations``: scalar (default 50)
 
-Example (DataHub) -- official protocol::
+Example::
 
-  python create_unigrad_io_data.py --ixi-root ./data/IXI_2D/ \\
-      --output-path ./data/IXI_2D_unigrad_io/
-
-Optional smoke test with fewer slices::
-
-  python create_unigrad_io_data.py --ixi-root ./data/IXI_2D/ \\
-      --output-path ./data/IXI_2D_unigrad_io_smoke/ \\
-      --splits Train --max-per-split 3
+  python create_unigrad_io_data.py --ixi-root ./datasets/IXI --atlas-pkl ./datasets/IXI/atlas.pkl --output-path ./datasets/IXI_unigrad_io/
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import pickle
+import warnings
 from pathlib import Path
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -41,93 +32,109 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from unigradicon import get_unigradicon, make_sim
 
-ATLAS_SLICE_INDEX = 111
+
+def pkload(path: Path):
+    with path.open("rb") as f, warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*align should be passed as Python or NumPy boolean.*",
+        )
+        return pickle.load(f)
 
 
-def preprocess_for_unigrad(img_tensor: torch.Tensor) -> torch.Tensor:
-    """Normalize one 2D slice, pseudo-stack depth to 5, and resize to UniGradICON's 175^3 input."""
-    im_min = torch.min(img_tensor)
-    im_max = torch.quantile(img_tensor.view(-1), 0.99)
+def load_ixi_image_volume_from_pkl(pkl_path: Path) -> np.ndarray:
+    payload = pkload(pkl_path)
+    if isinstance(payload, tuple) and len(payload) >= 1:
+        raw = payload[0]
+    elif isinstance(payload, np.ndarray):
+        raw = payload
+    else:
+        raise ValueError(f"Unexpected pickle structure in {pkl_path}: {type(payload)}")
+    img = np.array(raw, dtype=np.float32, copy=True)
+    if img.ndim != 3:
+        raise ValueError(f"Expected 3D volume in {pkl_path}, got shape {img.shape}")
+    return img
+
+
+def numpy_volume_hw_d_to_torch5d(vol_hw_d: np.ndarray) -> torch.Tensor:
+    t = torch.from_numpy(vol_hw_d.astype(np.float32))
+    return t.permute(2, 0, 1).unsqueeze(0).unsqueeze(0)
+
+
+def preprocess_volume_for_unigrad(vol_5d: torch.Tensor) -> torch.Tensor:
+    im_min = torch.min(vol_5d)
+    im_max = torch.quantile(vol_5d.reshape(-1), 0.99)
     denom = torch.clamp(im_max - im_min, min=1e-5)
-    img = torch.clip(img_tensor, im_min, im_max)
+    img = torch.clip(vol_5d, im_min, im_max)
     img = (img - im_min) / denom
-    img = img.unsqueeze(2).repeat(1, 1, 5, 1, 1)
     return F.interpolate(img, [175, 175, 175], mode="trilinear", align_corners=False)
 
 
-def apply_displacement_2d(
-    moving_np: np.ndarray, phi_px: np.ndarray, device: torch.device
+def phi_vectorfield_to_volume_voxels(
+    net: torch.nn.Module, orig_d: int, orig_h: int, orig_w: int
 ) -> np.ndarray:
-    """Warp a 2D image with a 2D pixel displacement field via ``grid_sample``.
-
-    Args:
-        moving_np: ``(H, W)`` float32 source image.
-        phi_px: ``(2, H, W)`` displacement in pixels. Channel 0 = column (x)
-            displacement, channel 1 = row (y) displacement. For each output
-            pixel ``(y, x)`` the warped image samples ``moving`` at
-            ``(y + phi_px[1, y, x], x + phi_px[0, y, x])``.
-
-    Returns:
-        ``(H, W)`` float32 warped image.
-    """
-    h, w = int(moving_np.shape[0]), int(moving_np.shape[1])
-    img = torch.from_numpy(moving_np).to(device, dtype=torch.float32)[None, None]
-    phi = torch.from_numpy(phi_px).to(device, dtype=torch.float32)
-
-    ys = torch.arange(h, device=device, dtype=torch.float32)
-    xs = torch.arange(w, device=device, dtype=torch.float32)
-    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-
-    src_x = grid_x + phi[0]
-    src_y = grid_y + phi[1]
-    src_x = 2.0 * src_x / max(w - 1, 1) - 1.0
-    src_y = 2.0 * src_y / max(h - 1, 1) - 1.0
-
-    grid = torch.stack([src_x, src_y], dim=-1)[None]  # (1, H, W, 2)
-    warped = F.grid_sample(
-        img, grid, mode="bilinear", padding_mode="border", align_corners=True
-    )
-    return warped.squeeze().detach().cpu().numpy().astype(np.float32)
-
-
-def phi_vectorfield_to_slice_pixels(net: torch.nn.Module, orig_h: int, orig_w: int) -> np.ndarray:
-    """Convert current UniGradICON vector field to a 2D pixel displacement map with shape (2, H, W)."""
     identity = net.identity_map
     phi_disp_175 = net.phi_AB_vectorfield - identity
     phi_rescaled = F.interpolate(
         phi_disp_175,
-        [5, orig_h, orig_w],
+        [orig_d, orig_h, orig_w],
         mode="trilinear",
         align_corners=True,
     )
-    phi_plane = phi_rescaled[0, 1:3, 2, :, :].cpu().numpy()
-    out = np.zeros((2, orig_h, orig_w), dtype=np.float32)
-    out[0] = phi_plane[1] * (orig_w - 1)
-    out[1] = phi_plane[0] * (orig_h - 1)
-    return out.astype(np.float32)
+    p = phi_rescaled[0].cpu().numpy()
+    out = np.zeros((3, orig_d, orig_h, orig_w), dtype=np.float32)
+    out[0] = p[0] * (orig_d - 1)
+    out[1] = p[1] * (orig_h - 1)
+    out[2] = p[2] * (orig_w - 1)
+    return out
 
 
-def run_io_then_extract_phi_px(
+def apply_displacement_3d(
+    moving_hw_d: np.ndarray, phi_dhw: np.ndarray, device: torch.device
+) -> np.ndarray:
+    h, w, d = int(moving_hw_d.shape[0]), int(moving_hw_d.shape[1]), int(moving_hw_d.shape[2])
+    od, oh, ow = phi_dhw.shape[1], phi_dhw.shape[2], phi_dhw.shape[3]
+    if (od, oh, ow) != (d, h, w):
+        raise ValueError(f"phi spatial shape {(od, oh, ow)} vs volume {(d, h, w)} (D,H,W)")
+
+    vol = (
+        torch.from_numpy(moving_hw_d)
+        .to(device, dtype=torch.float32)
+        .permute(2, 0, 1)
+        .unsqueeze(0)
+        .unsqueeze(0)
+    )
+    phi_t = torch.from_numpy(phi_dhw).to(device, dtype=torch.float32)
+
+    zs = torch.arange(d, device=device, dtype=torch.float32)
+    ys = torch.arange(h, device=device, dtype=torch.float32)
+    xs = torch.arange(w, device=device, dtype=torch.float32)
+    grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
+
+    src_x = grid_x + phi_t[2]
+    src_y = grid_y + phi_t[1]
+    src_z = grid_z + phi_t[0]
+    src_x = 2.0 * src_x / max(w - 1, 1) - 1.0
+    src_y = 2.0 * src_y / max(h - 1, 1) - 1.0
+    src_z = 2.0 * src_z / max(d - 1, 1) - 1.0
+    grid = torch.stack([src_x, src_y, src_z], dim=-1).unsqueeze(0)
+
+    warped = F.grid_sample(vol, grid, mode="bilinear", padding_mode="border", align_corners=True)
+    return warped.squeeze().permute(1, 2, 0).detach().cpu().numpy().astype(np.float32)
+
+
+def run_io_then_extract_phi(
     net: torch.nn.Module,
     source_175: torch.Tensor,
     target_175: torch.Tensor,
     *,
     steps: int,
     lr: float,
+    orig_d: int,
     orig_h: int,
     orig_w: int,
     optimizer_name: str = "adam",
 ) -> np.ndarray:
-    """Run per-pair IO for ``steps`` and return the resulting 2D pixel displacement map.
-
-    Defaults match the upstream UniGradICON / icon_registration IO protocol:
-    Adam with ``lr=2e-5`` (``DEFAULT_FINETUNE_LEARNING_RATE`` in
-    ``icon_registration.itk_wrapper``). Memory hygiene helpers for tight GPUs:
-      - back up weights on CPU (saves ~ model size of VRAM vs deepcopy on GPU)
-      - free optimizer / graph eagerly and call ``torch.cuda.empty_cache()`` after IO
-      - ``--io-optimizer sgd`` is provided as a *documented deviation*, not the
-        official setting.
-    """
     state0_cpu = {k: v.detach().to("cpu", copy=True) for k, v in net.state_dict().items()}
     if steps > 0:
         if optimizer_name == "adam":
@@ -152,32 +159,51 @@ def run_io_then_extract_phi_px(
             torch.cuda.empty_cache()
     with torch.no_grad():
         net(source_175, target_175)
-        phi_px = phi_vectorfield_to_slice_pixels(net, orig_h, orig_w)
+        phi = phi_vectorfield_to_volume_voxels(net, orig_d, orig_h, orig_w)
     net.load_state_dict(state0_cpu)
     net.eval()
     del state0_cpu
     torch.cuda.empty_cache()
-    return phi_px
+    return phi
 
 
-def pick_default_atlas_index(atlas_dir: Path) -> tuple[int, Path]:
-    """Return the fixed atlas slice index and file path (always atlas slice 111)."""
-    path = atlas_dir / f"atlas_slice_{ATLAS_SLICE_INDEX}.npy"
-    if not path.is_file():
-        raise FileNotFoundError(f"Missing atlas file: {path}")
-    return ATLAS_SLICE_INDEX, path
-
-
-def load_atlas_slice(atlas_dir: Path) -> tuple[np.ndarray, int, Path]:
-    """Load atlas slice 111 as float32 and return (image, index, path)."""
-    i, p = pick_default_atlas_index(atlas_dir)
-    return np.asarray(np.load(p), dtype=np.float32), i, p
+def _plan_split_volumes(
+    ixi_root: Path,
+    output_root: Path,
+    *,
+    splits: list[str],
+    max_per_split: int | None,
+    shard_id: int,
+    num_shards: int,
+    overwrite: bool,
+) -> list[tuple[str, Path, Path, list[str]]]:
+    """Return ``(split, in_dir, out_dir, pkl_filenames)`` for each split to process."""
+    plan: list[tuple[str, Path, Path, list[str]]] = []
+    for split in splits:
+        in_dir = ixi_root / split
+        out_dir = output_root / split
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if not in_dir.is_dir():
+            print(f"Skip {split}: missing {in_dir}")
+            plan.append((split, in_dir, out_dir, []))
+            continue
+        files = sorted(f for f in os.listdir(in_dir) if f.endswith(".pkl"))
+        if max_per_split is not None:
+            files = files[:max_per_split]
+        if num_shards > 1:
+            files = [f for i, f in enumerate(files) if i % num_shards == shard_id]
+        if not overwrite:
+            already_done = {f for f in os.listdir(out_dir) if f.endswith(".npz")}
+            files = [f for f in files if f"{Path(f).stem}.npz" not in already_done]
+        plan.append((split, in_dir, out_dir, files))
+    return plan
 
 
 def run_atlas_io_generation(
     ixi_root: Path,
     output_root: Path,
     *,
+    atlas_pkl: Path,
     splits: list[str],
     max_per_split: int | None,
     shard_id: int,
@@ -188,215 +214,162 @@ def run_atlas_io_generation(
     io_optimizer: str,
     overwrite: bool = False,
 ) -> None:
-    """Generate atlas-vs-subject UniGradICON registration data (zero-shot + IO) across splits."""
     device = torch.device("cuda")
-    atlas_dir = ixi_root / "Atlas"
-    target_img, atlas_i, atlas_path = load_atlas_slice(atlas_dir)
-    th, tw = int(target_img.shape[0]), int(target_img.shape[1])
-    print(f"Atlas slice index {atlas_i} from {atlas_path} shape=({th}, {tw})")
+    if not atlas_pkl.is_file():
+        raise FileNotFoundError(f"--atlas-pkl not found: {atlas_pkl}")
+
+    target_vol = load_ixi_image_volume_from_pkl(atlas_pkl)
+    oh, ow, od = int(target_vol.shape[0]), int(target_vol.shape[1]), int(target_vol.shape[2])
+    print(f"Atlas {atlas_pkl} shape (H,W,D)=({oh},{ow},{od})")
 
     print(f"Loading UniGradICON (IO similarity={io_sim}) on {device}...")
     net = get_unigradicon(loss_fn=make_sim(io_sim)).to(device)
     net.eval()
 
-    I_target = torch.from_numpy(target_img).float().unsqueeze(0).unsqueeze(0)
-    target_175 = preprocess_for_unigrad(I_target).to(device)
+    atlas_5d = numpy_volume_hw_d_to_torch5d(target_vol).to(device)
+    target_175 = preprocess_volume_for_unigrad(atlas_5d)
+    del atlas_5d
 
-    for split in splits:
-        in_dir = ixi_root / split
-        out_dir = output_root / split
-        out_dir.mkdir(parents=True, exist_ok=True)
-        if not in_dir.is_dir():
-            print(f"Skip {split}: missing {in_dir}")
-            continue
-        files = sorted(f for f in os.listdir(in_dir) if f.endswith(".npy"))
-        if max_per_split is not None:
-            files = files[:max_per_split]
+    plan = _plan_split_volumes(
+        ixi_root,
+        output_root,
+        splits=splits,
+        max_per_split=max_per_split,
+        shard_id=shard_id,
+        num_shards=num_shards,
+        overwrite=overwrite,
+    )
+    total_volumes = sum(len(files) for _, _, _, files in plan)
+    print(f"Total: {total_volumes} volume(s) across {len(splits)} split(s) (IO steps={io_iterations})")
+    for split, _, _, files in plan:
+        print(f"  {split}: {len(files)} volume(s)")
 
-        if num_shards > 1:
-            files = [f for i, f in enumerate(files) if i % num_shards == shard_id]
+    with tqdm(total=total_volumes, desc="total", position=0) as total_pbar:
+        for split, in_dir, out_dir, files in plan:
+            if not files:
+                continue
+            for fname in tqdm(files, desc=split, position=1, leave=False):
+                subj_path = in_dir / fname
+                source_vol = load_ixi_image_volume_from_pkl(subj_path)
+                sh, sw, sd = int(source_vol.shape[0]), int(source_vol.shape[1]), int(source_vol.shape[2])
+                if source_vol.shape != target_vol.shape:
+                    raise ValueError(
+                        f"Shape mismatch {subj_path} {source_vol.shape} vs atlas {target_vol.shape}"
+                    )
 
-        # Resumability: skip subjects whose NPZ already exists. A run that gets
-        # killed mid-split (DataHub session timeout, OOM, power blip) can be
-        # restarted with the same command and will pick up where it left off.
-        # Use overwrite=True (or delete the NPZ) if you need to regenerate.
-        if not overwrite:
-            already_done = {f for f in os.listdir(out_dir) if f.endswith(".npz")}
-            files_todo = [f for f in files if f"{Path(f).stem}.npz" not in already_done]
-            skipped = len(files) - len(files_todo)
-            files = files_todo
-        else:
-            skipped = 0
+                vol_5d = numpy_volume_hw_d_to_torch5d(source_vol).to(device)
+                source_175 = preprocess_volume_for_unigrad(vol_5d)
+                del vol_5d
 
-        cap_note = f" (cap {max_per_split})" if max_per_split else ""
-        shard_note = f", shard {shard_id}/{num_shards}" if num_shards > 1 else ""
-        skip_note = f", skipping {skipped} already-done" if skipped else ""
-        print(f"{split}: {len(files)} slice(s) to process{cap_note}{shard_note}{skip_note}")
-        if not files:
-            continue
+                with torch.no_grad():
+                    net(source_175, target_175)
+                    phi_pred = phi_vectorfield_to_volume_voxels(net, sd, sh, sw)
 
-        for fname in tqdm(files, desc=split):
-            subj_path = in_dir / fname
-            source_img = np.load(subj_path).astype(np.float32)
-            sh, sw = int(source_img.shape[0]), int(source_img.shape[1])
-            if (sh, sw) != (th, tw):
-                raise ValueError(
-                    f"Shape mismatch {subj_path} ({sh},{sw}) vs atlas ({th},{tw})"
+                phi_predio = run_io_then_extract_phi(
+                    net,
+                    source_175,
+                    target_175,
+                    steps=io_iterations,
+                    lr=io_lr,
+                    orig_d=sd,
+                    orig_h=sh,
+                    orig_w=sw,
+                    optimizer_name=io_optimizer,
                 )
+                del source_175
+                torch.cuda.empty_cache()
 
-            I_source = torch.from_numpy(source_img).float().unsqueeze(0).unsqueeze(0)
-            source_175 = preprocess_for_unigrad(I_source).to(device)
+                with torch.no_grad():
+                    warped_pred = apply_displacement_3d(source_vol, phi_pred, device)
+                    warped_predio = apply_displacement_3d(source_vol, phi_predio, device)
 
-            with torch.no_grad():
-                net(source_175, target_175)
-                phi_pred_px = phi_vectorfield_to_slice_pixels(net, sh, sw)
+                error_map = np.sqrt(
+                    np.sum((phi_predio - phi_pred) ** 2, axis=0)
+                ).astype(np.float32)
 
-            phi_predio_px = run_io_then_extract_phi_px(
-                net,
-                source_175,
-                target_175,
-                steps=io_iterations,
-                lr=io_lr,
-                orig_h=sh,
-                orig_w=sw,
-                optimizer_name=io_optimizer,
-            )
-            del source_175
-            torch.cuda.empty_cache()
-
-            with torch.no_grad():
-                warped_pred = apply_displacement_2d(source_img, phi_pred_px, device)
-                warped_predio = apply_displacement_2d(source_img, phi_predio_px, device)
-
-            error_map = np.sqrt(
-                np.sum((phi_predio_px - phi_pred_px) ** 2, axis=0)
-            ).astype(np.float32)
-
-            stem = Path(fname).stem
-            out_name = f"{stem}.npz"
-            np.savez_compressed(
-                out_dir / out_name,
-                source=source_img,
-                target=target_img,
-                phi_pred=phi_pred_px,
-                warped_pred=warped_pred,
-                phi_predio=phi_predio_px,
-                warped_predio=warped_predio,
-                error_map=error_map,
-            )
+                np.savez_compressed(
+                    out_dir / f"{Path(fname).stem}.npz",
+                    source=source_vol,
+                    target=target_vol,
+                    phi_pred=phi_pred,
+                    warped_pred=warped_pred,
+                    phi_predio=phi_predio,
+                    warped_predio=warped_predio,
+                    error_map=error_map,
+                    io_iterations=np.int32(io_iterations),
+                )
+                total_pbar.update(1)
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments for atlas-vs-subject UniGradICON IO data generation."""
     ex = """
 Examples:
-  python create_unigrad_io_data.py --ixi-root ./data/IXI_2D/ --output-path ./data/IXI_2D_unigrad_io/
-  python create_unigrad_io_data.py --ixi-root ./data/IXI_2D/ --max-per-split 2
-
-Four disjoint GPUs on shared NFS/PVC (same output-path; script skips finished .npz)::
-
-  python create_unigrad_io_data.py --ixi-root ./data/IXI_2D/ --output-path ./out/ \\
-      --num-shards 4 --shard-id 0   # plus shards 1,2,3 on other pods
+  python create_unigrad_io_data.py --ixi-root ./datasets/IXI --atlas-pkl ./datasets/IXI/atlas.pkl --output-path ./datasets/IXI_unigrad_io/
+  python create_unigrad_io_data.py --ixi-root ./datasets/IXI --max-per-split 2 --splits Train
 """.strip()
     p = argparse.ArgumentParser(
-        description=(
-            "Atlas-subject UniGradICON IO data: per slice stores "
-            "source, target, phi_pred, warped_pred, phi_predio, warped_predio, error_map."
-        ),
+        description="IXI 3D volume UniGradICON IO data: one .npz per subject .pkl.",
         epilog=ex,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
         "--ixi-root",
         type=Path,
-        default=Path("./data/IXI_2D/"),
-        help="Folder with Train/, Val/, Test/, Atlas/ (Atlas contains atlas_slice_*.npy).",
+        default=Path("./datasets/IXI"),
+        help="Folder with Train/Val/Test/*.pkl volumes.",
+    )
+    p.add_argument(
+        "--atlas-pkl",
+        type=Path,
+        default=None,
+        help="Atlas volume pickle (default: <ixi-root>/atlas.pkl).",
     )
     p.add_argument(
         "--output-path",
         type=Path,
-        default=Path("./data/IXI_2D_unigrad_io/"),
-        help="Output root; mirrors Train/Val/Test subfolders. Files are named '<slice_stem>.npz'.",
+        default=Path("./datasets/IXI_unigrad_io"),
+        help="Output root; mirrors Train/Val/Test with <subject_stem>.npz per volume.",
     )
     p.add_argument(
         "--splits",
         type=str,
         default="Train,Val,Test",
-        help="Comma-separated splits to process (default: Train,Val,Test).",
+        help="Comma-separated splits.",
     )
-    p.add_argument(
-        "--max-per-split",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Process at most N files per split (sorted by name).",
-    )
-    p.add_argument(
-        "--shard-id",
-        type=int,
-        default=0,
-        metavar="K",
-        help="Parallel pods: keep slice i iff i modulo num-shards equals this id (0-based).",
-    )
-    p.add_argument(
-        "--num-shards",
-        type=int,
-        default=1,
-        metavar="N",
-        help="Parallel pods: split sorted slice list into N disjoint shards (same output-path on "
-        "shared storage is OK; default 1 = single worker).",
-    )
+    p.add_argument("--max-per-split", type=int, default=None, metavar="N")
+    p.add_argument("--shard-id", type=int, default=0, metavar="K")
+    p.add_argument("--num-shards", type=int, default=1, metavar="N")
     p.add_argument(
         "--io-iterations",
         type=int,
         default=50,
-        help="Instance optimization Adam steps per pair. 0 = no weight updates before phi_predio extract.",
+        help="IO Adam steps per pair (default 50).",
     )
-    p.add_argument(
-        "--io-lr",
-        type=float,
-        default=2e-5,
-        help="LR for IO. Default 2e-5 matches the upstream icon_registration "
-        "itk_wrapper.DEFAULT_FINETUNE_LEARNING_RATE used by the official "
-        "unigradicon-register CLI. Only adjust if you intentionally deviate.",
-    )
-    p.add_argument(
-        "--io-sim",
-        type=str,
-        default="lncc",
-        choices=["lncc", "lncc2", "mind"],
-        help="Loss / similarity inside UniGradICON forward (matches unigradicon-register --io_sim).",
-    )
-    p.add_argument(
-        "--io-optimizer",
-        type=str,
-        default="adam",
-        choices=["adam", "sgd"],
-        help="Optimizer for IO. Default 'adam' matches upstream icon_registration / "
-        "unigradicon-register. 'sgd' is provided as a memory-friendly fallback for "
-        "small GPUs and is a documented deviation from the official protocol.",
-    )
-    p.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Recompute and overwrite NPZs even if they already exist. By default the "
-        "script is resumable: subjects whose .npz is already present are skipped, "
-        "so a killed run can be restarted with the same command.",
-    )
+    p.add_argument("--io-lr", type=float, default=2e-5)
+    p.add_argument("--io-sim", type=str, default="lncc", choices=["lncc", "lncc2", "mind"])
+    p.add_argument("--io-optimizer", type=str, default="adam", choices=["adam", "sgd"])
+    p.add_argument("--overwrite", action="store_true")
     return p.parse_args()
 
 
 def main() -> None:
-    """Entrypoint for command-line execution."""
     args = parse_args()
     if args.num_shards < 1:
         raise SystemExit("--num-shards must be >= 1")
     if args.shard_id < 0 or args.shard_id >= args.num_shards:
-        raise SystemExit(f"--shard-id must satisfy 0 <= shard-id < num-shards (got {args.shard_id}, {args.num_shards})")
+        raise SystemExit(
+            f"--shard-id must satisfy 0 <= shard-id < num-shards (got {args.shard_id}, {args.num_shards})"
+        )
     splits = [s.strip() for s in args.splits.split(",") if s.strip()]
+    atlas_pkl = (
+        args.atlas_pkl.resolve()
+        if args.atlas_pkl is not None
+        else (args.ixi_root / "atlas.pkl").resolve()
+    )
     run_atlas_io_generation(
         args.ixi_root.resolve(),
         args.output_path.resolve(),
+        atlas_pkl=atlas_pkl,
         splits=splits,
         max_per_split=args.max_per_split,
         shard_id=args.shard_id,

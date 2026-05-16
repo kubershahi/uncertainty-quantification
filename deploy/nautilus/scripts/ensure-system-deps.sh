@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idempotent apt packages for stock pytorch/pytorch pods (git is not in the image).
+# Idempotent apt packages for stock pytorch/pytorch pods (git, ssh-keygen not in the image).
 # Runs at pod start; safe to call from every Deployment/Pod entrypoint.
 set -euo pipefail
 
@@ -17,7 +17,7 @@ if [[ "${need_apt}" -eq 0 ]]; then
   exit 0
 fi
 
-echo "Installing system packages (git) …" >&2
+echo "Installing system packages (git, openssh-client) …" >&2
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends git ca-certificates
+apt-get install -y -qq --no-install-recommends git ca-certificates openssh-client
 rm -rf /var/lib/apt/lists/*

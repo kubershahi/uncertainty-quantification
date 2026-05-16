@@ -3,6 +3,9 @@
 # Optional: set env JUPYTER_TOKEN on the Deployment for auth (otherwise empty token; use port-forward only).
 set -euo pipefail
 
+export HOME="${HOME:-/files/home/root}"
+mkdir -p "${HOME}"
+
 VENV="/files/venvs/unc"
 VENV_PY="${VENV}/bin/python"
 VENV_JUPYTER="${VENV}/bin/jupyter"

@@ -55,9 +55,7 @@ spec:
               source /files/venvs/unc/bin/activate
               cd /files/repo/uncertainty-quantification
               export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-              python experiments/unigrad-io/create_unigrad_io_data.py \
-                --ixi-root /files/repo/uncertainty-quantification/datasets/IXI_2D \
-                --output-path /files/repo/uncertainty-quantification/datasets/IXI_2D_unigrad_io
+              python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root /files/repo/uncertainty-quantification/datasets/IXI --atlas-pkl /files/repo/uncertainty-quantification/datasets/IXI/atlas.pkl --output-path /files/repo/uncertainty-quantification/datasets/IXI_unigrad_io --io-iterations 50
           resources:
             requests:
               cpu: "8"

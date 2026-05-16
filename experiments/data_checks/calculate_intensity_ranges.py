@@ -9,9 +9,7 @@ Datasets (default roots):
 
 Examples:
   python calculate_intensity_ranges.py --split Train --num-samples 5
-  python calculate_intensity_ranges.py --split Val --num-samples 10 --seed 0 \\
-    --ixi2d-dir ./data/IXI_2D --synth-dir ./data/IXI_2D_synth_trip \\
-    --unigrad-dir ./data/IXI_2D_unigrad_synth_fiver
+  python calculate_intensity_ranges.py --split Val --num-samples 10 --seed 0 --ixi2d-dir ./data/IXI_2D --synth-dir ./data/IXI_2D_synth_trip --unigrad-dir ./data/IXI_2D_unigrad_synth_fiver
 """
 
 from __future__ import annotations

@@ -22,8 +22,7 @@ Default ``--image-norm robust``: per-slice min + quantile hi → [0,1] for ``ima
 If inputs are already scaled consistently (e.g. IXI fivers), optionally ``--image-norm none``.
 
 Example:
-  python train_error_map_unet.py --data-dir ./data/IXI_2D_unigrad_synth_fiver \\
-    --epochs 50 --batch-size 8 --out-dir ./runs/error_unet_run1
+  python train_error_map_unet.py --data-dir ./data/IXI_2D_unigrad_synth_fiver --epochs 50 --batch-size 8 --out-dir ./runs/error_unet_run1
 """
 
 from __future__ import annotations
