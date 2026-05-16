@@ -12,6 +12,9 @@ err() { echo "ERROR: $*" >&2; exit 1; }
 if [[ ! -f "${VENV}/bin/activate" ]]; then
   err "Missing venv at ${VENV}. Exec into unc-dev / unc-heavy and run: bash deploy/nautilus/scripts/setup_venv.sh"
 fi
+# Jupyter Lab terminals default to /bin/sh (no ``source`` builtin); use bash.
+export SHELL=/bin/bash
+
 # shellcheck source=/dev/null
 source "${VENV}/bin/activate"
 
