@@ -58,12 +58,9 @@ if [[ -f "${VENV_DIR}/bin/activate" ]]; then
   if [[ -x "${_venv_py}" ]] && "${_venv_py}" -c "import sys" >/dev/null 2>&1; then
     # shellcheck source=/dev/null
     source "${VENV_DIR}/bin/activate"
-    if ! python -c "import wandb" >/dev/null 2>&1; then
-      pip install -q --no-cache-dir wandb
-    fi
   else
     echo "WARNING: venv at ${VENV_DIR} is broken (Python interpreter missing or wrong path)." >&2
-    echo "  Rebuild (any pod with pytorch image — unc-dev, unc-heavy, unc-jupyter):" >&2
+    echo "  Rebuild (unc-dev, unc-heavy, or unc-jupyter):" >&2
     echo "    FORCE=1 bash ${REPO_ROOT}/deploy/nautilus/scripts/setup_venv.sh" >&2
   fi
 fi
