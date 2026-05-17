@@ -10,7 +10,7 @@ Writes under ``run-path``: ``training_curves.png``, ``test_metrics.json``,
 mean error_map).
 
 Example:
-  python experiments/regression/eval_error_map_unet.py --run-path assets/runs/error_map_unet_3d --eval-dir datasets/IXI_unigrad_io --no-show
+  python experiments/regression/eval_error_map_unet.py --run-path assets/runs/3d/unigrad-io/error_unet_run1 --eval-dir datasets/IXI_unigrad_io --no-show
 """
 
 from __future__ import annotations
@@ -312,7 +312,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("--run-path", type=Path, required=True)
+    p.add_argument(
+        "--run-path",
+        type=Path,
+        default=Path("assets/runs/3d/unigrad-io/error_unet_run1"),
+        help="Training run directory (best_model.pt, metrics.csv).",
+    )
     p.add_argument(
         "--eval-dir",
         type=Path,

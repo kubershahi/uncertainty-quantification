@@ -14,7 +14,7 @@ Model input (5 channels, layout ``N×C×D×H×W``):
 Progress: overall step bar plus per-epoch train/val batch bars (``--no-progress`` to disable).
 
 Example:
-  python experiments/regression/train_error_map_unet.py --data-dir datasets/IXI_unigrad_io --batch-size 1 --out-dir assets/runs/error_map_unet_3d
+  python experiments/regression/train_error_map_unet.py --data-dir datasets/IXI_unigrad_io --batch-size 1 --out-dir assets/runs/3d/unigrad-io/error_unet_run1
 """
 
 from __future__ import annotations
@@ -405,7 +405,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--out-dir", type=Path, default=Path("assets/runs/error_map_unet_3d"))
+    p.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path("assets/runs/3d/unigrad-io/error_unet_run1"),
+    )
     p.add_argument("--no-amp", action="store_true")
     p.add_argument(
         "--smooth-weight",

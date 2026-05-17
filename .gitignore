@@ -45,6 +45,14 @@ datasets/**
 # Logs
 *.log
 
+# Cursor artifacts
+.cursor/
+.cursorrules
+.cursorignore
+.cursorconfig
+.cursorhistory
+.cursorhistory
+
 # Kubernetes / cluster (never commit credentials)
 kubeconfig
 *.kubeconfig
