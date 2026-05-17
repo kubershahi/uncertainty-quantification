@@ -6,7 +6,7 @@ Reads ``<data-dir>/atlas_valid_mask.npz`` (``atlas`` ``(H,W,D)``, ``valid_mask``
 Shows axial slices: atlas intensity and mask overlay at low / mid / high z.
 
 Example:
-  python experiments/unigrad-io/visualize_unigrad_io_atlas.py --data-dir datasets/IXI_unigrad_io --save-path assets/images/unigrad-io/atlas_mask_qc.png --no-show
+python experiments/unigrad-io/visualize_unigrad_io_atlas.py --data-dir datasets/IXI_unigrad_io --save-path assets/images/unigrad-io/unigradio_atlas_mask.png --no-show
 """
 
 from __future__ import annotations

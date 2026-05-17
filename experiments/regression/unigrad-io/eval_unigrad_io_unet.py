@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Evaluate a trained 3D error-map U-Net on UniGrad IO ``.npz`` volumes.
+Evaluate a trained 3D error-map U-Net on UniGrad IO data from ``create_unigrad_io_data.py``.
 
-Writes under ``--run-path``: ``training_curves.png``, ``test_metrics.json``,
-``test_error_pred_random.png``, ``test_error_pred_easy_normal_hard.png``.
+Expects ``<eval-dir>/atlas_valid_mask.npz`` and split ``*.npz`` with
+``source``, ``phi_pred``, ``phi_predio``, ``error_map``. Metrics and ranking use
+``valid_mask``. Writes under ``--run-path``: ``training_curves.png``,
+``test_metrics.json``, ``test_error_pred_random.png``, ``test_error_pred_easy_normal_hard.png``.
 
 Example:
-  python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/3d/unigrad-io/error_unet_run1 --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/3d/unigrad-io/error_unet_run1 --eval-dir datasets/IXI_unigrad_io --no-show
 """
 
 from __future__ import annotations
@@ -50,20 +52,26 @@ def phi_magnitude_slice(phi: np.ndarray, slice_z: int) -> np.ndarray:
     return mag[slice_z]
 
 
-def mean_error_map_volume(npz_path: Path) -> float:
+def mean_error_map_volume(npz_path: Path, mask_dhw: np.ndarray | None = None) -> float:
     with np.load(npz_path) as z:
-        return float(np.mean(z["error_map"]))
+        err = np.asarray(z["error_map"])
+    if mask_dhw is not None:
+        if mask_dhw.shape != err.shape:
+            raise ValueError(f"{npz_path.name}: mask {mask_dhw.shape} vs error_map {err.shape}")
+        return float(np.mean(err[mask_dhw]))
+    return float(np.mean(err))
 
 
 def select_easy_normal_hard_by_mean_error(
     files: list[Path],
     *,
+    mask_dhw: np.ndarray | None,
     show_progress: bool,
 ) -> list[tuple[Path, str, float]]:
     if not files:
         return []
     it = tqdm(files, desc="rank volumes", unit="file", disable=not show_progress)
-    scored = [(fp, mean_error_map_volume(fp)) for fp in it]
+    scored = [(fp, mean_error_map_volume(fp, mask_dhw)) for fp in it]
     scored.sort(key=lambda x: x[1])
     n = len(scored)
     if n == 1:
@@ -151,27 +159,31 @@ def infer_slices(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     batch = ds[ds.paths.index(fp)]
     with np.load(fp) as data:
-        source = teu.volume_hw_d_to_dhw(np.asarray(data["source"]))
-        target = teu.volume_hw_d_to_dhw(np.asarray(data["target"]))
+        source_hw = np.asarray(data["source"])
+        if "target" in data.files:
+            atlas_hw = np.asarray(data["target"])
+        else:
+            atlas_hw = ds.atlas_target_hw_d
         phi_pred = np.asarray(data["phi_pred"], dtype=np.float32)
         phi_predio = np.asarray(data["phi_predio"], dtype=np.float32)
         err_true = np.asarray(data["error_map"], dtype=np.float32)
 
-    z = slice_z if slice_z is not None else err_true.shape[0] // 2
-    z = int(np.clip(z, 0, err_true.shape[0] - 1))
+    depth = int(err_true.shape[0])
+    z = teu.default_slice_index(depth) if slice_z is None else int(slice_z)
+    z = int(np.clip(z, 0, depth - 1))
 
     x = batch["x"].unsqueeze(0).to(device)
     pred = model(x).squeeze(0).squeeze(0).cpu().numpy()
 
     return (
-        source[:, :, z],
-        target[:, :, z],
+        source_hw[:, :, z],
+        atlas_hw[:, :, z],
         phi_magnitude_slice(phi_pred, z),
         phi_magnitude_slice(phi_predio, z),
         err_true[z],
         pred[z],
         z,
-        err_true.shape[0],
+        depth,
     )
 
 
@@ -448,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
         "checkpoint": str(checkpoint_path),
         "eval_dir": str(eval_dir.resolve()),
         "eval_split": args.eval_split,
+        "atlas_mask_file": teu.ATLAS_MASK_FILENAME,
         "n_volumes": n_test,
         "masked_mse": test_mse,
         "masked_l1": test_l1,
@@ -469,12 +482,13 @@ def main(argv: list[str] | None = None) -> int:
         quantile_high=cfg["quantile_high"],
         phi_scale=cfg["phi_scale"],
     )
+    eval_mask = ds_test.valid_mask_dhw
 
     rng = random.Random(args.seed)
     if args.num_random > 0:
         k = min(args.num_random, len(test_files))
         picked = rng.sample(test_files, k)
-        items = [(p, "", mean_error_map_volume(p)) for p in picked]
+        items = [(p, "", mean_error_map_volume(p, eval_mask)) for p in picked]
         plot_samples_grid(
             items,
             model,
@@ -489,7 +503,9 @@ def main(argv: list[str] | None = None) -> int:
             phi_percentile=args.phi_percentile,
         )
 
-    ranked = select_easy_normal_hard_by_mean_error(test_files, show_progress=show_p)
+    ranked = select_easy_normal_hard_by_mean_error(
+        test_files, mask_dhw=eval_mask, show_progress=show_p
+    )
     plot_samples_grid(
         ranked,
         model,

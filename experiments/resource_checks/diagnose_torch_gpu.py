@@ -4,7 +4,7 @@ Print DataHub GPU + PyTorch CUDA info and run a small CUDA op (same family as Un
 
 Run inside your venv after setup:
   source ~/venvs/unc/bin/activate   # or your venv path
-  python experiments/resource_checks/diagnose_torch_gpu.py
+python experiments/resource_checks/diagnose_torch_gpu.py
 
 If the probe fails with "no kernel image", reinstall PyTorch with a CUDA wheel that matches
 the driver (see experiments/setup_unc.sh and https://pytorch.org/get-started/locally/).

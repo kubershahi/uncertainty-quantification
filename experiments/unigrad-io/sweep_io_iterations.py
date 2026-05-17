@@ -25,7 +25,7 @@ Outputs per subject (saved next to ``--save-path``)
 
 Example (Nautilus PVC, ``/files`` mounted)::
 
-  python experiments/unigrad-io/sweep_io_iterations.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --split Train --num-subjects 3 --save-path assets/images/unigrad-io/3d/sweep_io.png --no-show
+python experiments/unigrad-io/sweep_io_iterations.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --split Train --num-subjects 5 --save-path assets/images/unigrad-io/unigradio_sweep_io.png --no-show
 
 Omit ``--ixi-root`` / ``--save-path`` to use defaults (see argparse help): on NRP,
 inputs under ``<repo>/datasets/IXI``; figures under ``<repo>/assets/images/unigrad-io/3d/``.
@@ -761,9 +761,9 @@ def derive_save_paths(
 
     Example: with ``save_path=./out/sweep_io.png`` and subject ``subject_042.pkl``::
 
-      (./out/sweep_io_subject_042_images.png,
-       ./out/sweep_io_subject_042_curves.png,
-       ./out/sweep_io_subject_042_metrics.csv)
+(./out/sweep_io_subject_042_images.png,
+./out/sweep_io_subject_042_curves.png,
+./out/sweep_io_subject_042_metrics.csv)
 
     Returns ``(None, None, None)`` if ``save_path`` is ``None``.
     """

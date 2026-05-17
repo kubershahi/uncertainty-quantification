@@ -2,17 +2,18 @@
 """
 Train a 3D U-Net to predict per-voxel IO error magnitude from UniGrad ICON IO volumes.
 
-Data (``create_unigrad_io_data.py``), one ``.npz`` per subject under ``Train|Val|Test/``:
-  - ``source`` (H, W, D) — moving / subject volume
-  - ``target`` (H, W, D) — fixed / atlas volume
-  - ``phi_pred`` (3, D, H, W) — zero-shot displacement (voxels)
-  - ``error_map`` (D, H, W) — ``||phi_predio - phi_pred||_2`` (regression target)
+Layout from ``create_unigrad_io_data.py``:
 
-Model input (5 channels, layout ``N×C×D×H×W``):
-  normalized source, normalized target, ``phi_pred / phi_scale`` (3 channels).
+  <data-dir>/atlas_valid_mask.npz  — shared ``atlas`` (H, W, D), ``valid_mask`` (D, H, W)
+  <data-dir>/Train|Val|Test/<subject>.npz per volume:
+    ``source`` (H, W, D), ``phi_pred`` / ``phi_predio`` (3, D, H, W),
+    ``error_map`` (D, H, W), ``io_iterations``
+
+Model input (5 channels, ``N×C×D×H×W``): robust-normalized subject + atlas,
+``phi_pred / phi_scale``. Loss and metrics use ``valid_mask`` only.
 
 Example:
-  python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --batch-size 1 --out-dir assets/runs/3d/unigrad-io/error_unet_run1
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --batch-size 1 --out-dir assets/runs/3d/unigrad-io/error_unet_run1
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import contextlib
 import csv
 import json
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -31,7 +33,41 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+ATLAS_MASK_FILENAME = "atlas_valid_mask.npz"
 DATA_GLOB = "*.npz"
+SUBJECT_NPZ_KEYS = frozenset({"source", "phi_pred", "phi_predio", "error_map"})
+
+
+def default_slice_index(depth: int) -> int:
+    return depth // 2
+
+
+def load_atlas_target_hw_d(data_root: Path) -> np.ndarray | None:
+    path = Path(data_root) / ATLAS_MASK_FILENAME
+    if not path.is_file():
+        return None
+    with np.load(path) as z:
+        key = "atlas" if "atlas" in z.files else "target"
+        if key not in z.files:
+            return None
+        atlas = np.asarray(z[key])
+    if atlas.ndim != 3:
+        raise ValueError(f"{path}: atlas must be (H, W, D), got {atlas.shape}")
+    return atlas
+
+
+def load_atlas_valid_mask_dhw(data_root: Path) -> np.ndarray | None:
+    path = Path(data_root) / ATLAS_MASK_FILENAME
+    if not path.is_file():
+        return None
+    with np.load(path) as z:
+        if "valid_mask" not in z.files:
+            return None
+        mask = np.asarray(z["valid_mask"])
+    if mask.ndim != 3:
+        raise ValueError(f"{path}: valid_mask must be (D, H, W), got {mask.shape}")
+    return mask.astype(np.bool_, copy=False)
+
 DEFAULT_EPOCHS = 15
 
 
@@ -78,6 +114,16 @@ def volume_hw_d_to_dhw(vol: np.ndarray) -> np.ndarray:
     return np.transpose(vol, (2, 0, 1)).astype(np.float32, copy=False)
 
 
+def validate_subject_npz(path: Path) -> None:
+    with np.load(path) as data:
+        missing = SUBJECT_NPZ_KEYS - set(data.files)
+        if missing:
+            raise KeyError(
+                f"{path.name}: missing {sorted(missing)}; expected keys "
+                f"{sorted(SUBJECT_NPZ_KEYS)} from create_unigrad_io_data.py"
+            )
+
+
 class UniGradIOErrorDataset(Dataset):
     """3D IO npz: (5, D, H, W) input, (1, D, H, W) target."""
 
@@ -91,11 +137,26 @@ class UniGradIOErrorDataset(Dataset):
         phi_scale: float = 64.0,
     ):
         self.paths = collect_io_npz_paths(root, split)
+        validate_subject_npz(self.paths[0])
         if image_norm not in ("none", "robust"):
             raise ValueError("image_norm must be 'none' or 'robust'")
         self.image_norm = image_norm
         self.quantile_high = quantile_high
         self.phi_scale = float(phi_scale)
+        self.data_root = Path(root)
+        self.atlas_target_hw_d = load_atlas_target_hw_d(root)
+        self.valid_mask_dhw = load_atlas_valid_mask_dhw(root)
+        atlas_npz = root / ATLAS_MASK_FILENAME
+        if self.atlas_target_hw_d is None:
+            raise FileNotFoundError(
+                f"Missing shared atlas in {atlas_npz}. "
+                "Run create_unigrad_io_data.py with --output-path pointing at this data-dir."
+            )
+        if self.valid_mask_dhw is None:
+            raise FileNotFoundError(
+                f"Missing valid_mask in {atlas_npz}. "
+                "Regenerate data with create_unigrad_io_data.py."
+            )
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -115,7 +176,15 @@ class UniGradIOErrorDataset(Dataset):
         path = self.paths[idx]
         with np.load(path) as data:
             source = volume_hw_d_to_dhw(np.asarray(data["source"]))
-            target = volume_hw_d_to_dhw(np.asarray(data["target"]))
+            if "target" in data.files:
+                target = volume_hw_d_to_dhw(np.asarray(data["target"]))
+            elif self.atlas_target_hw_d is not None:
+                target = volume_hw_d_to_dhw(self.atlas_target_hw_d)
+            else:
+                raise KeyError(
+                    f"{path.name}: no 'target' in npz and no shared atlas under "
+                    f"{path.parent.parent / ATLAS_MASK_FILENAME}"
+                )
             phi_pred = np.asarray(data["phi_pred"], dtype=np.float32)
             err = np.asarray(data["error_map"], dtype=np.float32)
 
@@ -138,7 +207,15 @@ class UniGradIOErrorDataset(Dataset):
             axis=0,
         )
         y = err[None, ...]
-        mask = np.ones((d, h, w), dtype=np.bool_)
+        if self.valid_mask_dhw is not None:
+            mask = self.valid_mask_dhw
+            if mask.shape != (d, h, w):
+                raise ValueError(
+                    f"{path.name}: valid_mask {mask.shape} vs error_map {(d, h, w)}; "
+                    f"regenerate {ATLAS_MASK_FILENAME}"
+                )
+        else:
+            mask = np.ones((d, h, w), dtype=np.bool_)
 
         return {
             "x": torch.from_numpy(x),
@@ -380,7 +457,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=Path("assets/runs/3d/unigrad-io/error_unet_run1"),
     )
     p.add_argument("--no-amp", action="store_true")
-    p.add_argument("--smooth-weight", type=float, default=0.0)
+    p.add_argument(
+        "--smooth-weight",
+        type=float,
+        default=0.05,
+        help="3D TV on predicted error_map (0 = MSE only).",
+    )
     p.add_argument("--no-progress", action="store_true")
     return p.parse_args(argv)
 
@@ -435,7 +517,8 @@ def main(argv: list[str] | None = None) -> int:
         "model": "UNet3D",
         "in_channels": 5,
         "out_channels": 1,
-        "inputs": ["source", "target", "phi_pred"],
+        "inputs": ["source", "atlas", "phi_pred"],
+        "atlas_mask_file": ATLAS_MASK_FILENAME,
         "target": "error_map",
         "data_dir": str(args.data_dir.resolve()),
         "train_split": args.train_split,

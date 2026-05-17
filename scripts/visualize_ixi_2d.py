@@ -2,10 +2,10 @@
 Visualize random 2D images from .npy and .npz files.
 
 Example usage:
-  python3 scripts/visualize_2d_ixi.py --input-dir ./data/raw/IXI_2D/Train --num-samples 9
-  python3 scripts/visualize_2d_ixi.py --input-dir ./data/raw/IXI_2D --recursive --num-samples 9 --no-show --save-path ./assets/images/ixi_2d.png
-  python3 scripts/visualize_2d_ixi.py --input-dir ./data/raw/IXI_2D --pattern "atlas_slice_*.npy" --num-samples 10
-  python3 scripts/visualize_2d_ixi.py --input-dir ./some_npz_dir --array-key image --num-samples 8
+python3 scripts/visualize_2d_ixi.py --input-dir ./data/raw/IXI_2D/Train --num-samples 9
+python3 scripts/visualize_2d_ixi.py --input-dir ./data/raw/IXI_2D --recursive --num-samples 9 --no-show --save-path ./assets/images/ixi_2d.png
+python3 scripts/visualize_2d_ixi.py --input-dir ./data/raw/IXI_2D --pattern "atlas_slice_*.npy" --num-samples 10
+python3 scripts/visualize_2d_ixi.py --input-dir ./some_npz_dir --array-key image --num-samples 8
 """
 
 import argparse
@@ -109,13 +109,13 @@ def visualize_samples(
 
 
 def parse_args() -> argparse.Namespace:
-    examples = (
-        "Examples:\n"
-        "python3 scripts/visualize_ixi_2d.py --input-dir ./data/raw/IXI_2D/Train"
-        "python3 scripts/visualize_ixi_2d.py --input-dir ./data/raw/IXI_2D --recursive --no-show --save-path ./assets/images/ixi_2d.png"
-        "python3 scripts/visualize_ixi_2d.py --input-dir ./data/raw/IXI_2D --pattern \"atlas_slice_*.npy\""
-        "python3 scripts/visualize_ixi_2d.py --input-dir ./data/raw/IXI_2D --array-key image"
-    )
+    examples = """
+Examples:
+python3 scripts/visualize_ixi_2d.py --input-dir ./data/raw/IXI_2D/Train
+python3 scripts/visualize_ixi_2d.py --input-dir ./data/raw/IXI_2D --recursive --no-show --save-path ./assets/images/ixi_2d.png
+python3 scripts/visualize_ixi_2d.py --input-dir ./data/raw/IXI_2D --pattern "atlas_slice_*.npy"
+python3 scripts/visualize_ixi_2d.py --input-dir ./data/raw/IXI_2D --array-key image
+""".strip()
     parser = argparse.ArgumentParser(
         description="Visualize random 2D images from .npy and .npz files.",
         epilog=examples,

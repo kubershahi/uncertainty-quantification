@@ -15,9 +15,9 @@ Use ``--split Train`` or ``--split Train,Test``. With multiple subjects, writes 
 under ``--save-dir`` (``{split}_{label}.png``). Use ``--combined`` for a single multi-row figure.
 
 Examples:
-  python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Train,Test --selection easy_normal_hard --save-dir assets/images/unigrad-io/3d/ --no-show
-  python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Val --selection random --num-samples 4 --save-dir assets/images/unigrad-io/3d/ --no-show
-  python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Train --selection easy_normal_hard --combined --save-path assets/images/unigrad-io/3d/train_easy_normal_hard.png --no-show
+python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Train,Test --selection easy_normal_hard --save-dir assets/images/unigrad-io/ --no-show
+python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Val --selection random --num-samples 4 --save-dir assets/images/unigrad-io/ --no-show
+python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Train --selection easy_normal_hard --combined --save-path assets/images/unigrad-io/unigradio_train_easy_normal_hard.png --no-show
 """
 
 from __future__ import annotations

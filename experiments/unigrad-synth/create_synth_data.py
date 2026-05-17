@@ -7,9 +7,9 @@ If QC checks never pass within MAX_TRANSFORM_ATTEMPTS, the last sample is still 
 Paths are also listed in qc_flagged_paths.txt under output_path for easy cleanup.
 
 Example:
-  python create_synthetic_data.py
-  python create_synthetic_data.py --workers 64
-  python create_synthetic_data.py --max-phi-int 25
+python create_synthetic_data.py
+python create_synthetic_data.py --workers 64
+python create_synthetic_data.py --max-phi-int 25
 """
 
 from __future__ import annotations

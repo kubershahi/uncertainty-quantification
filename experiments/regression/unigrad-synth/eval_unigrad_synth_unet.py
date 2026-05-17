@@ -6,7 +6,7 @@ Writes under ``--run-path``: ``training_curves.png``, ``test_metrics.json``,
 ``test_error_pred_random.png``, ``test_error_pred_easy_normal_hard.png``.
 
 Example:
-  python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/2d/unigrad-synth/error_unet_run1 --eval-dir data/IXI_2D_unigrad_synth_fiver --no-show
+python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/2d/unigrad-synth/error_unet_run1 --eval-dir data/IXI_2D_unigrad_synth_fiver --no-show
 """
 
 from __future__ import annotations

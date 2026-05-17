@@ -12,8 +12,8 @@ Post-generation review for IXI_2D synthetic triplets (*_triplet.npz).
   Plots: ``experiments/synthetic/visualize_synth_data.py``
 
 Examples:
-  python data_checks/check_synth_data.py
-  python data_checks/check_synth_data.py --data-dir ./data/IXI_2D_synth_trip/
+python data_checks/check_synth_data.py
+python data_checks/check_synth_data.py --data-dir ./data/IXI_2D_synth_trip/
 """
 
 from __future__ import annotations
