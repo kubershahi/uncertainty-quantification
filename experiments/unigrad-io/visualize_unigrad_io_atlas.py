@@ -114,11 +114,12 @@ def plot_atlas_mask_figure(
     thr_s = f"{threshold:.4g}" if np.isfinite(threshold) else "n/a"
     pct_s = f"{fg_percentile:g}" if np.isfinite(fg_percentile) else "n/a"
     fig.suptitle(
-        f"UniGrad IO atlas · threshold = {thr_s} (p{pct_s} of atlas>0) · "
+        f"UniGrad IO atlas · threshold = {thr_s} (p{pct_s} of atlas>0)\n"
         f"valid_mask True on {fg_frac * 100:.1f}% of volume voxels",
         fontsize=11,
+        y=0.98,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.90), pad=0.6, h_pad=2.8, w_pad=0.5)
+    fig.tight_layout(rect=(0, 0, 1, 0.88), pad=0.6, h_pad=2.8, w_pad=0.5)
 
     if save_path is not None:
         save_path = Path(save_path)
