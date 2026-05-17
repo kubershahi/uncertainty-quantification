@@ -215,6 +215,22 @@ def format_rank_metric(rank_by: str) -> str:
     return RANK_BY_LABELS.get(rank_by, rank_by)
 
 
+def format_figure_main_title(split: str, selection: str, rank_by: str) -> str:
+    """First suptitle line: ``Train samples | ranked by …``."""
+    if selection == "easy_normal_hard":
+        return f"{split} samples | ranked by {format_rank_metric(rank_by)}"
+    if selection == "random":
+        return f"{split} samples | random selection"
+    return f"{split} samples | {selection.replace('_', ' ')}"
+
+
+def format_figure_subtitle(z: int, depth: int, nrows: int) -> str:
+    line = f"axial slice z = {z} / {depth - 1}"
+    if nrows > 1:
+        line += f"  ·  {nrows} subjects"
+    return line
+
+
 def format_subject_overlay(fp: Path, label: str) -> str:
     if not label or label == fp.stem:
         return fp.stem
@@ -229,7 +245,7 @@ def format_mean_overlay(score: float, rank_by: str | None) -> str | None:
 
 def set_column_headers(axes_row) -> None:
     for ax, title in zip(axes_row, COLUMN_TITLES):
-        ax.set_title(title, fontsize=9, pad=8)
+        ax.set_title(title, fontsize=9, pad=4)
 
 
 def format_row_side_label(
@@ -364,17 +380,15 @@ def render_figure(
             rank_by=rank_for_caption,
         )
 
-    metric_note = ""
-    if selection == "easy_normal_hard":
-        metric_note = f" · ranked by {format_rank_metric(rank_by)}"
+    left = 0.11 if nrows > 1 else 0.08
+    fig.tight_layout(rect=(left, 0.02, 1, 0.97), pad=0.35, h_pad=0.5, w_pad=0.15)
+    fig.subplots_adjust(top=0.93)
     fig.suptitle(
-        f"{split} · {selection.replace('_', ' ')}{metric_note}\n"
-        f"axial slice z = {z} / {depth - 1}"
-        + (f"  ·  {nrows} subject(s)" if nrows > 1 else ""),
+        f"{format_figure_main_title(split, selection, rank_by)}\n"
+        f"{format_figure_subtitle(z, depth, nrows)}",
         fontsize=11,
-        y=1.01,
+        y=0.985,
     )
-    fig.tight_layout(rect=(0.11 if nrows > 1 else 0.08, 0, 1, 0.92))
     return fig
 
 
