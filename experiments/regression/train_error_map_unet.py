@@ -11,15 +11,16 @@ Data (``create_unigrad_io_data.py``), one ``.npz`` per subject under ``Train|Val
 Model input (5 channels, layout ``N×C×D×H×W``):
   normalized source, normalized target, ``phi_pred / phi_scale`` (3 channels).
 
-Progress: tqdm for epochs, train batches, and val batches (use ``--no-progress`` to disable).
+Progress: overall step bar plus per-epoch train/val batch bars (``--no-progress`` to disable).
 
 Example:
-  python experiments/regression/train_error_map_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 1 --out-dir assets/runs/error_map_unet_3d
+  python experiments/regression/train_error_map_unet.py --data-dir datasets/IXI_unigrad_io --batch-size 1 --out-dir assets/runs/error_map_unet_3d
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import random
@@ -33,6 +34,25 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 DATA_GLOB = "*.npz"
+DEFAULT_EPOCHS = 15
+
+
+def amp_autocast(enabled: bool):
+    if not enabled:
+        return contextlib.nullcontext()
+    try:
+        return torch.amp.autocast("cuda")
+    except AttributeError:
+        return torch.cuda.amp.autocast()
+
+
+def make_grad_scaler(enabled: bool):
+    if not enabled:
+        return None
+    try:
+        return torch.amp.GradScaler("cuda")
+    except (AttributeError, TypeError):
+        return torch.cuda.amp.GradScaler()
 
 
 def set_seed(seed: int) -> None:
@@ -263,21 +283,25 @@ def evaluate(
     use_amp: bool,
     show_progress: bool = True,
     desc: str = "val",
+    overall_pbar: tqdm | None = None,
 ) -> tuple[float, float]:
     model.eval()
     sum_mse = 0.0
     sum_l1 = 0.0
     n = 0
-    it = tqdm(loader, desc=desc, leave=False, unit="batch", disable=not show_progress)
+    it = tqdm(loader, desc=desc, leave=False, unit="batch", disable=not show_progress, position=2)
     for batch in it:
         x = batch["x"].to(device, non_blocking=True)
         y = batch["y"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with amp_autocast(use_amp):
             pred = model(x)
             sum_mse += float(masked_mse(pred, y, mask))
             sum_l1 += float(masked_l1(pred, y, mask))
         n += 1
+        if overall_pbar is not None:
+            overall_pbar.update(1)
+            overall_pbar.set_postfix(phase="val", val_mse=f"{sum_mse / n:.3f}")
     return sum_mse / max(n, 1), sum_l1 / max(n, 1)
 
 
@@ -288,11 +312,12 @@ def train_epoch(
     device: torch.device,
     *,
     use_amp: bool,
-    scaler: torch.cuda.amp.GradScaler | None,
+    scaler,
     smooth_weight: float,
     show_progress: bool = True,
     epoch: int = 1,
     total_epochs: int = 1,
+    overall_pbar: tqdm | None = None,
 ) -> tuple[float, float, float]:
     model.train()
     sum_mse = 0.0
@@ -300,13 +325,13 @@ def train_epoch(
     sum_total = 0.0
     steps = 0
     desc = f"train {epoch}/{total_epochs}"
-    it = tqdm(loader, desc=desc, leave=False, unit="batch", disable=not show_progress)
+    it = tqdm(loader, desc=desc, leave=False, unit="batch", disable=not show_progress, position=2)
     for batch in it:
         x = batch["x"].to(device, non_blocking=True)
         y = batch["y"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
         opt.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with amp_autocast(use_amp):
             pred = model(x)
             mse, smooth, loss = masked_mse_plus_smoothness_3d(
                 pred, y, mask, smooth_weight=smooth_weight
@@ -324,6 +349,13 @@ def train_epoch(
         steps += 1
         if show_progress:
             it.set_postfix(mse=float(mse), total=float(loss))
+        if overall_pbar is not None:
+            overall_pbar.update(1)
+            overall_pbar.set_postfix(
+                phase="train",
+                epoch=f"{epoch}/{total_epochs}",
+                mse=f"{mse:.3f}",
+            )
     n = max(steps, 1)
     return sum_mse / n, sum_smooth / n, sum_total / n
 
@@ -342,7 +374,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--train-split", type=str, default="Train")
     p.add_argument("--val-split", type=str, default="Val")
-    p.add_argument("--epochs", type=int, default=50)
+    p.add_argument(
+        "--epochs",
+        type=int,
+        default=DEFAULT_EPOCHS,
+        help=f"Training epochs (default: {DEFAULT_EPOCHS}).",
+    )
     p.add_argument(
         "--batch-size",
         type=int,
@@ -388,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda" and not args.no_amp
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = make_grad_scaler(use_amp)
 
     train_ds = UniGradIOErrorDataset(
         args.data_dir,
@@ -464,9 +501,31 @@ def main(argv: list[str] | None = None) -> int:
 
     show_p = not args.no_progress
     t0 = time.time()
+    steps_per_epoch = len(train_loader) + len(val_loader)
+    total_steps = args.epochs * steps_per_epoch
+
+    overall_pbar: tqdm | None = None
+    if show_p:
+        overall_pbar = tqdm(
+            total=total_steps,
+            desc="total",
+            unit="step",
+            position=0,
+            leave=True,
+            dynamic_ncols=True,
+        )
+
     epoch_loop = range(1, args.epochs + 1)
     if show_p:
-        epoch_loop = tqdm(epoch_loop, desc="epoch", unit="ep", total=args.epochs, position=0, leave=True)
+        epoch_loop = tqdm(
+            epoch_loop,
+            desc="epoch",
+            unit="ep",
+            total=args.epochs,
+            position=1,
+            leave=True,
+            dynamic_ncols=True,
+        )
 
     for epoch in epoch_loop:
         tr_mse, tr_smooth, tr_total = train_epoch(
@@ -480,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
             show_progress=show_p,
             epoch=epoch,
             total_epochs=args.epochs,
+            overall_pbar=overall_pbar,
         )
         val_mse, val_l1 = evaluate(
             model,
@@ -488,6 +548,7 @@ def main(argv: list[str] | None = None) -> int:
             use_amp=use_amp,
             show_progress=show_p,
             desc=f"val {epoch}/{args.epochs}",
+            overall_pbar=overall_pbar,
         )
         dt = time.time() - t0
         print(
@@ -511,6 +572,9 @@ def main(argv: list[str] | None = None) -> int:
                 best_path,
             )
             print(f"  saved best to {best_path}")
+
+    if overall_pbar is not None:
+        overall_pbar.close()
 
     print(f"Done. Best val MSE={best_val:.6f} -> {best_path}")
     print(f"Metrics log: {metrics_path}")
