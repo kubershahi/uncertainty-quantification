@@ -8,7 +8,7 @@ Expects ``<eval-dir>/atlas_valid_mask.npz`` and split ``*.npz`` with
 ``test_metrics.json``, ``test_error_pred_random.png``, ``test_error_pred_easy_normal_hard.png``.
 
 Example:
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/3d/unigrad-io/error_unet_run1 --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run1 --eval-dir datasets/IXI_unigrad_io --no-show
 """
 
 from __future__ import annotations
@@ -41,7 +41,6 @@ COLUMN_TITLES = (
     "subject (source)",
     "atlas (target)",
     r"zero-shot ($\|\phi_{\mathrm{pred}}\|$)",
-    r"post-IO ($\|\phi_{\mathrm{pred}}^{\mathrm{IO}}\|$)",
     f"error GT ({DISPLACEMENT_UNIT})",
     f"error pred ({DISPLACEMENT_UNIT})",
 )
@@ -156,7 +155,7 @@ def infer_slices(
     ds: teu.UniGradIOErrorDataset,
     device: torch.device,
     slice_z: int | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     batch = ds[ds.paths.index(fp)]
     with np.load(fp) as data:
         source_hw = np.asarray(data["source"])
@@ -165,7 +164,6 @@ def infer_slices(
         else:
             atlas_hw = ds.atlas_target_hw_d
         phi_pred = np.asarray(data["phi_pred"], dtype=np.float32)
-        phi_predio = np.asarray(data["phi_predio"], dtype=np.float32)
         err_true = np.asarray(data["error_map"], dtype=np.float32)
 
     depth = int(err_true.shape[0])
@@ -179,7 +177,6 @@ def infer_slices(
         source_hw[:, :, z],
         atlas_hw[:, :, z],
         phi_magnitude_slice(phi_pred, z),
-        phi_magnitude_slice(phi_predio, z),
         err_true[z],
         pred[z],
         z,
@@ -249,25 +246,25 @@ def plot_samples_grid(
 
     it = tqdm(items, desc=f"plot {arrangement}", unit="subject", disable=not show_progress)
     for fp, tag, mean_err in it:
-        subj, atlas, phi_a, phi_b, err_gt, err_pred, z_i, d_i = infer_slices(
+        subj, atlas, phi_a, err_gt, err_pred, z_i, d_i = infer_slices(
             fp, model, ds, device, slice_z
         )
         if z_show is None:
             z_show, depth = z_i, d_i
-        rows_data.append((fp, tag, mean_err, (subj, atlas, phi_a, phi_b, err_gt, err_pred)))
+        rows_data.append((fp, tag, mean_err, (subj, atlas, phi_a, err_gt, err_pred)))
 
-    all_err = np.concatenate([r[3][4].ravel() for r in rows_data] + [r[3][5].ravel() for r in rows_data])
+    all_err = np.concatenate([r[3][3].ravel() for r in rows_data] + [r[3][4].ravel() for r in rows_data])
     err_v = float(np.percentile(all_err, err_percentile))
     if err_v <= 0:
         err_v = 1e-6
 
-    phi_slices = [r[3][2] for r in rows_data] + [r[3][3] for r in rows_data]
+    phi_slices = [r[3][2] for r in rows_data]
     phi_v = float(np.percentile(np.concatenate([p.ravel() for p in phi_slices]), phi_percentile))
     if phi_v <= 0:
         phi_v = 1e-6
 
     nrows = len(rows_data)
-    ncol = 6
+    ncol = 5
     fig, axes = plt.subplots(nrows, ncol, figsize=(3.0 * ncol, 3.0 * nrows))
     if nrows == 1:
         axes = np.array([axes])
@@ -276,12 +273,11 @@ def plot_samples_grid(
     cbar_err = f"‖Δφ‖ ({DISPLACEMENT_UNIT})"
 
     for row, (fp, tag, mean_err, panels) in enumerate(rows_data):
-        subj, atlas, phi_a, phi_b, err_gt, err_pred = panels
+        subj, atlas, phi_a, err_gt, err_pred = panels
         images: list[tuple[np.ndarray, str, float | None, float | None, str | None]] = [
             (subj, "gray", None, None, None),
             (atlas, "gray", None, None, None),
             (phi_a, "hot", 0.0, phi_v, cbar_phi),
-            (phi_b, "hot", 0.0, phi_v, cbar_phi),
             (err_gt, "hot", 0.0, err_v, cbar_err),
             (err_pred, "hot", 0.0, err_v, cbar_err),
         ]

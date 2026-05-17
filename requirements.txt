@@ -1,3 +1,4 @@
 nibabel>=4.0.0
 numpy>=1.20.0
 tqdm>=4.60.0
+wandb>=0.16.0
