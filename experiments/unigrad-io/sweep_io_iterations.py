@@ -11,7 +11,7 @@ each iteration in ``--checkpoints``. For each snapshot we track:
 
   - ``io_loss``, ``LNCC(warped, target)``   -- IO progress (should improve)
   - ``mean(error_map) = mean ||phi@N - phi@0||``  -- U-Net regression signal
-  - ``neg_jac_pct``  ( = %|J|<0 of T = id + phi ) -- folded pixels (stop before
+  - ``neg_jac_pct``  ( = %|J|<0 of T = id + phi ) -- folded voxels (stop before
                                                     this starts climbing)
 
 See ``compute_sweep_metrics`` for the formal definitions.
@@ -25,14 +25,12 @@ Outputs per subject (saved next to ``--save-path``)
 
 Example (Nautilus PVC, ``/files`` mounted)::
 
-  python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl --ixi-root /files/repo/uncertainty-quantification/datasets/IXI --atlas-pkl /files/repo/uncertainty-quantification/datasets/IXI/atlas.pkl --split Train --num-subjects 3 --save-path /files/repo/uncertainty-quantification/assets/images/unigrad-io/3d/sweep_io.png --no-show
-  python experiments/unigrad-io/sweep_io_iterations.py --mode 2d --ixi-root /files/repo/uncertainty-quantification/datasets/IXI_2D --split Train --num-subjects 3 --save-path /files/repo/uncertainty-quantification/assets/images/unigrad-io/sweep_io.png --no-show
+  python experiments/unigrad-io/sweep_io_iterations.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --split Train --num-subjects 3 --save-path assets/images/unigrad-io/3d/sweep_io.png --no-show
 
 Omit ``--ixi-root`` / ``--save-path`` to use defaults (see argparse help): on NRP,
-inputs under ``<repo>/datasets/``; sweep figures under ``<repo>/assets/images/unigrad-io/``.
+inputs under ``<repo>/datasets/IXI``; figures under ``<repo>/assets/images/unigrad-io/3d/``.
 
-Defaults: ``--checkpoints`` is ``0,50,100,150,200,250`` for 2d and ``0,50,100,200`` for
-``3d-pkl`` (four IO snapshots to limit 3d cost). ``--seed 42``.
+Default ``--checkpoints``: ``0,50,100,150,200,250,300``. ``--seed 42``.
 """
 
 from __future__ import annotations
@@ -75,90 +73,44 @@ from create_unigrad_io_data import (  # noqa: E402
     phi_vectorfield_to_volume_voxels,
     preprocess_volume_for_unigrad,
 )
-from visualize_unigrad_io_data import overlay_deformation_grid  # noqa: E402
 
-# Legacy 2D IXI_2D sweep (--mode 2d); not used by create_unigrad_io_data (3D-only).
-ATLAS_SLICE_INDEX = 111
+DISPLACEMENT_UNIT = "voxels"
 
 
-def preprocess_for_unigrad(img_tensor: torch.Tensor) -> torch.Tensor:
-    """Normalize one 2D slice, pseudo-stack depth to 5, resize to 175³."""
-    im_min = torch.min(img_tensor)
-    im_max = torch.quantile(img_tensor.view(-1), 0.99)
-    denom = torch.clamp(im_max - im_min, min=1e-5)
-    img = torch.clip(img_tensor, im_min, im_max)
-    img = (img - im_min) / denom
-    img = img.unsqueeze(2).repeat(1, 1, 5, 1, 1)
-    return F.interpolate(img, [175, 175, 175], mode="trilinear", align_corners=False)
+def overlay_deformation_grid(
+    ax,
+    phi_px: np.ndarray,
+    *,
+    stride: int = 12,
+    color: str = "cyan",
+    linewidth: float = 0.5,
+    alpha: float = 0.7,
+) -> None:
+    """Overlay in-plane grid for ``phi_px`` ``(2, H, W)`` (col, row displacements)."""
+    if phi_px.ndim != 3 or phi_px.shape[0] != 2:
+        raise ValueError(f"Expected phi_px (2, H, W), got {phi_px.shape}")
+    _, h, w = phi_px.shape
+    rows = np.arange(h)
+    cols = np.arange(w)
+    grid_row, grid_col = np.meshgrid(rows, cols, indexing="ij")
+    pos_col = grid_col + phi_px[0]
+    pos_row = grid_row + phi_px[1]
+    levels_col = np.arange(0, w + stride, stride)
+    levels_row = np.arange(0, h + stride, stride)
+    ax.contour(pos_col, levels=levels_col, colors=color, linewidths=linewidth, alpha=alpha)
+    ax.contour(pos_row, levels=levels_row, colors=color, linewidths=linewidth, alpha=alpha)
 
-
-def apply_displacement_2d(
-    moving_np: np.ndarray, phi_px: np.ndarray, device: torch.device
-) -> np.ndarray:
-    """Warp ``(H, W)`` with ``phi_px`` ``(2, H, W)`` in pixel units."""
-    h, w = int(moving_np.shape[0]), int(moving_np.shape[1])
-    img = torch.from_numpy(moving_np).to(device, dtype=torch.float32)[None, None]
-    phi = torch.from_numpy(phi_px).to(device, dtype=torch.float32)
-
-    ys = torch.arange(h, device=device, dtype=torch.float32)
-    xs = torch.arange(w, device=device, dtype=torch.float32)
-    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-
-    src_x = grid_x + phi[0]
-    src_y = grid_y + phi[1]
-    src_x = 2.0 * src_x / max(w - 1, 1) - 1.0
-    src_y = 2.0 * src_y / max(h - 1, 1) - 1.0
-
-    grid = torch.stack([src_x, src_y], dim=-1)[None]
-    warped = F.grid_sample(img, grid, mode="bilinear", padding_mode="border", align_corners=True)
-    return warped.squeeze().detach().cpu().numpy().astype(np.float32)
-
-
-def phi_vectorfield_to_slice_pixels(
-    net: torch.nn.Module, orig_h: int, orig_w: int
-) -> np.ndarray:
-    """ICON displacement in pixels, shape ``(2, H, W)`` (channel 0 = col, 1 = row)."""
-    identity = net.identity_map
-    phi_disp_175 = net.phi_AB_vectorfield - identity
-    phi_rescaled = F.interpolate(
-        phi_disp_175,
-        [5, orig_h, orig_w],
-        mode="trilinear",
-        align_corners=True,
-    )
-    phi_plane = phi_rescaled[0, 1:3, 2, :, :].cpu().numpy()
-    out = np.zeros((2, orig_h, orig_w), dtype=np.float32)
-    out[0] = phi_plane[1] * (orig_w - 1)
-    out[1] = phi_plane[0] * (orig_h - 1)
-    return out
-
-
-def load_atlas_slice(atlas_dir: Path) -> tuple[np.ndarray, int, Path]:
-    """Load ``Atlas/atlas_slice_{ATLAS_SLICE_INDEX}.npy``."""
-    path = atlas_dir / f"atlas_slice_{ATLAS_SLICE_INDEX}.npy"
-    if not path.is_file():
-        raise FileNotFoundError(f"Missing atlas file: {path}")
-    return np.asarray(np.load(path), dtype=np.float32), ATLAS_SLICE_INDEX, path
 
 # Nautilus ``/files`` PVC layout (see ``deploy/nautilus/scripts/env.sh``).
 _FILES_ROOT = Path("/files")
 NRP_REPO = _FILES_ROOT / "repo" / "uncertainty-quantification"
 NRP_DATASETS = NRP_REPO / "datasets"
 NRP_IXI_PKL_ROOT = NRP_DATASETS / "IXI"
-NRP_IXI_2D_ROOT = NRP_DATASETS / "IXI_2D"
-NRP_SWEEP_SAVE = NRP_REPO / "assets" / "images" / "unigrad-io" / "sweep_io.png"
-LOCAL_IXI_PKL = Path("./data/IXI/")
-LOCAL_IXI_2D = Path("./data/IXI_2D/")
-LOCAL_SWEEP_SAVE = Path("./assets/images/unigrad-io/sweep_io.png")
+NRP_SWEEP_SAVE = NRP_REPO / "assets" / "images" / "unigrad-io" / "3d" / "sweep_io.png"
+LOCAL_IXI_PKL = Path("./datasets/IXI/")
+LOCAL_SWEEP_SAVE = Path("./assets/images/unigrad-io/3d/sweep_io.png")
 
-# IO iteration snapshots (UniGradICON default IO length is 50; full 2d sweep adds dense samples).
-CHECKPOINTS_DEFAULT_2D = "0,50,100,150,200,250"
-CHECKPOINTS_DEFAULT_3D = "0,50,100,150,200,250,300"
-
-
-def displacement_unit_for_target(target_img: np.ndarray) -> str:
-    """``voxels`` for 3D volumes; ``pixels`` for 2D slices (in-plane displacement)."""
-    return "voxels" if target_img.ndim == 3 else "pixels"
+CHECKPOINTS_DEFAULT = "0,50,100,150,200,250,300"
 
 
 def _tqdm_common_kwargs() -> dict:
@@ -170,11 +122,9 @@ def _tqdm_common_kwargs() -> dict:
     }
 
 
-def default_ixi_root(mode: str) -> Path:
-    """Prefer PVC paths when mounted; else small repo-relative roots."""
-    if mode == "3d-pkl":
-        return NRP_IXI_PKL_ROOT if NRP_IXI_PKL_ROOT.is_dir() else LOCAL_IXI_PKL
-    return NRP_IXI_2D_ROOT if NRP_IXI_2D_ROOT.is_dir() else LOCAL_IXI_2D
+def default_ixi_root() -> Path:
+    """Prefer PVC paths when mounted; else repo-relative ``datasets/IXI``."""
+    return NRP_IXI_PKL_ROOT if NRP_IXI_PKL_ROOT.is_dir() else LOCAL_IXI_PKL
 
 
 def default_save_path() -> Path:
@@ -234,54 +184,6 @@ def pct_negative_jacobian_3d(phi_dhw: np.ndarray, *, stride: int = 4) -> float:
     return 100.0 * float(np.mean(det < 0))
 
 
-def lncc_2d(
-    a: np.ndarray,
-    b: np.ndarray,
-    *,
-    sigma: int = 5,
-    device: torch.device | None = None,
-) -> float:
-    """Mean local normalized cross correlation between two 2D images.
-
-    Uses a uniform window of size ``2*sigma+1`` (matching the ``sigma`` used by
-    ``icon_registration.LNCC``). Returns the mean LNCC over all pixels; range
-    is roughly ``[-1, 1]`` (higher is better).
-    """
-    dev = device if device is not None else torch.device("cpu")
-    k = 2 * sigma + 1
-    pad = sigma
-    A = torch.from_numpy(a).to(dev, dtype=torch.float32)[None, None]
-    B = torch.from_numpy(b).to(dev, dtype=torch.float32)[None, None]
-
-    mu_a = F.avg_pool2d(A, kernel_size=k, stride=1, padding=pad)
-    mu_b = F.avg_pool2d(B, kernel_size=k, stride=1, padding=pad)
-    var_a = F.avg_pool2d(A * A, kernel_size=k, stride=1, padding=pad) - mu_a * mu_a
-    var_b = F.avg_pool2d(B * B, kernel_size=k, stride=1, padding=pad) - mu_b * mu_b
-    cov_ab = F.avg_pool2d(A * B, kernel_size=k, stride=1, padding=pad) - mu_a * mu_b
-
-    denom = torch.sqrt(torch.clamp(var_a * var_b, min=1e-10))
-    lncc_map = cov_ab / denom
-    return float(lncc_map.mean().item())
-
-
-def pct_negative_jacobian_2d(phi_px: np.ndarray) -> float:
-    """Percentage of pixels with negative Jacobian determinant for a 2D transform.
-
-    The 2D transform is ``T(y, x) = (y + phi[1, y, x], x + phi[0, y, x])``.
-    ``det(J) = (1 + d phi0 / dx)(1 + d phi1 / dy) - (d phi0 / dy)(d phi1 / dx)``,
-    computed with forward finite differences on a ``(H-1, W-1)`` interior.
-    Negative determinants indicate folded (unphysical) deformations.
-    """
-    dphi0 = phi_px[0].astype(np.float64)  # column displacement
-    dphi1 = phi_px[1].astype(np.float64)  # row displacement
-    dphi0_dx = np.diff(dphi0, axis=1)[:-1, :]
-    dphi0_dy = np.diff(dphi0, axis=0)[:, :-1]
-    dphi1_dx = np.diff(dphi1, axis=1)[:-1, :]
-    dphi1_dy = np.diff(dphi1, axis=0)[:, :-1]
-    det = (1.0 + dphi0_dx) * (1.0 + dphi1_dy) - dphi0_dy * dphi1_dx
-    return 100.0 * float(np.mean(det < 0))
-
-
 def parse_checkpoints(spec: str) -> list[int]:
     """Parse comma-separated checkpoint iterations; ensures sorted unique non-negative ints."""
     vals = sorted({int(x.strip()) for x in spec.split(",") if x.strip()})
@@ -292,53 +194,6 @@ def parse_checkpoints(spec: str) -> list[int]:
 
 
 def resolve_subject_paths(
-    ixi_root: Path,
-    *,
-    split: str,
-    subject_path: Path | None,
-    subject_indices: list[int] | None,
-    num_subjects: int | None,
-    seed: int,
-) -> list[Path]:
-    """Resolve which subject .npy files to sweep over.
-
-    Priority of CLI flags (first that is set wins):
-      1. ``--subject-path P``       -> exactly that one file.
-      2. ``--subject-indices i,j,k`` -> those sorted indices into the split.
-      3. ``--num-subjects N`` (+ ``--seed S``) -> N random indices from the split.
-      4. Default (nothing set)      -> single subject at index 0 (back-compat).
-    """
-    if subject_path is not None:
-        if not subject_path.is_file():
-            raise FileNotFoundError(f"--subject-path not found: {subject_path}")
-        return [subject_path]
-    in_dir = ixi_root / split
-    if not in_dir.is_dir():
-        raise FileNotFoundError(f"Split directory missing: {in_dir}")
-    files = sorted(f for f in os.listdir(in_dir) if f.endswith(".npy"))
-    if not files:
-        raise FileNotFoundError(f"No .npy in {in_dir}")
-    n = len(files)
-
-    if subject_indices:
-        chosen = list(subject_indices)
-    elif num_subjects is not None:
-        if num_subjects < 1 or num_subjects > n:
-            raise ValueError(
-                f"--num-subjects {num_subjects} out of valid range [1, {n}]"
-            )
-        rng = random.Random(seed)
-        chosen = sorted(rng.sample(range(n), k=num_subjects))
-    else:
-        chosen = [0]
-
-    for idx in chosen:
-        if idx < 0 or idx >= n:
-            raise IndexError(f"Subject index {idx} out of range [0, {n})")
-    return [in_dir / files[idx] for idx in chosen]
-
-
-def resolve_subject_paths_pkl(
     ixi_root: Path,
     *,
     split: str,
@@ -385,7 +240,7 @@ def load_atlas_volume_from_pkl(atlas_pkl: Path) -> np.ndarray:
 
 def phi_axial_overlay_slice(phi_dhw: np.ndarray, d_index: int) -> np.ndarray:
     """Take axial slice ``phi[:, d_index]`` → ``(2, H, W)`` for ``overlay_deformation_grid``."""
-    # Channels 2,1 → col, row (match 2D convention used with ICON channels W,H).
+    # Channels 2,1 → col, row (in-plane W,H at axial depth).
     return np.stack([phi_dhw[2, d_index], phi_dhw[1, d_index]], axis=0).astype(np.float32)
 
 
@@ -396,8 +251,8 @@ def write_metrics_csv(
 ) -> None:
     """Write the per-iteration metrics for one subject to a CSV file.
 
-    Columns: iter, io_loss, lncc, mean_phi_px, mean_error_map_px,
-             err_map_p50_px, err_map_p95_px, err_map_max_px, neg_jac_pct.
+    Columns: iter, io_loss, lncc, mean_phi_vox, mean_error_map_vox,
+             err_map_p50_vox, err_map_p95_vox, err_map_max_vox, neg_jac_pct.
     """
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     iters = [it for it, _ in metrics["lncc"]]
@@ -405,11 +260,11 @@ def write_metrics_csv(
         "iter",
         "io_loss",
         "lncc",
-        "mean_phi_px",
-        "mean_error_map_px",
-        "err_map_p50_px",
-        "err_map_p95_px",
-        "err_map_max_px",
+        "mean_phi_vox",
+        "mean_error_map_vox",
+        "err_map_p50_vox",
+        "err_map_p95_vox",
+        "err_map_max_vox",
         "neg_jac_pct",
     ]
     with csv_path.open("w", newline="") as f:
@@ -421,11 +276,11 @@ def write_metrics_csv(
                     "iter": it,
                     "io_loss": io_loss_at_iter.get(it, float("nan")),
                     "lncc": metrics["lncc"][i][1],
-                    "mean_phi_px": metrics["phi_mag"][i][1],
-                    "mean_error_map_px": metrics["err_mag"][i][1],
-                    "err_map_p50_px": metrics["err_p50"][i][1],
-                    "err_map_p95_px": metrics["err_p95"][i][1],
-                    "err_map_max_px": metrics["err_max"][i][1],
+                    "mean_phi_vox": metrics["phi_mag"][i][1],
+                    "mean_error_map_vox": metrics["err_mag"][i][1],
+                    "err_map_p50_vox": metrics["err_p50"][i][1],
+                    "err_map_p95_vox": metrics["err_p95"][i][1],
+                    "err_map_max_vox": metrics["err_max"][i][1],
                     "neg_jac_pct": metrics["negjac_pct"][i][1],
                 }
             )
@@ -444,8 +299,7 @@ def run_io_with_snapshots(
 ) -> tuple[dict[int, np.ndarray], dict[int, float]]:
     """Run a single IO trajectory and snapshot ``phi`` at each checkpoint.
 
-    ``phi_extractor(net)`` returns displacement in physical indexing space used by
-    ``apply_displacement_*`` — either ``(2, H, W)`` (2D slices) or ``(3, D, H, W)`` (volumes).
+    ``phi_extractor(net)`` returns voxel displacement ``(3, D, H, W)`` for ``apply_displacement_3d``.
     """
     device = source_175.device
     state0_cpu = {k: v.detach().to("cpu", copy=True) for k, v in net.state_dict().items()}
@@ -526,7 +380,7 @@ def compute_sweep_metrics(
 
     Returns a dict where each entry is a list of ``(iteration, value)``:
       - ``"lncc"``       : LNCC(warped@N, target)            -- quality, higher better
-      - ``"phi_mag"``    : mean ||phi@N|| in voxels (3D) or pixels (2D)
+      - ``"phi_mag"``    : mean ||phi@N|| in voxels
       - ``"err_mag"``    : mean ||phi@N - phi@0||_2          -- mean magnitude of
                               the downstream U-Net regression target if
                               ``--io-iterations=N`` were chosen. Starts at 0,
@@ -541,9 +395,10 @@ def compute_sweep_metrics(
     iters_sorted = sorted(snapshots.keys())
     if 0 not in iters_sorted:
         raise ValueError("Snapshots must include iteration 0 for the error_map baseline.")
+    if target_img.ndim != 3:
+        raise ValueError(f"Expected target volume (H, W, D), got {target_img.shape}")
     phi0 = snapshots[0]
     metric_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    is_vol = target_img.ndim == 3
     lncc: list[tuple[int, float]] = []
     phi_mag: list[tuple[int, float]] = []
     err_mag: list[tuple[int, float]] = []
@@ -555,12 +410,8 @@ def compute_sweep_metrics(
         warped = warped_by_iter[it]
         phi = snapshots[it]
         emap = np.sqrt(np.sum((phi - phi0) ** 2, axis=0))
-        if is_vol:
-            lncc.append((it, lncc_3d(warped, target_img, sigma=lncc_sigma, device=metric_device)))
-            negjac.append((it, pct_negative_jacobian_3d(phi)))
-        else:
-            lncc.append((it, lncc_2d(warped, target_img, sigma=lncc_sigma, device=metric_device)))
-            negjac.append((it, pct_negative_jacobian_2d(phi)))
+        lncc.append((it, lncc_3d(warped, target_img, sigma=lncc_sigma, device=metric_device)))
+        negjac.append((it, pct_negative_jacobian_3d(phi)))
         phi_mag.append((it, float(np.mean(np.sqrt(np.sum(phi * phi, axis=0))))))
         err_mag.append((it, float(np.mean(emap))))
         err_p50.append((it, float(np.percentile(emap, 50.0))))
@@ -592,7 +443,7 @@ def print_sweep_metrics(
     is descending; this is the most direct sanity check that the optimiser is
     doing real work, independent of any external evaluation metric.
     """
-    atlas_summary = header_note.strip() if header_note else f"atlas slice {ATLAS_SLICE_INDEX}"
+    atlas_summary = header_note.strip() if header_note else "3D atlas vs subject volume"
     print(
         f"\nSweep metrics ({atlas_summary}, LNCC sigma={lncc_sigma}, "
         "io_loss = quantity Adam descends; mean(error_map) = signal magnitude "
@@ -697,33 +548,21 @@ def render_sweep_images(
 
     phi0 = snapshots[iters_sorted[0]]
 
-    if target_img.ndim == 3:
-        hwd_d = int(target_img.shape[2])
-        mid = int(axial_slice_idx) if axial_slice_idx is not None else hwd_d // 2
-        mid = max(0, min(mid, hwd_d - 1))
+    if target_img.ndim != 3:
+        raise ValueError(f"Expected target volume (H, W, D), got {target_img.shape}")
+    hwd_d = int(target_img.shape[2])
+    mid = int(axial_slice_idx) if axial_slice_idx is not None else hwd_d // 2
+    mid = max(0, min(mid, hwd_d - 1))
+    slice_detail = f"axial z={mid}"
 
-        def axial_tile(vol_hw_d: np.ndarray) -> np.ndarray:
-            return vol_hw_d[:, :, mid]
+    def axial_tile(vol_hw_d: np.ndarray) -> np.ndarray:
+        return vol_hw_d[:, :, mid]
 
-        def axial_mag(phi_dhw: np.ndarray) -> np.ndarray:
-            return np.sqrt(np.sum(phi_dhw**2, axis=0))[mid, :, :]
+    def axial_mag(phi_dhw: np.ndarray) -> np.ndarray:
+        return np.sqrt(np.sum(phi_dhw**2, axis=0))[mid, :, :]
 
-        def axial_err(phi_dhw: np.ndarray) -> np.ndarray:
-            return np.sqrt(np.sum((phi_dhw - phi0) ** 2, axis=0))[mid, :, :]
-
-        slice_detail = f"axial z={mid}"
-    else:
-        mid = None
-        slice_detail = f"atlas slice z={ATLAS_SLICE_INDEX}"
-
-        def axial_tile(vol_hw_d: np.ndarray) -> np.ndarray:
-            return vol_hw_d
-
-        def axial_mag(phi_dhw: np.ndarray) -> np.ndarray:
-            return np.sqrt(np.sum(phi_dhw**2, axis=0))
-
-        def axial_err(phi_dhw: np.ndarray) -> np.ndarray:
-            return np.sqrt(np.sum((phi_dhw - phi0) ** 2, axis=0))
+    def axial_err(phi_dhw: np.ndarray) -> np.ndarray:
+        return np.sqrt(np.sum((phi_dhw - phi0) ** 2, axis=0))[mid, :, :]
 
     target_tile = axial_tile(target_img)
 
@@ -743,7 +582,6 @@ def render_sweep_images(
     phi_v = max(float(np.percentile(phi_mag_concat, 99.0)), 1e-6)
     err_v = max(float(np.percentile(err_map_concat, 99.0)), 1e-6)
 
-    disp_unit = displacement_unit_for_target(target_img)
     row_labels = ["warped", "residual", r"$\|\phi\|$", "error_map"]
 
     for col, it in enumerate(iters_sorted):
@@ -752,10 +590,9 @@ def render_sweep_images(
         ax_w.imshow(warped_tile, cmap="gray")
         ax_w.set_title(f"iter@{it}", fontsize=10)
         ax_w.axis("off")
-        if mid is not None:
-            overlay_deformation_grid(ax_w, phi_axial_overlay_slice(snapshots[it], mid), stride=grid_stride)
-        else:
-            overlay_deformation_grid(ax_w, snapshots[it], stride=grid_stride)
+        overlay_deformation_grid(
+            ax_w, phi_axial_overlay_slice(snapshots[it], mid), stride=grid_stride
+        )
         if col == 0:
             ax_w.text(-0.04, 0.5, row_labels[0], rotation=90, va="center",
                       ha="right", transform=ax_w.transAxes, fontsize=10, fontweight="bold")
@@ -779,7 +616,7 @@ def render_sweep_images(
                       ha="right", transform=ax_p.transAxes, fontsize=10, fontweight="bold")
         if col == n_iters - 1:
             cb_p = fig.colorbar(im_p, ax=ax_p, fraction=0.046, pad=0.02)
-            cb_p.set_label(f"displacement ({disp_unit})", fontsize=8)
+            cb_p.set_label(f"displacement ({DISPLACEMENT_UNIT})", fontsize=8)
 
         ax_e = fig.add_subplot(gs[3, col])
         im_e = ax_e.imshow(err_map_by_iter[it], cmap="magma", vmin=0.0, vmax=err_v)
@@ -789,16 +626,15 @@ def render_sweep_images(
                       ha="right", transform=ax_e.transAxes, fontsize=10, fontweight="bold")
         if col == n_iters - 1:
             cb_e = fig.colorbar(im_e, ax=ax_e, fraction=0.046, pad=0.02)
-            cb_e.set_label(f"‖Δφ‖ ({disp_unit})", fontsize=8)
+            cb_e.set_label(f"‖Δφ‖ ({DISPLACEMENT_UNIT})", fontsize=8)
 
-    is_3d = target_img.ndim == 3
     apply_figure_heading(
         fig,
         subject_path,
         io_optimizer=io_optimizer,
         io_lr=io_lr,
         io_sim=io_sim,
-        mode="3D volume" if is_3d else "2D slice",
+        mode="3D volume",
         detail=slice_detail,
         y_main=0.99,
     )
@@ -900,12 +736,11 @@ def derive_save_paths(
 ) -> tuple[Path | None, Path | None, Path | None]:
     """Derive per-subject (images, curves, metrics_csv) paths from a base path.
 
-    Example: with ``save_path=./out/sweep_io.png`` and a subject file
-    ``IXI002_T1_slice_111.npy``, returns::
+    Example: with ``save_path=./out/sweep_io.png`` and subject ``subject_042.pkl``::
 
-      (./out/sweep_io_IXI002_T1_slice_111_images.png,
-       ./out/sweep_io_IXI002_T1_slice_111_curves.png,
-       ./out/sweep_io_IXI002_T1_slice_111_metrics.csv)
+      (./out/sweep_io_subject_042_images.png,
+       ./out/sweep_io_subject_042_curves.png,
+       ./out/sweep_io_subject_042_metrics.csv)
 
     Returns ``(None, None, None)`` if ``save_path`` is ``None``.
     """
@@ -921,99 +756,6 @@ def derive_save_paths(
 
 
 def _sweep_one_subject(
-    *,
-    net: torch.nn.Module,
-    device: torch.device,
-    target_img: np.ndarray,
-    target_175: torch.Tensor,
-    subject_path: Path,
-    checkpoints: list[int],
-    io_lr: float,
-    io_sim: str,
-    io_optimizer: str,
-    grid_stride: int,
-    lncc_sigma: int,
-    save_path: Path | None,
-    no_show: bool,
-) -> None:
-    """Run the full sweep + render + CSV save for a single subject."""
-    source_img = np.load(subject_path).astype(np.float32)
-    sh, sw = int(source_img.shape[0]), int(source_img.shape[1])
-    th, tw = int(target_img.shape[0]), int(target_img.shape[1])
-    if (sh, sw) != (th, tw):
-        raise ValueError(
-            f"Shape mismatch {subject_path} ({sh},{sw}) vs atlas ({th},{tw})"
-        )
-
-    I_source = torch.from_numpy(source_img).float().unsqueeze(0).unsqueeze(0)
-    source_175 = preprocess_for_unigrad(I_source).to(device)
-
-    snapshots, io_loss_at_iter = run_io_with_snapshots(
-        net,
-        source_175,
-        target_175,
-        checkpoints=checkpoints,
-        lr=io_lr,
-        optimizer_name=io_optimizer,
-        phi_extractor=lambda m: phi_vectorfield_to_slice_pixels(m, sh, sw),
-    )
-    del source_175
-    torch.cuda.empty_cache()
-
-    warped_by_iter: dict[int, np.ndarray] = {}
-    with torch.no_grad():
-        for it, phi_px in snapshots.items():
-            warped_by_iter[it] = apply_displacement_2d(source_img, phi_px, device)
-
-    metrics = compute_sweep_metrics(
-        target_img=target_img,
-        snapshots=snapshots,
-        warped_by_iter=warped_by_iter,
-        lncc_sigma=lncc_sigma,
-    )
-    disp_unit = displacement_unit_for_target(target_img)
-    print_sweep_metrics(
-        metrics,
-        io_loss_at_iter=io_loss_at_iter,
-        lncc_sigma=lncc_sigma,
-        displacement_unit=disp_unit,
-        header_note="",
-    )
-
-    images_path, curves_path, csv_path = derive_save_paths(save_path, subject_path)
-    if csv_path is not None:
-        write_metrics_csv(csv_path, metrics, io_loss_at_iter)
-
-    render_sweep_images(
-        target_img=target_img,
-        snapshots=snapshots,
-        warped_by_iter=warped_by_iter,
-        grid_stride=grid_stride,
-        save_path=images_path,
-        no_show=no_show,
-        subject_path=subject_path,
-        io_lr=io_lr,
-        io_sim=io_sim,
-        io_optimizer=io_optimizer,
-        axial_slice_idx=None,
-    )
-    render_sweep_curves(
-        metrics=metrics,
-        io_loss_at_iter=io_loss_at_iter,
-        lncc_sigma=lncc_sigma,
-        displacement_unit=disp_unit,
-        save_path=curves_path,
-        no_show=no_show,
-        subject_path=subject_path,
-        io_lr=io_lr,
-        io_sim=io_sim,
-        io_optimizer=io_optimizer,
-        mode="2D slice",
-        detail=f"atlas slice z={ATLAS_SLICE_INDEX}",
-    )
-
-
-def _sweep_one_subject_volume_pkl(
     *,
     net: torch.nn.Module,
     device: torch.device,
@@ -1076,12 +818,11 @@ def _sweep_one_subject_volume_pkl(
         warped_by_iter=warped_by_iter,
         lncc_sigma=lncc_sigma,
     )
-    disp_unit = displacement_unit_for_target(target_vol)
     print_sweep_metrics(
         metrics,
         io_loss_at_iter=io_loss_at_iter,
         lncc_sigma=lncc_sigma,
-        displacement_unit=disp_unit,
+        displacement_unit=DISPLACEMENT_UNIT,
         header_note=metrics_header,
     )
 
@@ -1106,7 +847,7 @@ def _sweep_one_subject_volume_pkl(
         metrics=metrics,
         io_loss_at_iter=io_loss_at_iter,
         lncc_sigma=lncc_sigma,
-        displacement_unit=disp_unit,
+        displacement_unit=DISPLACEMENT_UNIT,
         save_path=curves_path,
         no_show=no_show,
         subject_path=subject_path,
@@ -1118,7 +859,7 @@ def _sweep_one_subject_volume_pkl(
     )
 
 
-def run_sweep_volume_pkl(
+def run_sweep(
     ixi_root: Path,
     *,
     atlas_pkl: Path,
@@ -1140,7 +881,7 @@ def run_sweep_volume_pkl(
     """Load full atlas + UniGradICON once; sweep IO checkpoints per ``*.pkl`` volume."""
     device = torch.device("cuda")
 
-    subj_paths = resolve_subject_paths_pkl(
+    subj_paths = resolve_subject_paths(
         ixi_root,
         split=split,
         subject_path=subject_path,
@@ -1148,7 +889,7 @@ def run_sweep_volume_pkl(
         num_subjects=num_subjects,
         seed=seed,
     )
-    print(f"[3d-pkl] Running sweep over {len(subj_paths)} subject volume(s):")
+    print(f"Running sweep over {len(subj_paths)} subject volume(s):")
     for sp in subj_paths:
         print(f"  - {sp}")
 
@@ -1170,12 +911,12 @@ def run_sweep_volume_pkl(
     print(f"Sweeping IO iterations: {checkpoints}")
     for subj_path in tqdm(
         subj_paths,
-        desc="3d-pkl subjects",
+        desc="subjects",
         unit="vol",
         **_tqdm_common_kwargs(),
     ):
         tqdm.write(f"\n=== Subject volume: {subj_path.name} ===")
-        _sweep_one_subject_volume_pkl(
+        _sweep_one_subject(
             net=net,
             device=device,
             target_vol=target_vol,
@@ -1198,73 +939,6 @@ def run_sweep_volume_pkl(
         plt.show()
 
 
-def run_sweep(
-    ixi_root: Path,
-    *,
-    split: str,
-    subject_path: Path | None,
-    subject_indices: list[int] | None,
-    num_subjects: int | None,
-    seed: int,
-    checkpoints: list[int],
-    io_lr: float,
-    io_sim: str,
-    io_optimizer: str,
-    grid_stride: int,
-    lncc_sigma: int,
-    save_path: Path | None,
-    no_show: bool,
-) -> None:
-    """Load atlas + UniGradICON once, then run the sweep for each chosen subject."""
-    device = torch.device("cuda")
-
-    subj_paths = resolve_subject_paths(
-        ixi_root,
-        split=split,
-        subject_path=subject_path,
-        subject_indices=subject_indices,
-        num_subjects=num_subjects,
-        seed=seed,
-    )
-    print(f"Running sweep over {len(subj_paths)} subject(s):")
-    for sp in subj_paths:
-        print(f"  - {sp}")
-
-    target_img, atlas_i, atlas_path = load_atlas_slice(ixi_root / "Atlas")
-    th, tw = int(target_img.shape[0]), int(target_img.shape[1])
-    print(f"Target: atlas slice {atlas_i} ({atlas_path}) shape=({th}, {tw})")
-    I_target = torch.from_numpy(target_img).float().unsqueeze(0).unsqueeze(0)
-    target_175 = preprocess_for_unigrad(I_target).to(device)
-
-    print(f"Loading UniGradICON (IO similarity={io_sim}) on {device}...")
-    net = get_unigradicon(loss_fn=make_sim(io_sim)).to(device)
-    net.eval()
-
-    print(f"Sweeping IO iterations: {checkpoints}")
-    for i, subj_path in enumerate(subj_paths, start=1):
-        print(f"\n=== [{i}/{len(subj_paths)}] Subject: {subj_path.name} ===")
-        _sweep_one_subject(
-            net=net,
-            device=device,
-            target_img=target_img,
-            target_175=target_175,
-            subject_path=subj_path,
-            checkpoints=checkpoints,
-            io_lr=io_lr,
-            io_sim=io_sim,
-            io_optimizer=io_optimizer,
-            grid_stride=grid_stride,
-            lncc_sigma=lncc_sigma,
-            save_path=save_path,
-            no_show=no_show,
-        )
-
-    del target_175
-    torch.cuda.empty_cache()
-    if not no_show:
-        plt.show()
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments for the IO iteration sweep."""
     p = argparse.ArgumentParser(
@@ -1273,50 +947,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         epilog=__doc__,
     )
     p.add_argument(
-        "--mode",
-        type=str,
-        default="2d",
-        choices=["2d", "3d-pkl"],
-        help="2d: IXI_2D .npy slices + atlas_slice_111 (default). "
-        "3d-pkl: IXI Train/*.pkl volumes + atlas.pkl (default root on NRP: "
-        "<repo>/datasets/IXI).",
-    )
-    p.add_argument(
         "--ixi-root",
         type=Path,
         default=None,
         metavar="DIR",
-        help="Data root: 2d expects Train/Val/Test/Atlas .npy; 3d-pkl expects "
-        "Train|Val|Test/*.pkl plus atlas.pkl (default: <repo>/datasets/IXI_2D or "
-        "./data/IXI_2D for 2d; <repo>/datasets/IXI or ./data/IXI for 3d-pkl when "
-        "--ixi-root is omitted).",
+        help="IXI root with Train|Val|Test/*.pkl (default: <repo>/datasets/IXI).",
     )
     p.add_argument(
         "--atlas-pkl",
         type=Path,
         default=None,
-        help="[3d-pkl] atlas.pkl path (default: <ixi-root>/atlas.pkl).",
+        help="Atlas volume atlas.pkl (default: <ixi-root>/atlas.pkl).",
     )
     p.add_argument(
         "--viz-axial-index",
         type=int,
         default=None,
         metavar="I",
-        help="[3d-pkl] Axial slice index along numpy volume axis D (H,W,D layout); "
-        "default: middle slice.",
+        help="Axial slice index along volume axis D (H,W,D layout); default: middle.",
     )
     p.add_argument(
         "--split",
         type=str,
         default="Train",
         choices=["Train", "Val", "Test"],
-        help="Split to pick subject slices from (ignored if --subject-path is set).",
+        help="Split to pick subject volumes from (ignored if --subject-path is set).",
     )
     p.add_argument(
         "--subject-path",
         type=Path,
         default=None,
-        help="Explicit subject path — .npy (2d) or .pkl (3d-pkl). Overrides sampling.",
+        help="Explicit subject .pkl path. Overrides sampling.",
     )
     p.add_argument(
         "--subject-indices",
@@ -1344,8 +1005,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         metavar="I,I,...",
-        help="Comma-separated IO iteration counts to snapshot. If omitted: 2d uses "
-        f"{CHECKPOINTS_DEFAULT_2D}; 3d-pkl uses {CHECKPOINTS_DEFAULT_3D} (four snapshots).",
+        help=f"Comma-separated IO iteration counts to snapshot (default: {CHECKPOINTS_DEFAULT}).",
     )
     p.add_argument(
         "--io-lr",
@@ -1371,7 +1031,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--grid-stride",
         type=int,
         default=12,
-        help="Grid line spacing in pixels for the deformation overlay (default: 12).",
+        help="Grid line spacing (voxels) for the deformation overlay (default: 12).",
     )
     p.add_argument(
         "--lncc-sigma",
@@ -1387,9 +1047,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Base path for outputs (parent dirs created). For each swept subject "
         "S, three files are written: <stem>_<S>_images<ext>, <stem>_<S>_curves<ext>, "
         "and <stem>_<S>_metrics.csv. Default on NRP: "
-        "/files/repo/uncertainty-quantification/assets/images/unigrad-io/sweep_io.png. Example with "
-        "'--save-path ./out/sweep_io.png' and subject 'IXI002_T1_slice_111.npy' -> "
-        "sweep_io_IXI002_T1_slice_111_images.png (and matching _curves / _metrics).",
+        "/files/repo/uncertainty-quantification/assets/images/unigrad-io/3d/sweep_io.png.",
     )
     p.add_argument("--no-show", action="store_true")
     return p.parse_args(argv)
@@ -1399,63 +1057,38 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint."""
     args = parse_args(argv)
     if args.ixi_root is None:
-        args.ixi_root = default_ixi_root(args.mode)
+        args.ixi_root = default_ixi_root()
     if args.save_path is None:
         args.save_path = default_save_path()
-    ck_spec = args.checkpoints
-    if ck_spec is None:
-        ck_spec = (
-            CHECKPOINTS_DEFAULT_3D
-            if args.mode == "3d-pkl"
-            else CHECKPOINTS_DEFAULT_2D
-        )
+    ck_spec = args.checkpoints if args.checkpoints is not None else CHECKPOINTS_DEFAULT
     checkpoints = parse_checkpoints(ck_spec)
     subject_indices: list[int] | None = None
     if args.subject_indices is not None:
         subject_indices = sorted({int(x.strip()) for x in args.subject_indices.split(",") if x.strip()})
     subj = args.subject_path.resolve() if args.subject_path else None
-
-    if args.mode == "3d-pkl":
-        atlas_pkl = (
-            args.atlas_pkl.resolve()
-            if args.atlas_pkl is not None
-            else (args.ixi_root / "atlas.pkl").resolve()
-        )
-        run_sweep_volume_pkl(
-            args.ixi_root.resolve(),
-            atlas_pkl=atlas_pkl,
-            split=args.split,
-            subject_path=subj,
-            subject_indices=subject_indices,
-            num_subjects=args.num_subjects,
-            seed=args.seed,
-            checkpoints=checkpoints,
-            io_lr=args.io_lr,
-            io_sim=args.io_sim,
-            io_optimizer=args.io_optimizer,
-            grid_stride=args.grid_stride,
-            lncc_sigma=args.lncc_sigma,
-            save_path=args.save_path,
-            no_show=args.no_show,
-            viz_axial_index=args.viz_axial_index,
-        )
-    else:
-        run_sweep(
-            args.ixi_root.resolve(),
-            split=args.split,
-            subject_path=subj,
-            subject_indices=subject_indices,
-            num_subjects=args.num_subjects,
-            seed=args.seed,
-            checkpoints=checkpoints,
-            io_lr=args.io_lr,
-            io_sim=args.io_sim,
-            io_optimizer=args.io_optimizer,
-            grid_stride=args.grid_stride,
-            lncc_sigma=args.lncc_sigma,
-            save_path=args.save_path,
-            no_show=args.no_show,
-        )
+    atlas_pkl = (
+        args.atlas_pkl.resolve()
+        if args.atlas_pkl is not None
+        else (args.ixi_root / "atlas.pkl").resolve()
+    )
+    run_sweep(
+        args.ixi_root.resolve(),
+        atlas_pkl=atlas_pkl,
+        split=args.split,
+        subject_path=subj,
+        subject_indices=subject_indices,
+        num_subjects=args.num_subjects,
+        seed=args.seed,
+        checkpoints=checkpoints,
+        io_lr=args.io_lr,
+        io_sim=args.io_sim,
+        io_optimizer=args.io_optimizer,
+        grid_stride=args.grid_stride,
+        lncc_sigma=args.lncc_sigma,
+        save_path=args.save_path,
+        no_show=args.no_show,
+        viz_axial_index=args.viz_axial_index,
+    )
     return 0
 
 
