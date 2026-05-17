@@ -27,7 +27,7 @@ kubectl config set-context --current --namespace=<your-namespace>
 | File | K8s name | Use |
 |------|----------|-----|
 | `deploy/nautilus/pvc.yaml` | `unc-files` | RWX volume (once per namespace) |
-| `deploy/nautilus/pod-pvc-admin.yaml` | Pod `unc-dev` | PVC admin: git, SSH, `kubectl cp` (no GPU, `ubuntu:22.04`) |
+| `deploy/nautilus/pod-pvc-admin.yaml` | Pod `unc-dev` | PVC admin: git, SSH, `kubectl cp` (no GPU; same `pytorch/pytorch` image as other pods) |
 | `deploy/nautilus/deployment-gpu.yaml` | Deployment `unc-heavy` | GPU shell: sweeps, `create_unigrad_io_data.py` |
 | `deploy/nautilus/deployment-jupyter-lab.yaml` | `unc-jupyter` + Service | Jupyter Lab on `/files` |
 | `deploy/nautilus/job-create-unigrad-io-data.yaml` | Job `unc-unigrad-io-data` | Batch full IO dataset |
@@ -207,7 +207,7 @@ PVC remains unless you delete `unc-files` separately.
 |-------|-----|
 | GPU pod **Pending** | `kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\t}{.metadata.labels.nvidia\.com/gpu\.product}{\n}{end}'` — add GPU model to YAML `values:` |
 | `git pull` **publickey** | Key at `/files/home/root/.ssh/id_ed25519` + registered on GitHub; set `core.sshCommand` (see §3) |
-| `git` / `ssh` missing | GPU/Jupyter images install on start; `unc-dev` uses Ubuntu and installs on start; or `bash deploy/nautilus/scripts/ensure-system-deps.sh` |
+| `git` / `ssh` missing | Pods install git/ssh on start; or `bash deploy/nautilus/scripts/ensure-system-deps.sh` |
 | `set: pipefail` in YAML | Manifests must be **LF** (see `.gitattributes`) |
 | Jupyter `source: not found` | Run `bash` first, or `. /files/venvs/unc/bin/activate` |
 | Slow `git status` on PVC | `git status -uno` or narrow paths; many untracked/large files under `datasets/` |

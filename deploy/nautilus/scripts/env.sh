@@ -63,8 +63,7 @@ if [[ -f "${VENV_DIR}/bin/activate" ]]; then
     fi
   else
     echo "WARNING: venv at ${VENV_DIR} is broken (Python interpreter missing or wrong path)." >&2
-    echo "  Rebuild on a GPU pod (recommended):" >&2
+    echo "  Rebuild (any pod with pytorch image — unc-dev, unc-heavy, unc-jupyter):" >&2
     echo "    FORCE=1 bash ${REPO_ROOT}/deploy/nautilus/scripts/setup_venv.sh" >&2
-    echo "  On unc-dev (ubuntu) install python3-venv first, then run the same command." >&2
   fi
 fi
