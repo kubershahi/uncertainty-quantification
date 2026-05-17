@@ -67,14 +67,15 @@ if str(_DH) not in sys.path:
     sys.path.insert(0, str(_DH))
 
 from create_unigrad_io_data import (  # noqa: E402
+    ATLAS_MASK_FILENAME,
     apply_displacement_3d,
     load_ixi_image_volume_from_pkl,
     numpy_volume_hw_d_to_torch5d,
     phi_vectorfield_to_volume_voxels,
     preprocess_volume_for_unigrad,
 )
-
-DISPLACEMENT_UNIT = "voxels"
+from visualize_unigrad_io_atlas import load_atlas_bundle  # noqa: E402
+from visualize_unigrad_io_data import DISPLACEMENT_UNIT, default_slice_index  # noqa: E402
 
 
 def overlay_deformation_grid(
@@ -233,9 +234,27 @@ def resolve_subject_paths(
     return [in_dir / files[idx] for idx in chosen]
 
 
-def load_atlas_volume_from_pkl(atlas_pkl: Path) -> np.ndarray:
-    """Alias for atlas.pkl loading (same schema as subject pickles)."""
-    return load_ixi_image_volume_from_pkl(atlas_pkl)
+def resolve_atlas_hw_d(
+    atlas_pkl: Path,
+    unigrad_io_dir: Path | None,
+) -> tuple[np.ndarray, str]:
+    """
+    Load fixed atlas ``(H, W, D)``.
+
+    Prefer ``<unigrad_io_dir>/atlas_valid_mask.npz`` (from ``create_unigrad_io_data.py``);
+    fall back to ``atlas.pkl``.
+    """
+    if unigrad_io_dir is not None:
+        npz_path = Path(unigrad_io_dir) / ATLAS_MASK_FILENAME
+        if npz_path.is_file():
+            atlas, _, threshold, fg_pct = load_atlas_bundle(unigrad_io_dir)
+            detail = (
+                f"{npz_path.name}  threshold={threshold:.6g}  "
+                f"fg_percentile={fg_pct:g}"
+            )
+            return atlas, detail
+    atlas = load_ixi_image_volume_from_pkl(atlas_pkl)
+    return atlas, str(atlas_pkl)
 
 
 def phi_axial_overlay_slice(phi_dhw: np.ndarray, d_index: int) -> np.ndarray:
@@ -551,7 +570,11 @@ def render_sweep_images(
     if target_img.ndim != 3:
         raise ValueError(f"Expected target volume (H, W, D), got {target_img.shape}")
     hwd_d = int(target_img.shape[2])
-    mid = int(axial_slice_idx) if axial_slice_idx is not None else hwd_d // 2
+    mid = (
+        int(axial_slice_idx)
+        if axial_slice_idx is not None
+        else default_slice_index(hwd_d)
+    )
     mid = max(0, min(mid, hwd_d - 1))
     slice_detail = f"axial z={mid}"
 
@@ -804,7 +827,7 @@ def _sweep_one_subject(
     viz_mid = (
         int(viz_axial_index)
         if viz_axial_index is not None
-        else int(target_vol.shape[2]) // 2
+        else default_slice_index(int(target_vol.shape[2]))
     )
     viz_mid = max(0, min(viz_mid, int(target_vol.shape[2]) - 1))
     slice_detail = f"axial z={viz_mid}"
@@ -863,6 +886,7 @@ def run_sweep(
     ixi_root: Path,
     *,
     atlas_pkl: Path,
+    unigrad_io_dir: Path | None,
     split: str,
     subject_path: Path | None,
     subject_indices: list[int] | None,
@@ -893,12 +917,12 @@ def run_sweep(
     for sp in subj_paths:
         print(f"  - {sp}")
 
-    if not atlas_pkl.is_file():
+    if unigrad_io_dir is None and not atlas_pkl.is_file():
         raise FileNotFoundError(f"--atlas-pkl not found: {atlas_pkl}")
 
-    target_vol = load_atlas_volume_from_pkl(atlas_pkl)
+    target_vol, atlas_src = resolve_atlas_hw_d(atlas_pkl, unigrad_io_dir)
     oh, ow, od = int(target_vol.shape[0]), int(target_vol.shape[1]), int(target_vol.shape[2])
-    print(f"Target: atlas volume {atlas_pkl} shape (H,W,D)=({oh},{ow},{od})")
+    print(f"Atlas (H,W,D)=({oh},{ow},{od})  source: {atlas_src}")
 
     atlas_5d = numpy_volume_hw_d_to_torch5d(target_vol).to(device)
     target_175 = preprocess_volume_for_unigrad(atlas_5d)
@@ -958,6 +982,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Atlas volume atlas.pkl (default: <ixi-root>/atlas.pkl).",
+    )
+    p.add_argument(
+        "--unigrad-io-dir",
+        type=Path,
+        default=None,
+        help="If set and atlas_valid_mask.npz exists, load atlas from there "
+        "(e.g. datasets/IXI_unigrad_io).",
     )
     p.add_argument(
         "--viz-axial-index",
@@ -1071,9 +1102,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.atlas_pkl is not None
         else (args.ixi_root / "atlas.pkl").resolve()
     )
+    unigrad_io_dir = args.unigrad_io_dir.resolve() if args.unigrad_io_dir else None
     run_sweep(
         args.ixi_root.resolve(),
         atlas_pkl=atlas_pkl,
+        unigrad_io_dir=unigrad_io_dir,
         split=args.split,
         subject_path=subj,
         subject_indices=subject_indices,

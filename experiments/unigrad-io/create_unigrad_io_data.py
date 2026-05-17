@@ -4,12 +4,22 @@ Build atlas-vs-subject UniGradICON 3D registration data (one ``.npz`` per IXI vo
 Reads ``Train|Val|Test/*.pkl`` subject volumes + ``atlas.pkl``, runs zero-shot registration
 and **50-step** instance optimization (IO: Adam, lr ``2e-5``, LNCC), writes compressed NPZ.
 
+Dataset layout
+--------------
+::
+
+  <output-path>/
+    atlas_valid_mask.npz     # atlas (H,W,D) + valid_mask (D,H,W) — shared, outside splits
+    Train/<subject>.npz
+    Val/<subject>.npz
+    Test/<subject>.npz
+
 Per-subject NPZ keys
 --------------------
-- ``source``, ``target``, ``warped_pred``, ``warped_predio``: ``(H, W, D)`` float32
-- ``phi_pred``, ``phi_predio``: ``(3, D, H, W)`` float32 — channels D, H, W voxel shifts
-- ``error_map``: ``(D, H, W)`` float32 — ``||phi_predio - phi_pred||_2`` (U-Net target)
-- ``io_iterations``: scalar (default 50)
+- ``source``: ``(H, W, D)`` float32
+- ``phi_pred``, ``phi_predio``: ``(3, D, H, W)`` float32 — voxel shifts
+- ``error_map``: ``(D, H, W)`` float32 — ``||phi_predio - phi_pred||_2``
+- ``io_iterations``: int32
 
 Examples (from repo root)::
 
@@ -33,6 +43,37 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from unigradicon import get_unigradicon, make_sim
+
+ATLAS_MASK_FILENAME = "atlas_valid_mask.npz"
+DEFAULT_FG_PERCENTILE = 5.0
+
+
+def _atlas_foreground_mask_hw_d(
+    atlas_hw_d: np.ndarray, *, fg_percentile: float
+) -> tuple[np.ndarray, float]:
+    """Mask from atlas>0 percentile (zeros excluded from threshold)."""
+    nonzero = atlas_hw_d[atlas_hw_d > 0]
+    if nonzero.size == 0:
+        raise ValueError("atlas has no positive voxels")
+    t = float(np.percentile(nonzero.astype(np.float64), fg_percentile))
+    return (atlas_hw_d > t).astype(np.bool_), t
+
+
+def _save_atlas_and_mask_npz(
+    out_path: Path, atlas_hw_d: np.ndarray, *, fg_percentile: float
+) -> tuple[float, float]:
+    mask_hw, threshold = _atlas_foreground_mask_hw_d(atlas_hw_d, fg_percentile=fg_percentile)
+    mask_dhw = np.transpose(mask_hw, (2, 0, 1))
+    frac = float(mask_dhw.mean())
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        out_path,
+        atlas=atlas_hw_d.astype(np.float32, copy=False),
+        valid_mask=mask_dhw,
+        threshold=np.float32(threshold),
+        fg_percentile=np.float32(fg_percentile),
+    )
+    return threshold, frac
 
 
 def pkload(path: Path):
@@ -214,21 +255,35 @@ def run_atlas_io_generation(
     io_lr: float,
     io_sim: str,
     io_optimizer: str,
+    fg_percentile: float = DEFAULT_FG_PERCENTILE,
     overwrite: bool = False,
 ) -> None:
     device = torch.device("cuda")
     if not atlas_pkl.is_file():
         raise FileNotFoundError(f"--atlas-pkl not found: {atlas_pkl}")
 
-    target_vol = load_ixi_image_volume_from_pkl(atlas_pkl)
-    oh, ow, od = int(target_vol.shape[0]), int(target_vol.shape[1]), int(target_vol.shape[2])
+    output_root.mkdir(parents=True, exist_ok=True)
+    atlas_vol = load_ixi_image_volume_from_pkl(atlas_pkl)
+    oh, ow, od = int(atlas_vol.shape[0]), int(atlas_vol.shape[1]), int(atlas_vol.shape[2])
     print(f"Atlas {atlas_pkl} shape (H,W,D)=({oh},{ow},{od})")
+
+    mask_path = output_root / ATLAS_MASK_FILENAME
+    if overwrite or not mask_path.is_file():
+        thr, fg_frac = _save_atlas_and_mask_npz(
+            mask_path, atlas_vol, fg_percentile=fg_percentile
+        )
+        print(
+            f"Wrote {mask_path.name}: atlas {atlas_vol.shape}  threshold={thr:.6g}  "
+            f"foreground={fg_frac * 100:.2f}%  (p{fg_percentile:g} of atlas>0)"
+        )
+    else:
+        print(f"Reusing {mask_path.name} (--overwrite to rebuild atlas + mask)")
 
     print(f"Loading UniGradICON (IO similarity={io_sim}) on {device}...")
     net = get_unigradicon(loss_fn=make_sim(io_sim)).to(device)
     net.eval()
 
-    atlas_5d = numpy_volume_hw_d_to_torch5d(target_vol).to(device)
+    atlas_5d = numpy_volume_hw_d_to_torch5d(atlas_vol).to(device)
     target_175 = preprocess_volume_for_unigrad(atlas_5d)
     del atlas_5d
 
@@ -254,9 +309,9 @@ def run_atlas_io_generation(
                 subj_path = in_dir / fname
                 source_vol = load_ixi_image_volume_from_pkl(subj_path)
                 sh, sw, sd = int(source_vol.shape[0]), int(source_vol.shape[1]), int(source_vol.shape[2])
-                if source_vol.shape != target_vol.shape:
+                if source_vol.shape != atlas_vol.shape:
                     raise ValueError(
-                        f"Shape mismatch {subj_path} {source_vol.shape} vs atlas {target_vol.shape}"
+                        f"Shape mismatch {subj_path} {source_vol.shape} vs atlas {atlas_vol.shape}"
                     )
 
                 vol_5d = numpy_volume_hw_d_to_torch5d(source_vol).to(device)
@@ -281,10 +336,6 @@ def run_atlas_io_generation(
                 del source_175
                 torch.cuda.empty_cache()
 
-                with torch.no_grad():
-                    warped_pred = apply_displacement_3d(source_vol, phi_pred, device)
-                    warped_predio = apply_displacement_3d(source_vol, phi_predio, device)
-
                 error_map = np.sqrt(
                     np.sum((phi_predio - phi_pred) ** 2, axis=0)
                 ).astype(np.float32)
@@ -292,15 +343,16 @@ def run_atlas_io_generation(
                 np.savez_compressed(
                     out_dir / f"{Path(fname).stem}.npz",
                     source=source_vol,
-                    target=target_vol,
                     phi_pred=phi_pred,
-                    warped_pred=warped_pred,
                     phi_predio=phi_predio,
-                    warped_predio=warped_predio,
                     error_map=error_map,
                     io_iterations=np.int32(io_iterations),
                 )
                 total_pbar.update(1)
+
+    print(f"Done. {output_root.resolve()}")
+    print(f"  Shared: {ATLAS_MASK_FILENAME} (atlas + valid_mask)")
+    print("  Per subject: source, phi_pred, phi_predio, error_map, io_iterations")
 
 
 def parse_args() -> argparse.Namespace:
@@ -350,6 +402,12 @@ Examples:
     p.add_argument("--io-lr", type=float, default=2e-5)
     p.add_argument("--io-sim", type=str, default="lncc", choices=["lncc", "lncc2", "mind"])
     p.add_argument("--io-optimizer", type=str, default="adam", choices=["adam", "sgd"])
+    p.add_argument(
+        "--fg-percentile",
+        type=float,
+        default=DEFAULT_FG_PERCENTILE,
+        help="Atlas mask: percentile of atlas>0 voxels (default 5).",
+    )
     p.add_argument("--overwrite", action="store_true")
     return p.parse_args()
 
@@ -380,9 +438,9 @@ def main() -> None:
         io_lr=args.io_lr,
         io_sim=args.io_sim,
         io_optimizer=args.io_optimizer,
+        fg_percentile=args.fg_percentile,
         overwrite=args.overwrite,
     )
-    print("Done.")
 
 
 if __name__ == "__main__":
