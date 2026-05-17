@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Visualize 3D UniGrad ICON IO ``.npz`` volumes (``create_unigrad_io_data.py``).
+Visualize 3D UniGrad ICON IO data from ``create_unigrad_io_data.py``.
 
-Axial slice panels per subject: source | target | ||phi_pred|| | ||phi_predio|| | error_map.
+Per subject (``Train|Val|Test/*.npz``): ``source``, ``phi_pred``, ``phi_predio``, ``error_map``.
+Shared atlas: ``<data-dir>/atlas_valid_mask.npz`` (``atlas``, ``valid_mask``).
+
+Axial panels per row: subject | atlas | ||phi_pred|| | ||phi_predio|| | error_map.
 
 ``--selection`` chooses which subjects to show from a split:
   - ``easy_normal_hard`` — lowest / median / highest by ``--rank-by`` (default: ``mean_error_map``)
@@ -27,17 +30,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-REQUIRED_KEYS = frozenset(
-    {
-        "source",
-        "target",
-        "phi_pred",
-        "warped_pred",
-        "phi_predio",
-        "warped_predio",
-        "error_map",
-    }
-)
+ATLAS_MASK_FILENAME = "atlas_valid_mask.npz"
+SUBJECT_NPZ_KEYS = frozenset({"source", "phi_pred", "phi_predio", "error_map"})
 SPLITS = ("Train", "Val", "Test")
 DATA_GLOB = "*.npz"
 SELECTION_MODES = ("easy_normal_hard", "random")
@@ -107,19 +101,39 @@ def collect_files(data_dir: Path, split: str) -> list[Path]:
     return sorted(split_dir.glob(DATA_GLOB))
 
 
-def load_record(path: Path) -> dict[str, np.ndarray]:
+def load_shared_atlas_hw_d(data_dir: Path) -> np.ndarray:
+    """Atlas ``(H, W, D)`` from ``atlas_valid_mask.npz`` at dataset root."""
+    atlas_path = Path(data_dir) / ATLAS_MASK_FILENAME
+    if not atlas_path.is_file():
+        raise FileNotFoundError(
+            f"Missing {ATLAS_MASK_FILENAME} under {data_dir} "
+            "(run create_unigrad_io_data.py first)"
+        )
+    with np.load(atlas_path) as z:
+        key = "atlas" if "atlas" in z.files else "target"
+        if key not in z.files:
+            raise KeyError(f"{atlas_path} has no 'atlas' or 'target' array")
+        atlas = np.asarray(z[key])
+    if atlas.ndim != 3:
+        raise ValueError(f"{atlas_path}: atlas must be (H, W, D), got {atlas.shape}")
+    return atlas
+
+
+def load_record(path: Path, atlas_hw_d: np.ndarray) -> dict[str, np.ndarray]:
     with np.load(path) as data:
-        missing = REQUIRED_KEYS - set(data.files)
+        missing = SUBJECT_NPZ_KEYS - set(data.files)
         if missing:
             raise KeyError(f"{path.name} missing required keys: {sorted(missing)}")
-        return {k: np.asarray(data[k]) for k in REQUIRED_KEYS}
+        rec = {k: np.asarray(data[k]) for k in SUBJECT_NPZ_KEYS}
+        rec["atlas"] = atlas_hw_d
+        return rec
 
 
-def score_file(path: Path, rank_by: str) -> float:
+def score_file(path: Path, rank_by: str, atlas_hw_d: np.ndarray) -> float:
     if rank_by == "mean_error_map":
         with np.load(path) as data:
             return float(np.mean(data["error_map"]))
-    return rank_scalar(load_record(path), rank_by)
+    return rank_scalar(load_record(path, atlas_hw_d), rank_by)
 
 
 def rank_scalar(blob: dict[str, np.ndarray], rank_by: str) -> float:
@@ -139,10 +153,11 @@ def select_ranked(
     files: list[Path],
     rank_by: str,
     labels: tuple[str, str, str],
+    atlas_hw_d: np.ndarray,
 ) -> list[tuple[Path, str, float]]:
     if not files:
         return []
-    scored = [(fp, score_file(fp, rank_by)) for fp in files]
+    scored = [(fp, score_file(fp, rank_by, atlas_hw_d)) for fp in files]
     scored.sort(key=lambda x: x[1])
     n = len(scored)
     if n == 1:
@@ -166,13 +181,14 @@ def pick_samples(
     rank_by: str,
     num_samples: int,
     seed: int,
+    atlas_hw_d: np.ndarray,
 ) -> list[tuple[Path, str, float]]:
     if selection == "random":
         rng = random.Random(seed)
         chosen = rng.sample(files, min(num_samples, len(files)))
         return [(fp, fp.stem, float("nan")) for fp in chosen]
     if selection == "easy_normal_hard":
-        return select_ranked(files, rank_by, ("easy", "normal", "hard"))
+        return select_ranked(files, rank_by, ("easy", "normal", "hard"), atlas_hw_d)
     raise ValueError(f"Unknown selection: {selection}")
 
 
@@ -292,7 +308,7 @@ def render_subject_row(
     rank_by: str | None = None,
 ) -> None:
     source = axial_slice_volume(record["source"], slice_z)
-    target = axial_slice_volume(record["target"], slice_z)
+    target = axial_slice_volume(record["atlas"], slice_z)
     phi_pred_s = axial_slice_phi_mag(record["phi_pred"], slice_z)
     phi_predio_s = axial_slice_phi_mag(record["phi_predio"], slice_z)
     err_s = axial_slice_error_map(record["error_map"], slice_z)
@@ -328,6 +344,8 @@ def render_subject_row(
 def render_figure(
     picked: list[tuple[Path, str, float]],
     *,
+    data_dir: Path,
+    atlas_hw_d: np.ndarray,
     split: str,
     selection: str,
     rank_by: str,
@@ -337,7 +355,7 @@ def render_figure(
     phi_vmax: float | None,
     phi_percentile: float,
 ) -> plt.Figure:
-    records = [load_record(fp) for fp, _, _ in picked]
+    records = [load_record(fp, atlas_hw_d) for fp, _, _ in picked]
     z = resolve_slice_index(records[0], slice_idx)
 
     err_v, phi_v = panel_limits(
@@ -420,12 +438,14 @@ def visualize_split(
     if not files:
         raise FileNotFoundError(f"No .npz under {data_dir / split}")
 
+    atlas_hw_d = load_shared_atlas_hw_d(data_dir)
     picked = pick_samples(
         files,
         selection=selection,
         rank_by=rank_by,
         num_samples=num_samples,
         seed=seed,
+        atlas_hw_d=atlas_hw_d,
     )
     print(f"{split}: {len(files)} volumes — {selection} → {len(picked)} figure(s)")
     for fp, label, score in picked:
@@ -437,6 +457,8 @@ def visualize_split(
     if combined:
         fig = render_figure(
             picked,
+            data_dir=data_dir,
+            atlas_hw_d=atlas_hw_d,
             split=split,
             selection=selection,
             rank_by=rank_by,
@@ -458,6 +480,8 @@ def visualize_split(
     for fp, label, score in picked:
         fig = render_figure(
             [(fp, label, score)],
+            data_dir=data_dir,
+            atlas_hw_d=atlas_hw_d,
             split=split,
             selection=selection,
             rank_by=rank_by,
@@ -546,6 +570,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if not args.data_dir.is_dir():
         print(f"ERROR: data dir not found: {args.data_dir}", file=sys.stderr)
+        return 2
+    atlas_path = args.data_dir / ATLAS_MASK_FILENAME
+    if not atlas_path.is_file():
+        print(f"ERROR: missing shared atlas file: {atlas_path}", file=sys.stderr)
         return 2
 
     splits = [s.strip() for s in args.split.split(",") if s.strip()]
