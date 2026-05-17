@@ -53,10 +53,18 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_DIR="${HOME}/wandb"
 mkdir -p "${WANDB_DIR}"
 
+_venv_py="${VENV_DIR}/bin/python"
 if [[ -f "${VENV_DIR}/bin/activate" ]]; then
-  # shellcheck source=/dev/null
-  source "${VENV_DIR}/bin/activate"
-  if ! python -c "import wandb" >/dev/null 2>&1; then
-    pip install -q --no-cache-dir wandb
+  if [[ -x "${_venv_py}" ]] && "${_venv_py}" -c "import sys" >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "${VENV_DIR}/bin/activate"
+    if ! python -c "import wandb" >/dev/null 2>&1; then
+      pip install -q --no-cache-dir wandb
+    fi
+  else
+    echo "WARNING: venv at ${VENV_DIR} is broken (Python interpreter missing or wrong path)." >&2
+    echo "  Rebuild on a GPU pod (recommended):" >&2
+    echo "    FORCE=1 bash ${REPO_ROOT}/deploy/nautilus/scripts/setup_venv.sh" >&2
+    echo "  On unc-dev (ubuntu) install python3-venv first, then run the same command." >&2
   fi
 fi
