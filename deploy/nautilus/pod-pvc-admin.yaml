@@ -42,11 +42,11 @@ spec:
           exec sleep infinity
       resources:
         requests:
-          cpu: 100m
-          memory: 1Gi
+          cpu: "1"
+          memory: 4Gi
         limits:
           cpu: "2"
-          memory: 4Gi
+          memory: 8Gi
       volumeMounts:
         - name: files
           mountPath: /files
