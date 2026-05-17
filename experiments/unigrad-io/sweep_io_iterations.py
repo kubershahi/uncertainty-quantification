@@ -40,10 +40,8 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import pickle
 import random
 import sys
-import warnings
 from collections.abc import Callable
 from pathlib import Path
 
@@ -71,13 +69,76 @@ if str(_DH) not in sys.path:
     sys.path.insert(0, str(_DH))
 
 from create_unigrad_io_data import (  # noqa: E402
-    ATLAS_SLICE_INDEX,
-    apply_displacement_2d,
-    load_atlas_slice,
-    phi_vectorfield_to_slice_pixels,
-    preprocess_for_unigrad,
+    apply_displacement_3d,
+    load_ixi_image_volume_from_pkl,
+    numpy_volume_hw_d_to_torch5d,
+    phi_vectorfield_to_volume_voxels,
+    preprocess_volume_for_unigrad,
 )
 from visualize_unigrad_io_data import overlay_deformation_grid  # noqa: E402
+
+# Legacy 2D IXI_2D sweep (--mode 2d); not used by create_unigrad_io_data (3D-only).
+ATLAS_SLICE_INDEX = 111
+
+
+def preprocess_for_unigrad(img_tensor: torch.Tensor) -> torch.Tensor:
+    """Normalize one 2D slice, pseudo-stack depth to 5, resize to 175³."""
+    im_min = torch.min(img_tensor)
+    im_max = torch.quantile(img_tensor.view(-1), 0.99)
+    denom = torch.clamp(im_max - im_min, min=1e-5)
+    img = torch.clip(img_tensor, im_min, im_max)
+    img = (img - im_min) / denom
+    img = img.unsqueeze(2).repeat(1, 1, 5, 1, 1)
+    return F.interpolate(img, [175, 175, 175], mode="trilinear", align_corners=False)
+
+
+def apply_displacement_2d(
+    moving_np: np.ndarray, phi_px: np.ndarray, device: torch.device
+) -> np.ndarray:
+    """Warp ``(H, W)`` with ``phi_px`` ``(2, H, W)`` in pixel units."""
+    h, w = int(moving_np.shape[0]), int(moving_np.shape[1])
+    img = torch.from_numpy(moving_np).to(device, dtype=torch.float32)[None, None]
+    phi = torch.from_numpy(phi_px).to(device, dtype=torch.float32)
+
+    ys = torch.arange(h, device=device, dtype=torch.float32)
+    xs = torch.arange(w, device=device, dtype=torch.float32)
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+
+    src_x = grid_x + phi[0]
+    src_y = grid_y + phi[1]
+    src_x = 2.0 * src_x / max(w - 1, 1) - 1.0
+    src_y = 2.0 * src_y / max(h - 1, 1) - 1.0
+
+    grid = torch.stack([src_x, src_y], dim=-1)[None]
+    warped = F.grid_sample(img, grid, mode="bilinear", padding_mode="border", align_corners=True)
+    return warped.squeeze().detach().cpu().numpy().astype(np.float32)
+
+
+def phi_vectorfield_to_slice_pixels(
+    net: torch.nn.Module, orig_h: int, orig_w: int
+) -> np.ndarray:
+    """ICON displacement in pixels, shape ``(2, H, W)`` (channel 0 = col, 1 = row)."""
+    identity = net.identity_map
+    phi_disp_175 = net.phi_AB_vectorfield - identity
+    phi_rescaled = F.interpolate(
+        phi_disp_175,
+        [5, orig_h, orig_w],
+        mode="trilinear",
+        align_corners=True,
+    )
+    phi_plane = phi_rescaled[0, 1:3, 2, :, :].cpu().numpy()
+    out = np.zeros((2, orig_h, orig_w), dtype=np.float32)
+    out[0] = phi_plane[1] * (orig_w - 1)
+    out[1] = phi_plane[0] * (orig_h - 1)
+    return out
+
+
+def load_atlas_slice(atlas_dir: Path) -> tuple[np.ndarray, int, Path]:
+    """Load ``Atlas/atlas_slice_{ATLAS_SLICE_INDEX}.npy``."""
+    path = atlas_dir / f"atlas_slice_{ATLAS_SLICE_INDEX}.npy"
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing atlas file: {path}")
+    return np.asarray(np.load(path), dtype=np.float32), ATLAS_SLICE_INDEX, path
 
 # Nautilus ``/files`` PVC layout (see ``deploy/nautilus/scripts/env.sh``).
 _FILES_ROOT = Path("/files")
@@ -121,83 +182,6 @@ def default_save_path() -> Path:
     if NRP_REPO.is_dir():
         return NRP_SWEEP_SAVE
     return LOCAL_SWEEP_SAVE
-
-
-def pkload(path: Path):
-    """Load a pickle file (IXI volumes as ``(image, label)`` tuples)."""
-    # Pickled ndarrays from older NumPy can reconstruct dtypes with ``align=0``;
-    # NumPy 2.4+ deprecates that and emits a warning during unpickling.
-    with path.open("rb") as f, warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r".*align should be passed as Python or NumPy boolean.*",
-        )
-        return pickle.load(f)
-
-
-def numpy_volume_hw_d_to_torch5d(vol_hw_d: np.ndarray) -> torch.Tensor:
-    """``(H, W, D)`` float volume → ``(1, 1, D, H, W)`` for UniGradICON / conv3d."""
-    t = torch.from_numpy(vol_hw_d.astype(np.float32))
-    return t.permute(2, 0, 1).unsqueeze(0).unsqueeze(0)
-
-
-def preprocess_volume_for_unigrad(vol_5d: torch.Tensor) -> torch.Tensor:
-    """Normalize full 3D volume and resize to ``175³`` (real anatomy, not pseudo-slices)."""
-    im_min = torch.min(vol_5d)
-    im_max = torch.quantile(vol_5d.reshape(-1), 0.99)
-    denom = torch.clamp(im_max - im_min, min=1e-5)
-    img = torch.clip(vol_5d, im_min, im_max)
-    img = (img - im_min) / denom
-    return F.interpolate(img, [175, 175, 175], mode="trilinear", align_corners=False)
-
-
-def phi_vectorfield_to_volume_voxels(
-    net: torch.nn.Module, orig_d: int, orig_h: int, orig_w: int
-) -> np.ndarray:
-    """ICON displacement in voxel units, shape ``(3, D, H, W)`` matching torch5d layout."""
-    identity = net.identity_map
-    phi_disp_175 = net.phi_AB_vectorfield - identity
-    phi_rescaled = F.interpolate(
-        phi_disp_175,
-        [orig_d, orig_h, orig_w],
-        mode="trilinear",
-        align_corners=True,
-    )
-    p = phi_rescaled[0].cpu().numpy()
-    out = np.zeros((3, orig_d, orig_h, orig_w), dtype=np.float32)
-    out[0] = p[0] * (orig_d - 1)
-    out[1] = p[1] * (orig_h - 1)
-    out[2] = p[2] * (orig_w - 1)
-    return out
-
-
-def apply_displacement_3d(
-    moving_hw_d: np.ndarray, phi_dhw: np.ndarray, device: torch.device
-) -> np.ndarray:
-    """Warp ``(H, W, D)`` volume with ``phi_dhw`` ``(3, D, H, W)`` (voxel shifts along D/H/W)."""
-    h, w, d = int(moving_hw_d.shape[0]), int(moving_hw_d.shape[1]), int(moving_hw_d.shape[2])
-    od, oh, ow = phi_dhw.shape[1], phi_dhw.shape[2], phi_dhw.shape[3]
-    if (od, oh, ow) != (d, h, w):
-        raise ValueError(f"phi spatial shape {(od, oh, ow)} vs volume {(d, h, w)} (D,H,W)")
-
-    vol = torch.from_numpy(moving_hw_d).to(device, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).unsqueeze(0)
-    phi_t = torch.from_numpy(phi_dhw).to(device, dtype=torch.float32)
-
-    zs = torch.arange(d, device=device, dtype=torch.float32)
-    ys = torch.arange(h, device=device, dtype=torch.float32)
-    xs = torch.arange(w, device=device, dtype=torch.float32)
-    grid_z, grid_y, grid_x = torch.meshgrid(zs, ys, xs, indexing="ij")
-
-    src_x = grid_x + phi_t[2]
-    src_y = grid_y + phi_t[1]
-    src_z = grid_z + phi_t[0]
-    src_x = 2.0 * src_x / max(w - 1, 1) - 1.0
-    src_y = 2.0 * src_y / max(h - 1, 1) - 1.0
-    src_z = 2.0 * src_z / max(d - 1, 1) - 1.0
-    grid = torch.stack([src_x, src_y, src_z], dim=-1).unsqueeze(0)
-
-    warped = F.grid_sample(vol, grid, mode="bilinear", padding_mode="border", align_corners=True)
-    return warped.squeeze().permute(1, 2, 0).detach().cpu().numpy().astype(np.float32)
 
 
 def lncc_3d(
@@ -392,22 +376,6 @@ def resolve_subject_paths_pkl(
         if idx < 0 or idx >= n:
             raise IndexError(f"Subject index {idx} out of range [0, {n})")
     return [in_dir / files[idx] for idx in chosen]
-
-
-def load_ixi_image_volume_from_pkl(pkl_path: Path) -> np.ndarray:
-    """Load ``image`` array from an IXI-style pickle ``(image, label)`` tuple."""
-    payload = pkload(pkl_path)
-    if isinstance(payload, tuple) and len(payload) >= 1:
-        raw: object = payload[0]
-    elif isinstance(payload, np.ndarray):
-        raw = payload
-    else:
-        raise ValueError(f"Unexpected pickle structure in {pkl_path}: {type(payload)}")
-    # New float32 allocation so dtype metadata from the pickle cannot leak downstream.
-    img = np.array(raw, dtype=np.float32, copy=True)
-    if img.ndim != 3:
-        raise ValueError(f"Expected 3D volume in {pkl_path}, got shape {img.shape}")
-    return img
 
 
 def load_atlas_volume_from_pkl(atlas_pkl: Path) -> np.ndarray:
