@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Evaluate trained error-map U-Net: **Test** split for masked MSE/L1, random sample panels, and
-min/median/max-by-mean-error panels; **Atlas** split for the same qualitative figures; optional
-train/val curves from ``metrics.csv``.
+Evaluate a trained 3D error-map U-Net on UniGrad IO ``.npz`` volumes.
 
-- ``--eval-dir``: fiver root containing ``Test/`` and ``Atlas/``.
-- ``--run-path``: training run directory. Weights are always ``run_path/best_model.pt``
-  (single checkpoint). Also reads ``run_path/metrics.csv`` by default; writes
-  ``training_curves.png``, ``test_error_pred_random.png``, ``test_error_pred_minmedmax.png``,
-  ``atlas_error_pred_random.png``, ``atlas_error_pred_minmedmax.png``, and ``test_metrics.json`` there.
+- ``--eval-dir``: root with ``Test/`` (and optional ``Val/``) from ``create_unigrad_io_data.py``.
+- ``--run-path``: training run with ``best_model.pt`` and ``metrics.csv``.
+
+Writes under ``run-path``: ``training_curves.png``, ``test_metrics.json``,
+``test_error_pred_random.png``, ``test_error_pred_easy_normal_hard.png`` (min/median/max
+mean error_map).
 
 Example:
-  python eval_error_map_unet.py --run-path ./runs/error_unet_run1 --eval-dir ./data/IXI_2D_unigrad_synth_fiver --no-show
+  python experiments/regression/eval_error_map_unet.py --run-path assets/runs/error_map_unet_3d --eval-dir datasets/IXI_unigrad_io --no-show
 """
 
 from __future__ import annotations
@@ -29,81 +28,83 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-# Same package as train_error_map_unet.py
 _DH = Path(__file__).resolve().parent
 if str(_DH) not in sys.path:
     sys.path.insert(0, str(_DH))
 
 import train_error_map_unet as teu
 
-# Must match the filename written by train_error_map_unet.py (best_model.pt).
 CHECKPOINT_FILENAME = "best_model.pt"
 
+DISPLACEMENT_UNIT = "voxels"
 
-def phi_magnitude(phi: np.ndarray) -> np.ndarray:
-    return np.sqrt(phi[0] * phi[0] + phi[1] * phi[1])
-
-
-def mean_error_over_slice(npz_path: Path) -> float:
-    """Mean ``error_map`` over ``valid_mask`` if present, else over full slice."""
-    with np.load(npz_path) as z:
-        err = np.asarray(z["error_map"], dtype=np.float64)
-        if "valid_mask" in z.files:
-            m = np.asarray(z["valid_mask"], dtype=bool)
-            if m.any():
-                return float(np.mean(err[m]))
-        return float(np.mean(err))
-
-
-def select_min_median_max_by_mean_error(
-    files: list[Path],
-) -> list[tuple[Path, str, float]]:
-    """Pick files with min / median / max mean(error_map); labels ``min``, ``median``, ``max``."""
-    if not files:
-        return []
-    scored: list[tuple[Path, float]] = [(fp, mean_error_over_slice(fp)) for fp in files]
-    scored.sort(key=lambda x: x[1])
-    n = len(scored)
-    if n == 1:
-        return [(scored[0][0], "min", scored[0][1])]
-    if n == 2:
-        return [
-            (scored[0][0], "min", scored[0][1]),
-            (scored[1][0], "max", scored[1][1]),
-        ]
-    i_min, i_med, i_max = 0, n // 2, n - 1
-    return [
-        (scored[i_min][0], "min", scored[i_min][1]),
-        (scored[i_med][0], "median", scored[i_med][1]),
-        (scored[i_max][0], "max", scored[i_max][1]),
-    ]
-
-
-# Column headers (row 0); phi norms use mathtext double-bar notation.
-_FIVER_COL_TITLES = (
-    "fixed",
-    "warped",
-    r"$\|\phi_{\mathrm{true}}\|$",
+_COL_TITLES = (
+    "subject",
+    "atlas (target)",
     r"$\|\phi_{\mathrm{pred}}\|$",
-    "error GT (px)",
-    "error pred (px)",
+    f"error GT ({DISPLACEMENT_UNIT})",
+    f"error pred ({DISPLACEMENT_UNIT})",
 )
 
 
-def load_train_config(ckpt: dict) -> dict:
+def phi_magnitude_slice(phi: np.ndarray, slice_z: int) -> np.ndarray:
+    mag = np.sqrt(np.sum(phi.astype(np.float64) ** 2, axis=0))
+    return mag[slice_z]
+
+
+def mean_error_map_volume(npz_path: Path) -> float:
+    with np.load(npz_path) as z:
+        return float(np.mean(z["error_map"]))
+
+
+def select_easy_normal_hard_by_mean_error(
+    files: list[Path],
+    *,
+    show_progress: bool,
+) -> list[tuple[Path, str, float]]:
+    if not files:
+        return []
+    it = tqdm(files, desc="rank volumes", unit="file", disable=not show_progress)
+    scored = [(fp, mean_error_map_volume(fp)) for fp in it]
+    scored.sort(key=lambda x: x[1])
+    n = len(scored)
+    if n == 1:
+        return [(scored[0][0], "easy", scored[0][1])]
+    if n == 2:
+        return [(scored[0][0], "easy", scored[0][1]), (scored[-1][0], "hard", scored[-1][1])]
+    return [
+        (scored[0][0], "easy", scored[0][1]),
+        (scored[n // 2][0], "normal", scored[n // 2][1]),
+        (scored[-1][0], "hard", scored[-1][1]),
+    ]
+
+
+def load_train_config(ckpt: dict, base_channels_override: int | None) -> dict:
     c = ckpt.get("config") or {}
+    base = int(c.get("base_channels", 32))
+    if base_channels_override is not None:
+        base = base_channels_override
     return {
-        "base_channels": int(c.get("base_channels", 32)),
+        "model": str(c.get("model", "UNet3D")),
+        "in_channels": int(c.get("in_channels", 5)),
+        "base_channels": base,
         "image_norm": str(c.get("image_norm", "robust")),
         "quantile_high": float(c.get("quantile_high", 0.99)),
         "phi_scale": float(c.get("phi_scale", 64.0)),
     }
 
 
+def build_model(cfg: dict) -> torch.nn.Module:
+    if cfg["model"] != "UNet3D":
+        raise ValueError(f"Unsupported checkpoint model {cfg['model']!r}; expected UNet3D")
+    return teu.UNet3D(in_channels=cfg["in_channels"], base=cfg["base_channels"])
+
+
 @torch.no_grad()
-def evaluate_test_split(
+def evaluate_split(
     model: torch.nn.Module,
     eval_dir: Path,
+    split: str,
     cfg: dict,
     device: torch.device,
     *,
@@ -111,10 +112,9 @@ def evaluate_test_split(
     num_workers: int,
     show_progress: bool,
 ) -> tuple[float, float, int]:
-    """Mean masked MSE and L1 over Test loader (same aggregation as training ``evaluate``)."""
-    ds = teu.FiverErrorDataset(
+    ds = teu.UniGradIOErrorDataset(
         eval_dir,
-        "Test",
+        split,
         image_norm=cfg["image_norm"],
         quantile_high=cfg["quantile_high"],
         phi_scale=cfg["phi_scale"],
@@ -131,7 +131,7 @@ def evaluate_test_split(
     sum_mse = 0.0
     sum_l1 = 0.0
     n = 0
-    it = tqdm(loader, desc="Test", unit="batch", disable=not show_progress)
+    it = tqdm(loader, desc=f"eval {split}", unit="batch", disable=not show_progress)
     for batch in it:
         x = batch["x"].to(device, non_blocking=True)
         y = batch["y"].to(device, non_blocking=True)
@@ -140,141 +140,104 @@ def evaluate_test_split(
         sum_mse += float(teu.masked_mse(pred, y, mask))
         sum_l1 += float(teu.masked_l1(pred, y, mask))
         n += 1
-    n = max(n, 1)
-    return sum_mse / n, sum_l1 / n, len(ds)
-
-
-def preprocess_from_npz(
-    ds: teu.FiverErrorDataset,
-    data: np.lib.npyio.NpzFile,
-) -> tuple[torch.Tensor, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Build model input (1,4,H,W) and return raw arrays for plotting."""
-    image = np.asarray(data["image"], dtype=np.float32)
-    warped = np.asarray(data["warped"], dtype=np.float32)
-    phi_pred = np.asarray(data["phi_pred"], dtype=np.float32)
-    err = np.asarray(data["error_map"], dtype=np.float32)
-    phi_true = np.asarray(data["phi_true"], dtype=np.float32)
-
-    image_n = ds._norm_image(image)
-    warped_n = ds._norm_image(warped)
-    phi_n = phi_pred / ds.phi_scale
-    x = np.concatenate(
-        [image_n[None, ...], warped_n[None, ...], phi_n],
-        axis=0,
-    )
-    return torch.from_numpy(x).unsqueeze(0), image, warped, phi_true, phi_pred, err
-
-
-def _left_axis_title_lines(
-    fp: Path,
-    mean_err: float,
-    rank_tag: str | None,
-    *,
-    include_fixed_header: bool,
-) -> str:
-    name = fp.name
-    head = f"[{rank_tag}] {name}" if rank_tag else name
-    mean_line = f"mean error = {mean_err:.4f} px"
-    if include_fixed_header:
-        return f"fixed\n{head}\n{mean_line}"
-    return f"{head}\n{mean_line}"
+    return sum_mse / max(n, 1), sum_l1 / max(n, 1), len(ds)
 
 
 @torch.no_grad()
-def plot_fiver_samples_grid(
-    paths: list[Path],
-    mean_errors: list[float],
+def infer_and_slice(
+    fp: Path,
     model: torch.nn.Module,
-    ds_template: teu.FiverErrorDataset,
+    ds: teu.UniGradIOErrorDataset,
+    device: torch.device,
+    slice_z: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    idx = ds.paths.index(fp)
+    batch = ds[idx]
+    with np.load(fp) as data:
+        source = teu.volume_hw_d_to_dhw(np.asarray(data["source"]))
+        target = teu.volume_hw_d_to_dhw(np.asarray(data["target"]))
+        phi_pred = np.asarray(data["phi_pred"], dtype=np.float32)
+        err_true = np.asarray(data["error_map"], dtype=np.float32)
+
+    z = slice_z if slice_z is not None else err_true.shape[0] // 2
+    z = int(np.clip(z, 0, err_true.shape[0] - 1))
+
+    x = batch["x"].unsqueeze(0).to(device)
+    pred = model(x).squeeze(0).squeeze(0).cpu().numpy()
+
+    return (
+        source[:, :, z],
+        target[:, :, z],
+        phi_magnitude_slice(phi_pred, z),
+        err_true[z],
+        pred[z],
+    )
+
+
+@torch.no_grad()
+def plot_io_samples_grid(
+    items: list[tuple[Path, str, float]],
+    model: torch.nn.Module,
+    ds: teu.UniGradIOErrorDataset,
     device: torch.device,
     save_path: Path | None,
     no_show: bool,
     err_percentile: float,
     split_title: str,
     arrangement_detail: str,
-    row_rank_tags: list[str | None] | None = None,
+    *,
+    show_progress: bool,
+    slice_z: int | None,
 ) -> None:
-    """
-    Six-panel rows: column titles on row 0 only; each row has filename + mean error on the first axis.
-    ``row_rank_tags`` (e.g. min/median/max) prefix the filename when set.
-    """
-    if len(paths) != len(mean_errors):
-        raise ValueError("paths and mean_errors must have the same length")
-    if row_rank_tags is not None and len(row_rank_tags) != len(paths):
-        raise ValueError("row_rank_tags must match paths length")
     model.eval()
-    rows: list[
-        tuple[Path, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
-    ] = []
-    for fp in paths:
-        with np.load(fp) as data:
-            x, image, warped, phi_true, phi_pred, err_true = preprocess_from_npz(ds_template, data)
-        x = x.to(device)
-        pred = model(x).squeeze(0).squeeze(0).cpu().numpy()
-        rows.append((fp, image, warped, phi_true, phi_pred, err_true, pred))
+    rows: list[tuple[Path, str, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
 
-    all_vals = np.concatenate(
-        [r[5].ravel() for r in rows] + [r[6].ravel() for r in rows],
-        dtype=np.float64,
-    )
-    err_v = float(np.percentile(all_vals, err_percentile))
+    it = tqdm(items, desc=f"plot {split_title}", unit="subject", disable=not show_progress)
+    for fp, tag, mean_err in it:
+        subj, atlas, mag_p, err_gt, err_pred = infer_and_slice(fp, model, ds, device, slice_z)
+        rows.append((fp, tag, mean_err, subj, atlas, mag_p, err_gt, err_pred))
+
+    all_err = np.concatenate([r[6].ravel() for r in rows] + [r[7].ravel() for r in rows])
+    err_v = float(np.percentile(all_err, err_percentile))
     if err_v <= 0:
         err_v = 1e-6
 
     nrows = len(rows)
-    fig, axes = plt.subplots(nrows, 6, figsize=(18, 2.8 * nrows))
+    fig, axes = plt.subplots(nrows, 5, figsize=(16, 3.0 * nrows))
     if nrows == 1:
         axes = np.array([axes])
 
-    tags = row_rank_tags if row_rank_tags is not None else [None] * nrows
-
-    for row, (fp, image, warped, phi_true, phi_pred, err_true, pred) in enumerate(rows):
-        mag_t = phi_magnitude(phi_true.astype(np.float64))
-        mag_p = phi_magnitude(phi_pred.astype(np.float64))
-        m_err = mean_errors[row]
-        tag = tags[row]
-
-        axes[row, 0].imshow(image, cmap="gray")
-        axes[row, 0].axis("off")
-
-        axes[row, 1].imshow(warped, cmap="gray")
-        axes[row, 1].axis("off")
-
-        im_pt = axes[row, 2].imshow(mag_t, cmap="hot", vmin=0.0)
-        axes[row, 2].axis("off")
-        fig.colorbar(im_pt, ax=axes[row, 2], fraction=0.046, pad=0.02)
-
-        im_pp = axes[row, 3].imshow(mag_p, cmap="hot", vmin=0.0)
-        axes[row, 3].axis("off")
-        fig.colorbar(im_pp, ax=axes[row, 3], fraction=0.046, pad=0.02)
-
-        im_et = axes[row, 4].imshow(err_true, cmap="hot", vmin=0.0, vmax=err_v)
-        axes[row, 4].axis("off")
-        fig.colorbar(im_et, ax=axes[row, 4], fraction=0.046, pad=0.02)
-
-        im_ep = axes[row, 5].imshow(pred, cmap="hot", vmin=0.0, vmax=err_v)
-        axes[row, 5].axis("off")
-        fig.colorbar(im_ep, ax=axes[row, 5], fraction=0.046, pad=0.02)
-
-        for col in range(6):
+    for row, (fp, tag, mean_err, subj, atlas, mag_p, err_gt, err_pred) in enumerate(rows):
+        images = [
+            (subj, "gray", None, None),
+            (atlas, "gray", None, None),
+            (mag_p, "hot", 0.0, None),
+            (err_gt, "hot", 0.0, err_v),
+            (err_pred, "hot", 0.0, err_v),
+        ]
+        for col, (img, cmap, vmin, vmax) in enumerate(images):
             ax = axes[row, col]
+            if vmax is None and vmin is None:
+                ax.imshow(img, cmap=cmap)
+            else:
+                im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax)
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+            ax.axis("off")
             if row == 0:
-                if col == 0:
-                    ax.set_title(
-                        _left_axis_title_lines(fp, m_err, tag, include_fixed_header=True),
-                        fontsize=8,
-                    )
-                else:
-                    ax.set_title(_FIVER_COL_TITLES[col], fontsize=9)
-            elif col == 0:
-                ax.set_title(
-                    _left_axis_title_lines(fp, m_err, tag, include_fixed_header=False),
+                ax.set_title(_COL_TITLES[col], fontsize=9)
+            if col == 0:
+                rank_line = f"[{tag}] " if tag else ""
+                ax.set_ylabel(
+                    f"{rank_line}{fp.stem}\nmean(error_map)={mean_err:.3f} {DISPLACEMENT_UNIT}",
                     fontsize=8,
                 )
 
+    with np.load(rows[0][0]) as zdata:
+        d = int(np.asarray(zdata["error_map"]).shape[0])
+    z_show = slice_z if slice_z is not None else d // 2
+    z_show = int(np.clip(z_show, 0, d - 1))
     fig.suptitle(
-        f"{split_title} {arrangement_detail} - error U-Net - vmax err = {err_v:.4g} px "
-        f"({err_percentile:g} pct)",
+        f"{split_title} {arrangement_detail} · axial z={z_show} · err vmax={err_v:.3g} {DISPLACEMENT_UNIT}",
         fontsize=11,
     )
     fig.tight_layout()
@@ -295,10 +258,6 @@ def plot_training_curves_from_csv(
     no_show: bool,
     run_label: str,
 ) -> bool:
-    """
-    Plot ``train_mse`` and ``val_mse`` on the left y-axis, ``val_l1`` on the right (twin axis),
-    vs epoch. MSE and L1 use different units/scales, so twin axes avoid squashing either curve.
-    """
     if not metrics_csv.is_file():
         return False
 
@@ -321,31 +280,22 @@ def plot_training_curves_from_csv(
     ax.plot(epochs, train_mse, label="train MSE", color="C0", marker=".", markersize=3)
     ax.plot(epochs, val_mse, label="val MSE", color="C1", marker=".", markersize=3)
     best_i = int(np.argmin(np.array(val_mse)))
-    best_ep = epochs[best_i]
-    ax.axvline(
-        best_ep,
-        color="0.5",
-        linestyle="--",
-        linewidth=0.8,
-        label=f"best val MSE (epoch {best_ep})",
-    )
+    ax.axvline(epochs[best_i], color="0.5", linestyle="--", linewidth=0.8, label=f"best val (ep {epochs[best_i]})")
     ax.set_xlabel("epoch")
-    ax.set_ylabel("masked MSE")
-    ax.set_title(f"Training vs Validation ({run_label})")
+    ax.set_ylabel("volume MSE")
+    ax.set_title(f"Training vs validation ({run_label})")
     ax.grid(True, alpha=0.3)
 
     ax_r = ax.twinx()
-    ax_r.plot(epochs, val_l1, label="val L1 (px)", color="C2", marker=".", markersize=3)
-    ax_r.set_ylabel("masked L1 (px)")
+    ax_r.plot(epochs, val_l1, label=f"val L1 ({DISPLACEMENT_UNIT})", color="C2", marker=".", markersize=3)
+    ax_r.set_ylabel(f"L1 ({DISPLACEMENT_UNIT})")
     ax_r.tick_params(axis="y", labelcolor="C2")
 
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax_r.get_legend_handles_labels()
     ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=9)
-
     fig.tight_layout()
     if save_path is not None:
-        save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"Saved training curves: {save_path}")
@@ -358,58 +308,32 @@ def plot_training_curves_from_csv(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Test-set metrics + Atlas visualization for error-map U-Net.",
+        description="Evaluate 3D error-map U-Net on UniGrad IO npz volumes.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument(
-        "--run-path",
-        type=Path,
-        required=True,
-        help=f"Training run directory: loads {CHECKPOINT_FILENAME} and metrics.csv here; "
-        "writes evaluation outputs here.",
-    )
+    p.add_argument("--run-path", type=Path, required=True)
     p.add_argument(
         "--eval-dir",
         type=Path,
-        default=Path("./data/IXI_2D_unigrad_synth_fiver"),
-        help="Fiver root with Test/ (test error) and Atlas/ (plot samples).",
+        default=Path("datasets/IXI_unigrad_io"),
     )
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--eval-split", type=str, default="Test")
+    p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument(
-        "--base-channels",
-        type=int,
-        default=None,
-        help="Override U-Net width if checkpoint has no config (default: 32).",
-    )
+    p.add_argument("--base-channels", type=int, default=None)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument(
-        "--atlas-samples",
-        type=int,
-        default=3,
-        metavar="N",
-        help="Number of random *_fiver.npz files to plot for both Test and Atlas (default: 3).",
-    )
-    p.add_argument(
-        "--err-percentile",
-        type=float,
-        default=99.0,
-        help="Shared vmax for GT/pred error maps (from GT+pred samples shown).",
-    )
+    p.add_argument("--num-random", type=int, default=3, help="Random Test volumes to plot.")
+    p.add_argument("--slice-index", type=int, default=None, metavar="Z")
+    p.add_argument("--err-percentile", type=float, default=99.0)
     p.add_argument("--no-show", action="store_true")
-    p.add_argument("--no-progress", action="store_true")
     p.add_argument(
-        "--metrics-csv",
-        type=Path,
-        default=None,
-        help="Training metrics.csv. Default: run-path/metrics.csv",
-    )
-    p.add_argument(
-        "--no-training-curves",
+        "--no-progress",
         action="store_true",
-        help="Do not plot train/val curves from metrics.csv.",
+        help="Disable tqdm progress bars (enabled by default).",
     )
+    p.add_argument("--metrics-csv", type=Path, default=None)
+    p.add_argument("--no-training-curves", action="store_true")
     return p.parse_args(argv)
 
 
@@ -421,55 +345,40 @@ def main(argv: list[str] | None = None) -> int:
 
     run_path = Path(args.run_path).resolve()
     run_path.mkdir(parents=True, exist_ok=True)
+    show_p = not args.no_progress
 
     checkpoint_path = run_path / CHECKPOINT_FILENAME
     if not checkpoint_path.is_file():
         print(f"ERROR: checkpoint not found: {checkpoint_path}", file=sys.stderr)
         return 2
 
-    training_curves_path = run_path / "training_curves.png"
-    test_vis_path = run_path / "test_error_pred_random.png"
-    test_minmedmax_path = run_path / "test_error_pred_minmedmax.png"
-    atlas_save_path = run_path / "atlas_error_pred_random.png"
-    atlas_minmedmax_path = run_path / "atlas_error_pred_minmedmax.png"
-    test_metrics_path = run_path / "test_metrics.json"
-
-    metrics_csv = args.metrics_csv
-    if metrics_csv is None:
-        metrics_csv = run_path / "metrics.csv"
-    metrics_csv = Path(metrics_csv)
+    metrics_csv = Path(args.metrics_csv) if args.metrics_csv else run_path / "metrics.csv"
 
     if not args.no_training_curves:
         if metrics_csv.is_file():
             plot_training_curves_from_csv(
                 metrics_csv,
-                training_curves_path,
+                run_path / "training_curves.png",
                 args.no_show,
                 run_path.name,
             )
         else:
-            print(
-                f"NOTE: training curves skipped - metrics.csv not found: {metrics_csv}",
-                file=sys.stderr,
-            )
+            print(f"NOTE: no metrics.csv at {metrics_csv}", file=sys.stderr)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     try:
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     except TypeError:
         ckpt = torch.load(checkpoint_path, map_location=device)
-    cfg = load_train_config(ckpt)
-    if args.base_channels is not None:
-        cfg["base_channels"] = args.base_channels
-
-    model = teu.UNet2D(in_channels=4, base=cfg["base_channels"]).to(device)
+    cfg = load_train_config(ckpt, args.base_channels)
+    model = build_model(cfg).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
-    show_p = not args.no_progress
-    test_mse, test_l1, n_test = evaluate_test_split(
+    test_mse, test_l1, n_test = evaluate_split(
         model,
         args.eval_dir,
+        args.eval_split,
         cfg,
         device,
         batch_size=args.batch_size,
@@ -477,124 +386,67 @@ def main(argv: list[str] | None = None) -> int:
         show_progress=show_p,
     )
     print(
-        f"Test split ({n_test} files): masked MSE = {test_mse:.6f}  masked L1 = {test_l1:.6f} px"
+        f"{args.eval_split} ({n_test} volumes): MSE = {test_mse:.6f}  "
+        f"L1 = {test_l1:.6f} {DISPLACEMENT_UNIT}"
     )
-
     metrics_out = {
         "checkpoint": str(checkpoint_path),
         "eval_dir": str(Path(args.eval_dir).resolve()),
-        "run_path": str(run_path),
-        "metrics_csv": str(metrics_csv.resolve()) if metrics_csv.is_file() else None,
-        "n_test_files": n_test,
-        "test_masked_mse": test_mse,
-        "test_masked_l1": test_l1,
-        "preprocess_config": cfg,
+        "eval_split": args.eval_split,
+        "n_volumes": n_test,
+        "masked_mse": test_mse,
+        "masked_l1": test_l1,
+        "config": cfg,
     }
-    test_metrics_path.write_text(json.dumps(metrics_out, indent=2), encoding="utf-8")
-    print(f"Wrote metrics: {test_metrics_path}")
+    (run_path / "test_metrics.json").write_text(json.dumps(metrics_out, indent=2), encoding="utf-8")
+
+    test_dir = Path(args.eval_dir) / args.eval_split
+    test_files = sorted(test_dir.glob(teu.DATA_GLOB)) if test_dir.is_dir() else []
+    if not test_files:
+        print(f"WARNING: no volumes under {test_dir}", file=sys.stderr)
+        return 0
+
+    ds_test = teu.UniGradIOErrorDataset(
+        args.eval_dir,
+        args.eval_split,
+        image_norm=cfg["image_norm"],
+        quantile_high=cfg["quantile_high"],
+        phi_scale=cfg["phi_scale"],
+    )
 
     rng = random.Random(args.seed)
-    k = max(0, args.atlas_samples)
-
-    test_dir = args.eval_dir / "Test"
-    test_files = sorted(test_dir.glob("*_fiver.npz")) if test_dir.is_dir() else []
-    if test_dir.is_dir() and test_files:
-        ds_test = teu.FiverErrorDataset(
-            args.eval_dir,
-            "Test",
-            image_norm=cfg["image_norm"],
-            quantile_high=cfg["quantile_high"],
-            phi_scale=cfg["phi_scale"],
+    if args.num_random > 0:
+        k = min(args.num_random, len(test_files))
+        picked = rng.sample(test_files, k)
+        items = [(p, "", mean_error_map_volume(p)) for p in picked]
+        plot_io_samples_grid(
+            items,
+            model,
+            ds_test,
+            device,
+            run_path / "test_error_pred_random.png",
+            args.no_show,
+            args.err_percentile,
+            args.eval_split,
+            f"(random {k})",
+            show_progress=show_p,
+            slice_z=args.slice_index,
         )
-        if k > 0:
-            kt = min(k, len(test_files))
-            picked_test = rng.sample(test_files, kt)
-            mean_errs_test = [mean_error_over_slice(p) for p in picked_test]
-            plot_fiver_samples_grid(
-                picked_test,
-                mean_errs_test,
-                model,
-                ds_test,
-                device,
-                test_vis_path,
-                args.no_show,
-                err_percentile=args.err_percentile,
-                split_title="Test",
-                arrangement_detail=f"(random {kt})",
-                row_rank_tags=None,
-            )
-        sel_test = select_min_median_max_by_mean_error(test_files)
-        if sel_test:
-            p_test = [t[0] for t in sel_test]
-            m_test = [t[2] for t in sel_test]
-            r_test = [t[1] for t in sel_test]
-            plot_fiver_samples_grid(
-                p_test,
-                m_test,
-                model,
-                ds_test,
-                device,
-                test_minmedmax_path,
-                args.no_show,
-                err_percentile=args.err_percentile,
-                split_title="Test",
-                arrangement_detail="(min / median / max mean error over slice)",
-                row_rank_tags=r_test,
-            )
-    elif not test_dir.is_dir():
-        print(f"WARNING: Test split missing for plots: {test_dir}", file=sys.stderr)
-    elif not test_files:
-        print(f"WARNING: no *_fiver.npz in {test_dir} (skipping Test plot)", file=sys.stderr)
 
-    atlas_dir = args.eval_dir / "Atlas"
-    atlas_files = sorted(atlas_dir.glob("*_fiver.npz")) if atlas_dir.is_dir() else []
-    if atlas_dir.is_dir() and atlas_files:
-        ds_atlas = teu.FiverErrorDataset(
-            args.eval_dir,
-            "Atlas",
-            image_norm=cfg["image_norm"],
-            quantile_high=cfg["quantile_high"],
-            phi_scale=cfg["phi_scale"],
-        )
-        if k > 0:
-            ka = min(k, len(atlas_files))
-            picked_atlas = rng.sample(atlas_files, ka)
-            mean_errs_atlas = [mean_error_over_slice(p) for p in picked_atlas]
-            plot_fiver_samples_grid(
-                picked_atlas,
-                mean_errs_atlas,
-                model,
-                ds_atlas,
-                device,
-                atlas_save_path,
-                args.no_show,
-                err_percentile=args.err_percentile,
-                split_title="Atlas",
-                arrangement_detail=f"(random {ka})",
-                row_rank_tags=None,
-            )
-        sel_atlas = select_min_median_max_by_mean_error(atlas_files)
-        if sel_atlas:
-            p_at = [t[0] for t in sel_atlas]
-            m_at = [t[2] for t in sel_atlas]
-            r_at = [t[1] for t in sel_atlas]
-            plot_fiver_samples_grid(
-                p_at,
-                m_at,
-                model,
-                ds_atlas,
-                device,
-                atlas_minmedmax_path,
-                args.no_show,
-                err_percentile=args.err_percentile,
-                split_title="Atlas",
-                arrangement_detail="(min / median / max mean error over slice)",
-                row_rank_tags=r_at,
-            )
-    elif not atlas_dir.is_dir():
-        print(f"WARNING: Atlas split missing for plots: {atlas_dir}", file=sys.stderr)
-    elif not atlas_files:
-        print(f"WARNING: no *_fiver.npz in {atlas_dir} (skipping Atlas plot)", file=sys.stderr)
+    ranked = select_easy_normal_hard_by_mean_error(test_files, show_progress=show_p)
+    plot_io_samples_grid(
+        ranked,
+        model,
+        ds_test,
+        device,
+        run_path / "test_error_pred_easy_normal_hard.png",
+        args.no_show,
+        args.err_percentile,
+        args.eval_split,
+        "(easy / normal / hard by mean error_map)",
+        show_progress=show_p,
+        slice_z=args.slice_index,
+    )
 
     return 0
 

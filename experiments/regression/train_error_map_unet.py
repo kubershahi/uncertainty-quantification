@@ -1,28 +1,20 @@
 #!/usr/bin/env python3
 """
-Train a 2D regression U-Net to predict per-pixel registration error magnitude.
+Train a 3D U-Net to predict per-voxel IO error magnitude from UniGrad ICON IO volumes.
 
-Fiver npz (see create_unigrad_synth_data.py):
-  image, warped, phi_pred, error_map, valid_mask, ...
+Data (``create_unigrad_io_data.py``), one ``.npz`` per subject under ``Train|Val|Test/``:
+  - ``source`` (H, W, D) — moving / subject volume
+  - ``target`` (H, W, D) — fixed / atlas volume
+  - ``phi_pred`` (3, D, H, W) — zero-shot displacement (voxels)
+  - ``error_map`` (D, H, W) — ``||phi_predio - phi_pred||_2`` (regression target)
 
-Input channels (default): fixed image, warped image, phi_pred (2 components) -> 4 channels.
-Target: error_map (scalar ‖φ_true − φ_pred‖ per pixel).
+Model input (5 channels, layout ``N×C×D×H×W``):
+  normalized source, normalized target, ``phi_pred / phi_scale`` (3 channels).
 
-Loss is averaged over pixels where valid_mask is True.
-
-Per-epoch train/val metrics are appended to ``metrics.csv`` under ``--out-dir`` (for plotting).
-
-Progress: ``tqdm`` bars for epochs, train batches, and val batches (disable with ``--no-progress``).
-
-MSE is masked to the interior ``valid_mask`` only. Optional ``--smooth-weight`` adds total-variation
-style smoothing on edges that touch the exterior or boundary (not on two fully interior edges)
-so predictions stay calm where there is no supervision.
-
-Default ``--image-norm robust``: per-slice min + quantile hi → [0,1] for ``image``/``warped`` (safe across datasets).
-If inputs are already scaled consistently (e.g. IXI fivers), optionally ``--image-norm none``.
+Progress: tqdm for epochs, train batches, and val batches (use ``--no-progress`` to disable).
 
 Example:
-  python train_error_map_unet.py --data-dir ./data/IXI_2D_unigrad_synth_fiver --epochs 50 --batch-size 8 --out-dir ./runs/error_unet_run1
+  python experiments/regression/train_error_map_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 1 --out-dir assets/runs/error_map_unet_3d
 """
 
 from __future__ import annotations
@@ -40,6 +32,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+DATA_GLOB = "*.npz"
+
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -49,18 +43,25 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def collect_fiver_paths(root: Path, split: str) -> list[Path]:
+def collect_io_npz_paths(root: Path, split: str) -> list[Path]:
     d = root / split
     if not d.is_dir():
         raise FileNotFoundError(f"Missing split directory: {d}")
-    files = sorted(d.glob("*_fiver.npz"))
+    files = sorted(d.glob(DATA_GLOB))
     if not files:
-        raise FileNotFoundError(f"No *_fiver.npz under {d}")
+        raise FileNotFoundError(f"No {DATA_GLOB} under {d}")
     return files
 
 
-class FiverErrorDataset(Dataset):
-    """Loads *_fiver.npz; builds (4, H, W) input and (1, H, W) target."""
+def volume_hw_d_to_dhw(vol: np.ndarray) -> np.ndarray:
+    """``(H, W, D)`` → ``(D, H, W)``."""
+    if vol.ndim != 3:
+        raise ValueError(f"Expected (H, W, D), got {vol.shape}")
+    return np.transpose(vol, (2, 0, 1)).astype(np.float32, copy=False)
+
+
+class UniGradIOErrorDataset(Dataset):
+    """3D IO npz: (5, D, H, W) input, (1, D, H, W) target."""
 
     def __init__(
         self,
@@ -71,7 +72,7 @@ class FiverErrorDataset(Dataset):
         quantile_high: float = 0.99,
         phi_scale: float = 64.0,
     ):
-        self.paths = collect_fiver_paths(root, split)
+        self.paths = collect_io_npz_paths(root, split)
         if image_norm not in ("none", "robust"):
             raise ValueError("image_norm must be 'none' or 'robust'")
         self.image_norm = image_norm
@@ -81,8 +82,7 @@ class FiverErrorDataset(Dataset):
     def __len__(self) -> int:
         return len(self.paths)
 
-    def _norm_image(self, x: np.ndarray) -> np.ndarray:
-        """``none``: use stored intensities (float32). ``robust``: per-slice min + quantile hi -> [0,1]."""
+    def _norm_volume(self, x: np.ndarray) -> np.ndarray:
         x = x.astype(np.float32)
         if self.image_norm == "none":
             return x
@@ -96,28 +96,35 @@ class FiverErrorDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         path = self.paths[idx]
         with np.load(path) as data:
-            image = np.asarray(data["image"], dtype=np.float32)
-            warped = np.asarray(data["warped"], dtype=np.float32)
+            source = volume_hw_d_to_dhw(np.asarray(data["source"]))
+            target = volume_hw_d_to_dhw(np.asarray(data["target"]))
             phi_pred = np.asarray(data["phi_pred"], dtype=np.float32)
             err = np.asarray(data["error_map"], dtype=np.float32)
-            if "valid_mask" in data.files:
-                mask = np.asarray(data["valid_mask"], dtype=np.bool_)
-            else:
-                mask = np.ones(image.shape[:2], dtype=np.bool_)
 
-        image_n = self._norm_image(image)
-        warped_n = self._norm_image(warped)
+        if phi_pred.ndim != 4 or phi_pred.shape[0] != 3:
+            raise ValueError(f"{path.name}: phi_pred must be (3, D, H, W), got {phi_pred.shape}")
+        if err.ndim != 3:
+            raise ValueError(f"{path.name}: error_map must be (D, H, W), got {err.shape}")
+        d, h, w = err.shape
+        if phi_pred.shape[1:] != (d, h, w):
+            raise ValueError(
+                f"{path.name}: phi_pred {phi_pred.shape[1:]} vs error_map {(d, h, w)}"
+            )
+
+        source_n = self._norm_volume(source)
+        target_n = self._norm_volume(target)
         phi_n = phi_pred / self.phi_scale
 
         x = np.concatenate(
             [
-                image_n[None, ...],
-                warped_n[None, ...],
+                source_n[None, ...],
+                target_n[None, ...],
                 phi_n,
             ],
             axis=0,
         )
         y = err[None, ...]
+        mask = np.ones((d, h, w), dtype=np.bool_)
 
         return {
             "x": torch.from_numpy(x),
@@ -128,67 +135,66 @@ class FiverErrorDataset(Dataset):
 
 
 def masked_mse(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """pred, target: (B,1,H,W); mask: (B,H,W) bool."""
+    """pred, target: (B, 1, D, H, W); mask: (B, D, H, W) bool."""
     m = mask.unsqueeze(1).float()
     diff = (pred - target) ** 2 * m
-    denom = m.sum().clamp_min(1.0)
-    return diff.sum() / denom
+    return diff.sum() / m.sum().clamp_min(1.0)
 
 
 def masked_l1(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     m = mask.unsqueeze(1).float()
     diff = torch.abs(pred - target) * m
-    denom = m.sum().clamp_min(1.0)
-    return diff.sum() / denom
+    return diff.sum() / m.sum().clamp_min(1.0)
 
 
-def masked_mse_plus_boundary_smoothness(
+def masked_mse_plus_smoothness_3d(
     pred: torch.Tensor,
     target: torch.Tensor,
-    mask_valid: torch.Tensor,
+    mask: torch.Tensor,
     *,
     smooth_weight: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Interior MSE + optional smoothness on non-interior edges.
-
-    ``mask_valid`` is True on supervised interior pixels. Smoothness is mean |∇pred| on
-    horizontal/vertical edges where it is not the case that both endpoints are valid.
-    """
-    mse = masked_mse(pred, target, mask_valid)
+    mse = masked_mse(pred, target, mask)
     if smooth_weight <= 0.0:
         z = torch.zeros_like(mse)
         return mse, z, mse
 
-    m = mask_valid
-    if m.dim() == 4:
+    m = mask.float()
+    if m.dim() == 5:
         m = m.squeeze(1)
-    m = m.float()
 
-    gx = pred[:, :, 1:, :] - pred[:, :, :-1, :]
-    m1, m2 = m[:, :-1, :], m[:, 1:, :]
-    w_x = 1.0 - (m1 * m2)
-    tv_x = (gx.abs() * w_x.unsqueeze(1)).sum() / w_x.sum().clamp_min(1.0)
+    def edge_tv(diff: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        return (diff.abs() * w.unsqueeze(1)).sum() / w.sum().clamp_min(1.0)
 
-    gy = pred[:, :, :, 1:] - pred[:, :, :, :-1]
-    m1, m2 = m[:, :, :-1], m[:, :, 1:]
-    w_y = 1.0 - (m1 * m2)
-    tv_y = (gy.abs() * w_y.unsqueeze(1)).sum() / w_y.sum().clamp_min(1.0)
+    # D axis
+    gd = pred[:, :, 1:, :, :] - pred[:, :, :-1, :, :]
+    w_d = 1.0 - (m[:, :-1, :, :] * m[:, 1:, :, :])
+    tv_d = edge_tv(gd, w_d)
 
-    smooth = 0.5 * (tv_x + tv_y)
+    # H axis
+    gh = pred[:, :, :, 1:, :] - pred[:, :, :, :-1, :]
+    w_h = 1.0 - (m[:, :, :-1, :] * m[:, :, 1:, :])
+    tv_h = edge_tv(gh, w_h)
+
+    # W axis
+    gw = pred[:, :, :, :, 1:] - pred[:, :, :, :, :-1]
+    w_w = 1.0 - (m[:, :, :, :-1] * m[:, :, :, 1:])
+    tv_w = edge_tv(gw, w_w)
+
+    smooth = (tv_d + tv_h + tv_w) / 3.0
     total = mse + smooth_weight * smooth
     return mse, smooth, total
 
 
-class DoubleConv(nn.Module):
+class DoubleConv3d(nn.Module):
     def __init__(self, in_ch: int, out_ch: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
+            nn.Conv3d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm3d(out_ch),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
+            nn.Conv3d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm3d(out_ch),
             nn.ReLU(inplace=True),
         )
 
@@ -196,27 +202,27 @@ class DoubleConv(nn.Module):
         return self.net(x)
 
 
-class UNet2D(nn.Module):
-    """Classic U-Net; in_channels=4 (image, warped, phi_xy), out_channels=1."""
+class UNet3D(nn.Module):
+    """3D U-Net: 5 in-ch (subject, atlas, phi_pred×3) → 1 out-ch (error_map)."""
 
-    def __init__(self, in_channels: int = 4, base: int = 32) -> None:
+    def __init__(self, in_channels: int = 5, base: int = 32) -> None:
         super().__init__()
         b = base
-        self.down1 = DoubleConv(in_channels, b)
-        self.down2 = DoubleConv(b, b * 2)
-        self.down3 = DoubleConv(b * 2, b * 4)
-        self.down4 = DoubleConv(b * 4, b * 8)
-        self.pool = nn.MaxPool2d(2)
-        self.bot = DoubleConv(b * 8, b * 16)
-        self.up4 = nn.ConvTranspose2d(b * 16, b * 8, 2, stride=2)
-        self.conv4 = DoubleConv(b * 16, b * 8)
-        self.up3 = nn.ConvTranspose2d(b * 8, b * 4, 2, stride=2)
-        self.conv3 = DoubleConv(b * 8, b * 4)
-        self.up2 = nn.ConvTranspose2d(b * 4, b * 2, 2, stride=2)
-        self.conv2 = DoubleConv(b * 4, b * 2)
-        self.up1 = nn.ConvTranspose2d(b * 2, b, 2, stride=2)
-        self.conv1 = DoubleConv(b * 2, b)
-        self.out = nn.Conv2d(b, 1, 1)
+        self.down1 = DoubleConv3d(in_channels, b)
+        self.down2 = DoubleConv3d(b, b * 2)
+        self.down3 = DoubleConv3d(b * 2, b * 4)
+        self.down4 = DoubleConv3d(b * 4, b * 8)
+        self.pool = nn.MaxPool3d(2)
+        self.bot = DoubleConv3d(b * 8, b * 16)
+        self.up4 = nn.ConvTranspose3d(b * 16, b * 8, 2, stride=2)
+        self.conv4 = DoubleConv3d(b * 16, b * 8)
+        self.up3 = nn.ConvTranspose3d(b * 8, b * 4, 2, stride=2)
+        self.conv3 = DoubleConv3d(b * 8, b * 4)
+        self.up2 = nn.ConvTranspose3d(b * 4, b * 2, 2, stride=2)
+        self.conv2 = DoubleConv3d(b * 4, b * 2)
+        self.up1 = nn.ConvTranspose3d(b * 2, b, 2, stride=2)
+        self.conv1 = DoubleConv3d(b * 2, b)
+        self.out = nn.Conv3d(b, 1, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         c1 = self.down1(x)
@@ -269,10 +275,8 @@ def evaluate(
         mask = batch["mask"].to(device, non_blocking=True)
         with torch.cuda.amp.autocast(enabled=use_amp):
             pred = model(x)
-            mse = masked_mse(pred, y, mask)
-            l1 = masked_l1(pred, y, mask)
-        sum_mse += float(mse)
-        sum_l1 += float(l1)
+            sum_mse += float(masked_mse(pred, y, mask))
+            sum_l1 += float(masked_l1(pred, y, mask))
         n += 1
     return sum_mse / max(n, 1), sum_l1 / max(n, 1)
 
@@ -304,7 +308,7 @@ def train_epoch(
         opt.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=use_amp):
             pred = model(x)
-            mse, smooth, loss = masked_mse_plus_boundary_smoothness(
+            mse, smooth, loss = masked_mse_plus_smoothness_3d(
                 pred, y, mask, smooth_weight=smooth_weight
             )
         if use_amp and scaler is not None:
@@ -326,20 +330,25 @@ def train_epoch(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Train U-Net to predict registration error_map from fiver npz.",
+        description="Train 3D U-Net for IO error_map from UniGrad IO npz volumes.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     p.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("./data/IXI_2D_unigrad_synth_fiver"),
-        help="Root with Train/Val (and optional Test) subfolders.",
+        default=Path("datasets/IXI_unigrad_io"),
+        help="Root with Train/Val/Test/*.npz from create_unigrad_io_data.py.",
     )
     p.add_argument("--train-split", type=str, default="Train")
     p.add_argument("--val-split", type=str, default="Val")
     p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Volumes are large (e.g. 160×192×224); use 1–2 on ~24 GiB GPU.",
+    )
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--base-channels", type=int, default=32)
@@ -348,38 +357,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default="robust",
         choices=["none", "robust"],
-        help="robust (default): per-slice min + quantile-hi rescale image/warped to [0,1]. "
-        "none: use raw float32 from npz (skip rescaling).",
+        help="Per-volume robust rescale of source/target to [0, 1].",
     )
-    p.add_argument(
-        "--quantile-high",
-        type=float,
-        default=0.99,
-        help="Upper quantile for --image-norm robust (ignored for none).",
-    )
+    p.add_argument("--quantile-high", type=float, default=0.99)
     p.add_argument(
         "--phi-scale",
         type=float,
         default=64.0,
-        help="Divide phi_pred by this (pixels). Must be > 0.",
+        help="Divide phi_pred by this (voxel units).",
     )
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--out-dir", type=Path, default=Path("./assets/runs/error_map_unet"))
-    p.add_argument("--no-amp", action="store_true", help="Disable mixed precision even on CUDA.")
+    p.add_argument("--out-dir", type=Path, default=Path("assets/runs/error_map_unet_3d"))
+    p.add_argument("--no-amp", action="store_true")
     p.add_argument(
         "--smooth-weight",
         type=float,
-        default=0.05,
-        metavar="W",
-        help="Weight for boundary/exterior TV smoothness (0 to disable). "
-        "Not applied to edges between two interior (valid_mask) pixels.",
+        default=0.0,
+        help="Optional 3D edge TV on predicted error_map (0 = MSE only).",
     )
-    p.add_argument(
-        "--no-progress",
-        action="store_true",
-        help="Disable tqdm bars (plain log lines only).",
-    )
+    p.add_argument("--no-progress", action="store_true")
     return p.parse_args(argv)
 
 
@@ -393,14 +390,14 @@ def main(argv: list[str] | None = None) -> int:
     use_amp = device.type == "cuda" and not args.no_amp
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    train_ds = FiverErrorDataset(
+    train_ds = UniGradIOErrorDataset(
         args.data_dir,
         args.train_split,
         image_norm=args.image_norm,
         quantile_high=args.quantile_high,
         phi_scale=args.phi_scale,
     )
-    val_ds = FiverErrorDataset(
+    val_ds = UniGradIOErrorDataset(
         args.data_dir,
         args.val_split,
         image_norm=args.image_norm,
@@ -425,11 +422,16 @@ def main(argv: list[str] | None = None) -> int:
         collate_fn=collate_batch,
     )
 
-    model = UNet2D(in_channels=4, base=args.base_channels).to(device)
+    model = UNet3D(in_channels=5, base=args.base_channels).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     meta = {
+        "model": "UNet3D",
+        "in_channels": 5,
+        "out_channels": 1,
+        "inputs": ["source", "target", "phi_pred"],
+        "target": "error_map",
         "data_dir": str(args.data_dir.resolve()),
         "train_split": args.train_split,
         "val_split": args.val_split,
@@ -464,14 +466,8 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.time()
     epoch_loop = range(1, args.epochs + 1)
     if show_p:
-        epoch_loop = tqdm(
-            epoch_loop,
-            desc="epoch",
-            unit="ep",
-            total=args.epochs,
-            position=0,
-            leave=True,
-        )
+        epoch_loop = tqdm(epoch_loop, desc="epoch", unit="ep", total=args.epochs, position=0, leave=True)
+
     for epoch in epoch_loop:
         tr_mse, tr_smooth, tr_total = train_epoch(
             model,

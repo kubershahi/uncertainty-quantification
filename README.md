@@ -15,7 +15,37 @@ Implementation targets **TransMorph-style preprocessed IXI** axial slices. Phase
 
 1. **Phase I (synthetic ground truth):** Fixed/warped images and true displacement `phi` in `*_triplet.npz` (TorchIO-style transforms + QC).
 2. **Phase II (foundation registration):** UniGradICON produces `phi_pred`; residual against channel-aligned `phi_true` yields dense **error map** fivers (`*_fiver.npz`, plus `valid_mask`, `qc_passed`, …).
-3. **Phase III (supervised regression):** A 2D U-Net predicts the error map from fixed/warped intensities and `phi_pred`; `train_error_map_unet.py` / `eval_error_map_unet.py` handle training, Test/Atlas metrics, and qualitative panels.
+3. **Phase III (supervised regression):** A U-Net predicts the dense error map from registration inputs. The **2D slice** path (`IXI_2D_unigrad_synth_fiver`) uses a 4-channel 2D U-Net; the **3D IO** path (`datasets/IXI_unigrad_io` from `create_unigrad_io_data.py`) uses the **3D U-Net** below. Training and eval: `experiments/regression/train_error_map_unet.py`, `experiments/regression/eval_error_map_unet.py`.
+
+### 3D U-Net architecture (`UNet3D`)
+
+Implemented in `experiments/regression/train_error_map_unet.py` as a standard **encoder–decoder U-Net** on 3D volumes (layout `N × C × D × H × W`).
+
+| | |
+| --- | --- |
+| **Input** | 5 channels: robust-normalized **subject** (`source`), **atlas** (`target`), **φ_pred** (3 channels, divided by `--phi-scale`, default 64 voxel units) |
+| **Output** | 1 channel: predicted **error_map** — per-voxel ‖φ_IO − φ_pred‖₂ (voxels), same shape as the label |
+| **Default width** | `--base-channels 32` (denoted `b` below) |
+
+**Encoder (contracting path):** four `MaxPool3d(2)` steps after double-conv blocks. Each block is **DoubleConv3d**: `Conv3d 3×3×3 → BatchNorm3d → ReLU → Conv3d 3×3×3 → BatchNorm3d → ReLU` (no bias in convolutions).
+
+| Stage | Channels (out) | Spatial size (per axis, relative to input) |
+| --- | --- | --- |
+| `down1` | `b` | 1× |
+| `down2` | `2b` | ½× |
+| `down3` | `4b` | ¼× |
+| `down4` | `8b` | ⅛× |
+| `bot` (bottleneck) | `16b` | ¹⁄₁₆× |
+
+**Decoder (expanding path):** four upsampling steps with **skip connections** (channel-wise `concat` with the matching encoder feature map, then DoubleConv3d):
+
+- `ConvTranspose3d` kernel 2, stride 2: `16b → 8b`, concat with `c4` → `conv4` (`16b → 8b`)
+- same pattern: `8b → 4b` (+ `c3`), `4b → 2b` (+ `c2`), `2b → b` (+ `c1`)
+- **Head:** `Conv3d 1×1×1`: `b → 1` (scalar error_map per voxel)
+
+With default `b = 32`, the channel ladder is **32 → 64 → 128 → 256 → 512** in the encoder and the reverse in the decoder. Depth must be divisible by 16 along D, H, and W (four poolings); IXI volumes at ~160×192×224 satisfy this.
+
+**Training:** volume MSE over all voxels; optional `--smooth-weight` adds 3D edge total-variation on the prediction. Optimizer: AdamW; mixed precision on CUDA when enabled.
 
 ## Repository layout
 
@@ -101,28 +131,32 @@ python experiments/synthetic/create_unigrad_synth_data.py --input-path ./data/IX
 
 Writes `*_fiver.npz` with `phi_true`, `phi_pred`, `phi_diff`, `error_map`, `valid_mask`, `qc_passed`, etc.
 
-### Phase III: Supervised error-map training
+### Phase III: Supervised error-map training (3D IO volumes)
+
+Data from `experiments/unigrad-io/create_unigrad_io_data.py` under `datasets/IXI_unigrad_io/` (`Train|Val|Test/*.npz`). Each file: `source` (subject), `target` (same atlas for all subjects), `phi_pred`, `error_map`.
 
 ```bash
-python experiments/train_error_map_unet.py --data-dir ./data/IXI_2D_unigrad_synth_fiver/ --epochs 50 --batch-size 8 --out-dir ./runs/error_unet_run1
+python experiments/regression/train_error_map_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 1 --out-dir assets/runs/error_map_unet_3d
 ```
 
-Produces `metrics.csv`, `best_model.pt` (best **validation** masked MSE), and `run_config.json`.
+Produces `metrics.csv`, `best_model.pt` (best validation MSE), and `run_config.json`.
 
-### Evaluation + qualitative figures
+### Evaluation + qualitative figures (3D IO)
 
 ```bash
-python experiments/eval_error_map_unet.py --run-path ./runs/error_unet_run1 --eval-dir ./data/IXI_2D_unigrad_synth_fiver/ --no-show
+python experiments/regression/eval_error_map_unet.py --run-path assets/runs/error_map_unet_3d --eval-dir datasets/IXI_unigrad_io --no-show
 ```
 
 Typical outputs under `--run-path`:
 
 - `training_curves.png`
 - `test_metrics.json`
-- `test_error_pred_random.png`, `test_error_pred_minmedmax.png`
-- `atlas_error_pred_random.png`, `atlas_error_pred_minmedmax.png`
+- `test_error_pred_random.png`
+- `test_error_pred_easy_normal_hard.png`
 
-The repo includes an **example** training/eval snapshot under `assets/runs/error_unet_run1/` (for figures in the report without re-running training).
+### Legacy 2D synthetic pipeline (report / Drive data)
+
+The written report used a **2D** U-Net on `*_fiver.npz` slices (4 input channels). That path is separate from the current **3D** `UNet3D` trainer above. Example 2D run artifacts: `assets/runs/error_unet_run1/`.
 
 ### Optional visualization (no training)
 

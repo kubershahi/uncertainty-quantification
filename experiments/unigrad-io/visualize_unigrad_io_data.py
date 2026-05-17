@@ -42,6 +42,27 @@ SPLITS = ("Train", "Val", "Test")
 DATA_GLOB = "*.npz"
 SELECTION_MODES = ("easy_normal_hard", "random")
 
+# Displacement fields and error_map are in voxel units (see create_unigrad_io_data.py).
+DISPLACEMENT_UNIT = "voxels"
+
+COLUMN_HEADERS: list[tuple[str, str]] = [
+    ("Moving image", "subject (source)"),
+    ("Fixed image", "atlas (target)"),
+    (r"$\|\phi_{\mathrm{pred}}\|$", f"zero-shot displacement ({DISPLACEMENT_UNIT})"),
+    (r"$\|\phi_{\mathrm{pred}}^{\mathrm{IO}}\|$", f"post-IO displacement ({DISPLACEMENT_UNIT})"),
+    (
+        r"$\|\phi^{\mathrm{IO}} - \phi_{\mathrm{pred}}\|$",
+        f"error map · U-Net target ({DISPLACEMENT_UNIT})",
+    ),
+]
+
+RANK_BY_LABELS: dict[str, str] = {
+    "mean_error_map": "mean(error_map)",
+    "max_error_map": "max(error_map)",
+    "mean_phi_pred": r"mean($\|\phi_{\mathrm{pred}}\|$)",
+    "mean_phi_predio": r"mean($\|\phi_{\mathrm{pred}}^{\mathrm{IO}}\|$)",
+}
+
 
 def phi_magnitude(phi: np.ndarray) -> np.ndarray:
     """``(3, D, H, W)`` → ``(D, H, W)`` magnitude."""
@@ -193,17 +214,52 @@ def panel_limits(
     return err_v, phi_v
 
 
-def render_subject_row(
-    axes,
-    record: dict[str, np.ndarray],
+def format_rank_metric(rank_by: str) -> str:
+    return RANK_BY_LABELS.get(rank_by, rank_by)
+
+
+def format_row_caption(
     fp: Path,
     label: str,
     score: float,
+    *,
+    rank_by: str | None,
+) -> str:
+    if not label or label == fp.stem:
+        return fp.stem
+    tier = label.capitalize()
+    if rank_by and np.isfinite(score):
+        return f"{fp.stem}\n{tier} · {format_rank_metric(rank_by)} = {score:.3f} {DISPLACEMENT_UNIT}"
+    return f"{fp.stem}\n{tier}"
+
+
+def set_column_headers(axes_row) -> None:
+    for ax, (head, sub) in zip(axes_row, COLUMN_HEADERS):
+        ax.set_title(f"{head}\n{sub}", fontsize=9, pad=10)
+
+
+def add_row_label(fig: plt.Figure, axes_row, caption: str) -> None:
+    bbox = axes_row[0].get_position()
+    y = 0.5 * (bbox.y0 + bbox.y1)
+    fig.text(
+        bbox.x0 - 0.012,
+        y,
+        caption,
+        ha="right",
+        va="center",
+        fontsize=8,
+        linespacing=1.25,
+    )
+
+
+def render_subject_row(
+    axes,
+    record: dict[str, np.ndarray],
     slice_z: int,
     *,
     err_v: float,
     phi_v: float,
-    rank_by: str | None,
+    show_column_headers: bool,
 ) -> None:
     source = axial_slice_volume(record["source"], slice_z)
     target = axial_slice_volume(record["target"], slice_z)
@@ -211,26 +267,25 @@ def render_subject_row(
     phi_predio_s = axial_slice_phi_mag(record["phi_predio"], slice_z)
     err_s = axial_slice_error_map(record["error_map"], slice_z)
 
-    score_note = ""
-    if label and np.isfinite(score) and rank_by:
-        score_note = f"\n{label} {rank_by}={score:.4f}"
-    elif label:
-        score_note = f"\n{label}"
+    if show_column_headers:
+        set_column_headers(axes)
 
-    panels = [
-        (source, "gray", None, None, f"source\n{fp.stem}{score_note}"),
-        (target, "gray", None, None, "target (atlas)"),
-        (phi_pred_s, "hot", 0.0, phi_v, "||phi_pred||"),
-        (phi_predio_s, "hot", 0.0, phi_v, "||phi_predio||"),
-        (err_s, "hot", 0.0, err_v, "error_map"),
+    panels: list[tuple[np.ndarray, str, float | None, float | None, str | None]] = [
+        (source, "gray", None, None, None),
+        (target, "gray", None, None, None),
+        (phi_pred_s, "hot", 0.0, phi_v, f"displacement ({DISPLACEMENT_UNIT})"),
+        (phi_predio_s, "hot", 0.0, phi_v, f"displacement ({DISPLACEMENT_UNIT})"),
+        (err_s, "hot", 0.0, err_v, f"‖Δφ‖ ({DISPLACEMENT_UNIT})"),
     ]
-    for ax, (img, cmap, vmin, vmax, title) in zip(axes, panels):
+    for ax, (img, cmap, vmin, vmax, cbar_label) in zip(axes, panels):
         if vmin is None:
-            ax.imshow(img, cmap=cmap)
+            ax.imshow(img, cmap=cmap, aspect="equal")
         else:
-            im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax)
-            ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
-        ax.set_title(title, fontsize=8)
+            im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax, aspect="equal")
+            cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+            if cbar_label:
+                cbar.set_label(cbar_label, fontsize=8)
+            cbar.ax.tick_params(labelsize=7)
         ax.axis("off")
 
 
@@ -269,27 +324,42 @@ def render_figure(
         err_v = max(err_v, ev)
         phi_v = max(phi_v, pv)
 
+    depth = int(records[0]["source"].shape[2])
     nrows = len(picked)
-    fig, axes = plt.subplots(nrows, 5, figsize=(18, 3.6 * nrows))
+    fig, axes = plt.subplots(nrows, 5, figsize=(20, 3.8 * nrows))
     axes = np.atleast_2d(axes)
+    rank_for_caption = rank_by if selection == "easy_normal_hard" else None
+
     for row, ((fp, label, score), rec) in enumerate(zip(picked, records)):
         render_subject_row(
             axes[row],
             rec,
-            fp,
-            label,
-            score,
             z,
             err_v=err_v,
             phi_v=phi_v,
-            rank_by=rank_by if selection == "easy_normal_hard" else None,
+            show_column_headers=(row == 0),
         )
+        caption = format_row_caption(fp, label, score, rank_by=rank_for_caption)
+        if nrows > 1:
+            add_row_label(fig, axes[row], caption)
+        elif label or rank_for_caption:
+            fig.suptitle(
+                f"{caption}\n{split} · axial slice z = {z} / {depth - 1}",
+                fontsize=10,
+                y=1.02,
+            )
 
-    fig.suptitle(
-        f"{split} — {selection} (z={z}, n={nrows})",
-        fontsize=11,
-    )
-    fig.tight_layout()
+    if nrows > 1:
+        metric_note = ""
+        if selection == "easy_normal_hard":
+            metric_note = f" · ranked by {format_rank_metric(rank_by)}"
+        fig.suptitle(
+            f"{split} · {selection.replace('_', ' ')}{metric_note}\n"
+            f"axial slice z = {z} / {depth - 1}  ·  {nrows} subject(s)",
+            fontsize=11,
+            y=1.01,
+        )
+    fig.tight_layout(rect=(0.11 if nrows > 1 else 0.02, 0, 1, 0.92))
     return fig
 
 
