@@ -3,7 +3,10 @@
 QC figure for the shared atlas and foreground mask from ``create_unigrad_io_data.py``.
 
 Reads ``<data-dir>/atlas_valid_mask.npz`` (``atlas`` ``(H,W,D)``, ``valid_mask`` ``(D,H,W)``).
-Shows axial slices: atlas intensity and mask overlay at low / mid / high z.
+Shows axial slices at z = ¼, ½, ¾ of depth (atlas row + mask overlay row).
+
+``valid_mask``: True = include voxel in training loss (tissue above intensity threshold);
+False = exclude (background / padding / very dark voxels).
 
 Example:
 python experiments/unigrad-io/visualize_unigrad_io_atlas.py --data-dir datasets/IXI_unigrad_io --save-path assets/images/unigrad-io/unigradio_atlas_mask.png --no-show
@@ -22,11 +25,18 @@ ATLAS_MASK_FILENAME = "atlas_valid_mask.npz"
 
 
 def default_slice_indices(depth: int, n: int = 3) -> list[int]:
+    """Axial z at ¼, ½, ¾ of depth (avoids empty top/bottom slices)."""
     if depth <= 0:
         return [0]
     if n == 1:
         return [depth // 2]
-    zs = [0, depth // 2, depth - 1]
+    if depth == 1:
+        return [0]
+    zs = [
+        int(round(0.25 * (depth - 1))),
+        int(round(0.50 * (depth - 1))),
+        int(round(0.75 * (depth - 1))),
+    ]
     return sorted(set(int(np.clip(z, 0, depth - 1)) for z in zs))
 
 
@@ -81,7 +91,7 @@ def plot_atlas_mask_figure(
     z_list = slice_indices if slice_indices is not None else default_slice_indices(depth)
     n = len(z_list)
 
-    fig, axes = plt.subplots(2, n, figsize=(3.4 * n, 6.8))
+    fig, axes = plt.subplots(2, n, figsize=(3.4 * n, 7.8))
     if n == 1:
         axes = np.array(axes).reshape(2, 1)
 
@@ -98,17 +108,17 @@ def plot_atlas_mask_figure(
         ax1 = axes[1, col]
         ax1.imshow(atlas_s, cmap="gray", aspect="equal")
         ax1.imshow(mask_s, cmap="Greens", alpha=0.45, vmin=0, vmax=1, aspect="equal")
-        ax1.set_title("foreground mask", fontsize=9)
+        ax1.set_title("valid_mask (green = train/eval)", fontsize=9)
         ax1.axis("off")
 
     thr_s = f"{threshold:.4g}" if np.isfinite(threshold) else "n/a"
     pct_s = f"{fg_percentile:g}" if np.isfinite(fg_percentile) else "n/a"
     fig.suptitle(
         f"UniGrad IO atlas · threshold = {thr_s} (p{pct_s} of atlas>0) · "
-        f"foreground = {fg_frac * 100:.1f}% of voxels",
+        f"valid_mask True on {fg_frac * 100:.1f}% of volume voxels",
         fontsize=11,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.tight_layout(rect=(0, 0, 1, 0.90), pad=0.6, h_pad=2.8, w_pad=0.5)
 
     if save_path is not None:
         save_path = Path(save_path)
@@ -143,7 +153,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         metavar="Z",
-        help="Single axial z; default shows z=0, mid, z=max.",
+        help="Single axial z; default shows z at ¼, ½, ¾ of depth.",
     )
     p.add_argument("--no-show", action="store_true")
     return p.parse_args(argv)
