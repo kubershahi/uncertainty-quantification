@@ -91,7 +91,7 @@ def plot_atlas_mask_figure(
     z_list = slice_indices if slice_indices is not None else default_slice_indices(depth)
     n = len(z_list)
 
-    fig, axes = plt.subplots(2, n, figsize=(3.4 * n, 7.8))
+    fig, axes = plt.subplots(2, n, figsize=(3.4 * n, 3.8 * 2))
     if n == 1:
         axes = np.array(axes).reshape(2, 1)
 
@@ -113,13 +113,15 @@ def plot_atlas_mask_figure(
 
     thr_s = f"{threshold:.4g}" if np.isfinite(threshold) else "n/a"
     pct_s = f"{fg_percentile:g}" if np.isfinite(fg_percentile) else "n/a"
+    # Match layout/spacing from visualize_unigrad_io_data.py
+    fig.tight_layout(rect=(0.02, 0.02, 1, 0.97), pad=0.35, h_pad=1.0, w_pad=0.15)
+    fig.subplots_adjust(top=0.93)
     fig.suptitle(
         f"UniGrad IO atlas · threshold = {thr_s} (p{pct_s} of atlas>0)\n"
         f"valid_mask True on {fg_frac * 100:.1f}% of volume voxels",
         fontsize=11,
-        y=0.99,
+        y=0.985,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.93), pad=0.6, h_pad=2.8, w_pad=0.5)
 
     if save_path is not None:
         save_path = Path(save_path)
