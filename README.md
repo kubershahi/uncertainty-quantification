@@ -15,11 +15,11 @@ Implementation targets **TransMorph-style preprocessed IXI** axial slices. Phase
 
 1. **Phase I (synthetic ground truth):** Fixed/warped images and true displacement `phi` in `*_triplet.npz` (TorchIO-style transforms + QC).
 2. **Phase II (foundation registration):** UniGradICON produces `phi_pred`; residual against channel-aligned `phi_true` yields dense **error map** fivers (`*_fiver.npz`, plus `valid_mask`, `qc_passed`, …).
-3. **Phase III (supervised regression):** A U-Net predicts the dense error map from registration inputs. The **2D slice** path (`IXI_2D_unigrad_synth_fiver`) uses a 4-channel 2D U-Net; the **3D IO** path (`datasets/IXI_unigrad_io` from `create_unigrad_io_data.py`) uses the **3D U-Net** below. Training and eval: `experiments/regression/train_error_map_unet.py`, `experiments/regression/eval_error_map_unet.py`.
+3. **Phase III (supervised regression):** A U-Net predicts the dense error map from registration inputs. **2D synth** (`data/IXI_2D_unigrad_synth_fiver`, 4-channel `UNet2D`): `experiments/regression/unigrad-synth/`. **3D IO** (`datasets/IXI_unigrad_io`, 5-channel `UNet3D`): `experiments/regression/unigrad-io/`.
 
 ### 3D U-Net architecture (`UNet3D`)
 
-Implemented in `experiments/regression/train_error_map_unet.py` as a standard **encoder–decoder U-Net** on 3D volumes (layout `N × C × D × H × W`).
+Implemented in `experiments/regression/unigrad-io/train_unigrad_io_unet.py` as a standard **encoder–decoder U-Net** on 3D volumes (layout `N × C × D × H × W`).
 
 | | |
 | --- | --- |
@@ -136,7 +136,7 @@ Writes `*_fiver.npz` with `phi_true`, `phi_pred`, `phi_diff`, `error_map`, `vali
 Data from `experiments/unigrad-io/create_unigrad_io_data.py` under `datasets/IXI_unigrad_io/` (`Train|Val|Test/*.npz`). Each file: `source` (subject), `target` (same atlas for all subjects), `phi_pred`, `error_map`.
 
 ```bash
-python experiments/regression/train_error_map_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 1 --out-dir assets/runs/error_map_unet_3d
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 1 --out-dir assets/runs/3d/unigrad-io/error_unet_run1
 ```
 
 Produces `metrics.csv`, `best_model.pt` (best validation MSE), and `run_config.json`.
@@ -144,7 +144,7 @@ Produces `metrics.csv`, `best_model.pt` (best validation MSE), and `run_config.j
 ### Evaluation + qualitative figures (3D IO)
 
 ```bash
-python experiments/regression/eval_error_map_unet.py --run-path assets/runs/error_map_unet_3d --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/3d/unigrad-io/error_unet_run1 --eval-dir datasets/IXI_unigrad_io --no-show
 ```
 
 Typical outputs under `--run-path`:
@@ -154,9 +154,14 @@ Typical outputs under `--run-path`:
 - `test_error_pred_random.png`
 - `test_error_pred_easy_normal_hard.png`
 
-### Legacy 2D synthetic pipeline (report / Drive data)
+### Phase III: 2D synthetic fiver training
 
-The written report used a **2D** U-Net on `*_fiver.npz` slices (4 input channels). That path is separate from the current **3D** `UNet3D` trainer above. Example 2D run artifacts: `assets/runs/error_unet_run1/`.
+```bash
+python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir data/IXI_2D_unigrad_synth_fiver --epochs 50 --batch-size 8 --out-dir assets/runs/2d/unigrad-synth/error_unet_run1
+python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/2d/unigrad-synth/error_unet_run1 --eval-dir data/IXI_2D_unigrad_synth_fiver --no-show
+```
+
+Example 2D run artifacts: `assets/runs/2d/unigrad-synth/error_unet_run1/`.
 
 ### Optional visualization (no training)
 
