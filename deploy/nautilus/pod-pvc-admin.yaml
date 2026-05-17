@@ -1,6 +1,9 @@
-# Lightweight admin pod — PVC /files, git, SSH, kubectl cp. No GPU (use deployment-gpu / deployment-jupyter-lab for compute).
+# Lightweight admin pod — PVC /files, git, SSH, kubectl cp. Same image as unc-heavy / unc-jupyter (no GPU).
 # NRP bare-Pod cap ~16 CPU / ~32 Gi (incl. shm); this manifest stays well under that.
+# kubectl delete pod unc-dev --ignore-not-found
 # kubectl apply -f deploy/nautilus/pod-pvc-admin.yaml
+# kubectl wait --for=condition=Ready pod/unc-dev --timeout=20m
+# kubectl exec -it unc-dev -- bash
 apiVersion: v1
 kind: Pod
 metadata:
@@ -11,19 +14,18 @@ spec:
   restartPolicy: Never
   containers:
     - name: main
-      image: ubuntu:22.04
+      image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
       workingDir: /files
       env:
         - name: HOME
           value: /files/home/root
-        - name: DEBIAN_FRONTEND
-          value: noninteractive
       command: ["/bin/bash", "-lc"]
       args:
         - |
           export HOME=/files/home/root
           mkdir -p "$HOME"
-          command -v git >/dev/null && command -v ssh >/dev/null || {
+          export DEBIAN_FRONTEND=noninteractive
+          command -v git >/dev/null && command -v ssh-keygen >/dev/null || {
             apt-get update -qq &&
             apt-get install -y -qq --no-install-recommends git ca-certificates openssh-client &&
             rm -rf /var/lib/apt/lists/*;
@@ -41,10 +43,10 @@ spec:
       resources:
         requests:
           cpu: 100m
-          memory: 512Mi
+          memory: 1Gi
         limits:
           cpu: "2"
-          memory: 2Gi
+          memory: 4Gi
       volumeMounts:
         - name: files
           mountPath: /files

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# One-time venv on PVC (persists across pods). Prefer unc-heavy / unc-jupyter (pytorch image).
+# One-time venv on PVC (persists across pods). Run from unc-dev, unc-heavy, or unc-jupyter.
 #   bash /files/repo/uncertainty-quantification/deploy/nautilus/scripts/setup_venv.sh
-# On unc-dev (ubuntu:22.04) first: apt-get update && apt-get install -y python3-venv python3-pip
 # If venv was built on another image: FORCE=1 bash .../setup_venv.sh
 set -euo pipefail
 
