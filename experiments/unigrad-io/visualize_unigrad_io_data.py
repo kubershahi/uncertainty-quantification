@@ -45,15 +45,12 @@ SELECTION_MODES = ("easy_normal_hard", "random")
 # Displacement fields and error_map are in voxel units (see create_unigrad_io_data.py).
 DISPLACEMENT_UNIT = "voxels"
 
-COLUMN_HEADERS: list[tuple[str, str]] = [
-    ("Moving image", "subject (source)"),
-    ("Fixed image", "atlas (target)"),
-    (r"$\|\phi_{\mathrm{pred}}\|$", f"zero-shot displacement ({DISPLACEMENT_UNIT})"),
-    (r"$\|\phi_{\mathrm{pred}}^{\mathrm{IO}}\|$", f"post-IO displacement ({DISPLACEMENT_UNIT})"),
-    (
-        r"$\|\phi^{\mathrm{IO}} - \phi_{\mathrm{pred}}\|$",
-        f"error map · U-Net target ({DISPLACEMENT_UNIT})",
-    ),
+COLUMN_TITLES: list[str] = [
+    "subject (source)",
+    "atlas (target)",
+    r"zero-shot ($\|\phi_{\mathrm{pred}}\|$)",
+    r"post-IO ($\|\phi_{\mathrm{pred}}^{\mathrm{IO}}\|$)",
+    r"error ($\|\phi^{\mathrm{IO}} - \phi_{\mathrm{pred}}\|$)",
 ]
 
 RANK_BY_LABELS: dict[str, str] = {
@@ -218,36 +215,49 @@ def format_rank_metric(rank_by: str) -> str:
     return RANK_BY_LABELS.get(rank_by, rank_by)
 
 
-def format_row_caption(
+def format_subject_overlay(fp: Path, label: str) -> str:
+    if not label or label == fp.stem:
+        return fp.stem
+    return f"{fp.stem} ({label})"
+
+
+def format_mean_overlay(score: float, rank_by: str | None) -> str | None:
+    if rank_by is None or not np.isfinite(score):
+        return None
+    return f"{format_rank_metric(rank_by)} = {score:.3f}"
+
+
+def set_column_headers(axes_row) -> None:
+    for ax, title in zip(axes_row, COLUMN_TITLES):
+        ax.set_title(title, fontsize=9, pad=8)
+
+
+def format_row_side_label(
     fp: Path,
     label: str,
     score: float,
     *,
     rank_by: str | None,
 ) -> str:
-    if not label or label == fp.stem:
-        return fp.stem
-    tier = label.capitalize()
-    if rank_by and np.isfinite(score):
-        return f"{fp.stem}\n{tier} · {format_rank_metric(rank_by)} = {score:.3f} {DISPLACEMENT_UNIT}"
-    return f"{fp.stem}\n{tier}"
+    lines = [format_subject_overlay(fp, label)]
+    mean_line = format_mean_overlay(score, rank_by)
+    if mean_line is not None:
+        lines.append(mean_line)
+    return "\n".join(lines)
 
 
-def set_column_headers(axes_row) -> None:
-    for ax, (head, sub) in zip(axes_row, COLUMN_HEADERS):
-        ax.set_title(f"{head}\n{sub}", fontsize=9, pad=10)
-
-
-def add_row_label(fig: plt.Figure, axes_row, caption: str) -> None:
-    bbox = axes_row[0].get_position()
-    y = 0.5 * (bbox.y0 + bbox.y1)
-    fig.text(
-        bbox.x0 - 0.012,
-        y,
-        caption,
-        ha="right",
+def add_row_side_label(ax, text: str) -> None:
+    """Rotated row label on the left of the first panel (bottom → top)."""
+    ax.text(
+        -0.04,
+        0.5,
+        text,
+        rotation=90,
         va="center",
+        ha="right",
+        transform=ax.transAxes,
         fontsize=8,
+        fontweight="bold",
         linespacing=1.25,
     )
 
@@ -260,6 +270,10 @@ def render_subject_row(
     err_v: float,
     phi_v: float,
     show_column_headers: bool,
+    fp: Path | None = None,
+    label: str = "",
+    score: float = float("nan"),
+    rank_by: str | None = None,
 ) -> None:
     source = axial_slice_volume(record["source"], slice_z)
     target = axial_slice_volume(record["target"], slice_z)
@@ -287,6 +301,12 @@ def render_subject_row(
                 cbar.set_label(cbar_label, fontsize=8)
             cbar.ax.tick_params(labelsize=7)
         ax.axis("off")
+
+    if fp is not None:
+        add_row_side_label(
+            axes[0],
+            format_row_side_label(fp, label, score, rank_by=rank_by),
+        )
 
 
 def render_figure(
@@ -338,28 +358,23 @@ def render_figure(
             err_v=err_v,
             phi_v=phi_v,
             show_column_headers=(row == 0),
+            fp=fp,
+            label=label,
+            score=score,
+            rank_by=rank_for_caption,
         )
-        caption = format_row_caption(fp, label, score, rank_by=rank_for_caption)
-        if nrows > 1:
-            add_row_label(fig, axes[row], caption)
-        elif label or rank_for_caption:
-            fig.suptitle(
-                f"{caption}\n{split} · axial slice z = {z} / {depth - 1}",
-                fontsize=10,
-                y=1.02,
-            )
 
-    if nrows > 1:
-        metric_note = ""
-        if selection == "easy_normal_hard":
-            metric_note = f" · ranked by {format_rank_metric(rank_by)}"
-        fig.suptitle(
-            f"{split} · {selection.replace('_', ' ')}{metric_note}\n"
-            f"axial slice z = {z} / {depth - 1}  ·  {nrows} subject(s)",
-            fontsize=11,
-            y=1.01,
-        )
-    fig.tight_layout(rect=(0.11 if nrows > 1 else 0.02, 0, 1, 0.92))
+    metric_note = ""
+    if selection == "easy_normal_hard":
+        metric_note = f" · ranked by {format_rank_metric(rank_by)}"
+    fig.suptitle(
+        f"{split} · {selection.replace('_', ' ')}{metric_note}\n"
+        f"axial slice z = {z} / {depth - 1}"
+        + (f"  ·  {nrows} subject(s)" if nrows > 1 else ""),
+        fontsize=11,
+        y=1.01,
+    )
+    fig.tight_layout(rect=(0.11 if nrows > 1 else 0.08, 0, 1, 0.92))
     return fig
 
 
