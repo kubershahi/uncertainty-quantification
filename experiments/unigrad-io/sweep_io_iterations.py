@@ -95,6 +95,11 @@ CHECKPOINTS_DEFAULT_2D = "0,50,100,150,200,250"
 CHECKPOINTS_DEFAULT_3D = "0,50,100,150,200,250,300"
 
 
+def displacement_unit_for_target(target_img: np.ndarray) -> str:
+    """``voxels`` for 3D volumes; ``pixels`` for 2D slices (in-plane displacement)."""
+    return "voxels" if target_img.ndim == 3 else "pixels"
+
+
 def _tqdm_common_kwargs() -> dict:
     """Shared tqdm settings: work in non-TTY (e.g. ``kubectl logs``); set ``TQDM_DISABLE=1`` to hide."""
     return {
@@ -553,7 +558,7 @@ def compute_sweep_metrics(
 
     Returns a dict where each entry is a list of ``(iteration, value)``:
       - ``"lncc"``       : LNCC(warped@N, target)            -- quality, higher better
-      - ``"phi_mag"``    : mean ||phi@N|| in pixels          -- field magnitude
+      - ``"phi_mag"``    : mean ||phi@N|| in voxels (3D) or pixels (2D)
       - ``"err_mag"``    : mean ||phi@N - phi@0||_2          -- mean magnitude of
                               the downstream U-Net regression target if
                               ``--io-iterations=N`` were chosen. Starts at 0,
@@ -609,6 +614,7 @@ def print_sweep_metrics(
     *,
     io_loss_at_iter: dict[int, float],
     lncc_sigma: int,
+    displacement_unit: str,
     header_note: str = "",
 ) -> None:
     """Pretty-print the sweep metrics table to stdout.
@@ -624,9 +630,10 @@ def print_sweep_metrics(
         "io_loss = quantity Adam descends; mean(error_map) = signal magnitude "
         "of the U-Net regression target if --io-iterations=N is picked):"
     )
+    du = displacement_unit
     print(
         f"  {'iter':>6s} | {'io_loss':>9s} | {'LNCC':>7s} | "
-        f"{'mean||phi|| (px)':>17s} | {'mean(error_map)':>17s} | {'neg_jac_pct':>11s}"
+        f"{f'mean||phi|| ({du})':>17s} | {f'mean(error_map) ({du})':>17s} | {'neg_jac_pct':>11s}"
     )
     print(
         f"  {'-'*6}-+-{'-'*9}-+-{'-'*7}-+-{'-'*17}-+-{'-'*17}-+-{'-'*11}"
@@ -641,7 +648,7 @@ def print_sweep_metrics(
         )
 
     print(
-        "\nError-map shape (px). p50 < mean < p95 ~ structured signal; "
+        f"\nError-map shape ({du}). p50 < mean < p95 ~ structured signal; "
         "max >> p95 ~ outliers / folds:"
     )
     print(
@@ -656,19 +663,46 @@ def print_sweep_metrics(
         )
 
 
-def _suptitle_str(
+def figure_heading(
     subject_path: Path,
+    *,
     io_optimizer: str,
     io_lr: float,
     io_sim: str,
+    mode: str,
+    detail: str | None = None,
+) -> tuple[str, str]:
+    """Main title and subtitle for sweep figures."""
+    main = f"UniGrad ICON IO sweep · {subject_path.stem}"
+    bits = [mode]
+    if detail:
+        bits.append(detail)
+    bits.append(f"{io_optimizer} lr={io_lr:g}")
+    bits.append(io_sim)
+    return main, " · ".join(bits)
+
+
+def apply_figure_heading(
+    fig: plt.Figure,
+    subject_path: Path,
     *,
-    atlas_note: str | None = None,
-) -> str:
-    atlas_part = atlas_note if atlas_note else f"atlas slice {ATLAS_SLICE_INDEX}"
-    return (
-        f"IO iteration sweep — {subject_path.name}  |  "
-        f"{atlas_part}, opt={io_optimizer}, lr={io_lr:g}, sim={io_sim}"
+    io_optimizer: str,
+    io_lr: float,
+    io_sim: str,
+    mode: str,
+    detail: str | None = None,
+    y_main: float = 0.98,
+) -> None:
+    main, sub = figure_heading(
+        subject_path,
+        io_optimizer=io_optimizer,
+        io_lr=io_lr,
+        io_sim=io_sim,
+        mode=mode,
+        detail=detail,
     )
+    fig.suptitle(main, fontsize=12, y=y_main, fontweight="medium")
+    fig.text(0.5, y_main - 0.028, sub, ha="center", va="top", fontsize=9, color="#555555")
 
 
 def render_sweep_images(
@@ -684,7 +718,6 @@ def render_sweep_images(
     io_sim: str,
     io_optimizer: str,
     axial_slice_idx: int | None = None,
-    atlas_note: str | None = None,
 ) -> None:
     """Render the 4-row image grid: warped+grid / residual / ||phi|| / error_map."""
     iters_sorted = sorted(snapshots.keys())
@@ -697,7 +730,7 @@ def render_sweep_images(
     phi0 = snapshots[iters_sorted[0]]
 
     if target_img.ndim == 3:
-        hwd_h, hwd_w, hwd_d = target_img.shape
+        hwd_d = int(target_img.shape[2])
         mid = int(axial_slice_idx) if axial_slice_idx is not None else hwd_d // 2
         mid = max(0, min(mid, hwd_d - 1))
 
@@ -710,12 +743,10 @@ def render_sweep_images(
         def axial_err(phi_dhw: np.ndarray) -> np.ndarray:
             return np.sqrt(np.sum((phi_dhw - phi0) ** 2, axis=0))[mid, :, :]
 
-        row_notes = (
-            f"axial slice index {mid} of volume (H,W,D)=({hwd_h},{hwd_w},{hwd_d}); "
-            "grid overlay uses in-plane displacements at this depth"
-        )
+        slice_detail = f"axial z={mid}"
     else:
         mid = None
+        slice_detail = f"atlas slice z={ATLAS_SLICE_INDEX}"
 
         def axial_tile(vol_hw_d: np.ndarray) -> np.ndarray:
             return vol_hw_d
@@ -725,8 +756,6 @@ def render_sweep_images(
 
         def axial_err(phi_dhw: np.ndarray) -> np.ndarray:
             return np.sqrt(np.sum((phi_dhw - phi0) ** 2, axis=0))
-
-        row_notes = ""
 
     target_tile = axial_tile(target_img)
 
@@ -746,13 +775,14 @@ def render_sweep_images(
     phi_v = max(float(np.percentile(phi_mag_concat, 99.0)), 1e-6)
     err_v = max(float(np.percentile(err_map_concat, 99.0)), 1e-6)
 
-    row_labels = ["warped", "residual", "||phi|| (px)", "error_map (px)"]
+    disp_unit = displacement_unit_for_target(target_img)
+    row_labels = ["warped", "residual", r"$\|\phi\|$", "error_map"]
 
     for col, it in enumerate(iters_sorted):
         ax_w = fig.add_subplot(gs[0, col])
         warped_tile = axial_tile(warped_by_iter[it])
         ax_w.imshow(warped_tile, cmap="gray")
-        ax_w.set_title(f"iter {it}", fontsize=10)
+        ax_w.set_title(f"iter@{it}", fontsize=10)
         ax_w.axis("off")
         if mid is not None:
             overlay_deformation_grid(ax_w, phi_axial_overlay_slice(snapshots[it], mid), stride=grid_stride)
@@ -770,7 +800,8 @@ def render_sweep_images(
             ax_d.text(-0.04, 0.5, row_labels[1], rotation=90, va="center",
                       ha="right", transform=ax_d.transAxes, fontsize=10, fontweight="bold")
         if col == n_iters - 1:
-            fig.colorbar(im_d, ax=ax_d, fraction=0.046, pad=0.02)
+            cb_d = fig.colorbar(im_d, ax=ax_d, fraction=0.046, pad=0.02)
+            cb_d.set_label("intensity difference", fontsize=8)
 
         ax_p = fig.add_subplot(gs[2, col])
         im_p = ax_p.imshow(phi_mag_by_iter[it], cmap="viridis", vmin=0.0, vmax=phi_v)
@@ -779,7 +810,8 @@ def render_sweep_images(
             ax_p.text(-0.04, 0.5, row_labels[2], rotation=90, va="center",
                       ha="right", transform=ax_p.transAxes, fontsize=10, fontweight="bold")
         if col == n_iters - 1:
-            fig.colorbar(im_p, ax=ax_p, fraction=0.046, pad=0.02)
+            cb_p = fig.colorbar(im_p, ax=ax_p, fraction=0.046, pad=0.02)
+            cb_p.set_label(f"displacement ({disp_unit})", fontsize=8)
 
         ax_e = fig.add_subplot(gs[3, col])
         im_e = ax_e.imshow(err_map_by_iter[it], cmap="magma", vmin=0.0, vmax=err_v)
@@ -788,20 +820,21 @@ def render_sweep_images(
             ax_e.text(-0.04, 0.5, row_labels[3], rotation=90, va="center",
                       ha="right", transform=ax_e.transAxes, fontsize=10, fontweight="bold")
         if col == n_iters - 1:
-            fig.colorbar(im_e, ax=ax_e, fraction=0.046, pad=0.02)
+            cb_e = fig.colorbar(im_e, ax=ax_e, fraction=0.046, pad=0.02)
+            cb_e.set_label(f"‖Δφ‖ ({disp_unit})", fontsize=8)
 
-    fig.suptitle(_suptitle_str(subject_path, io_optimizer, io_lr, io_sim, atlas_note=atlas_note), fontsize=11)
-    subtitle_rows = (
-        "rows: warped (+ grid) | warped - target | ||phi||_2 | error_map = ||phi - phi@0||_2"
+    is_3d = target_img.ndim == 3
+    apply_figure_heading(
+        fig,
+        subject_path,
+        io_optimizer=io_optimizer,
+        io_lr=io_lr,
+        io_sim=io_sim,
+        mode="3D volume" if is_3d else "2D slice",
+        detail=slice_detail,
+        y_main=0.99,
     )
-    if row_notes:
-        subtitle_rows += f"\n{row_notes}"
-    fig.text(
-        0.5, 0.945,
-        subtitle_rows,
-        ha="center", va="top", fontsize=9, color="#444",
-    )
-    fig.tight_layout(rect=(0.02, 0, 1, 0.94))
+    fig.tight_layout(rect=(0.02, 0, 1, 0.96))
 
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -817,13 +850,15 @@ def render_sweep_curves(
     metrics: dict[str, list[tuple[int, float]]],
     io_loss_at_iter: dict[int, float],
     lncc_sigma: int,
+    displacement_unit: str,
     save_path: Path | None,
     no_show: bool,
     subject_path: Path,
     io_lr: float,
     io_sim: str,
     io_optimizer: str,
-    atlas_note: str | None = None,
+    mode: str,
+    detail: str | None = None,
 ) -> None:
     """Render two panels: (left) quality vs target, (right) downstream-target health."""
     fig, (ax_left, ax_right) = plt.subplots(
@@ -837,16 +872,15 @@ def render_sweep_curves(
     io_loss_y = [io_loss_at_iter.get(it, float("nan")) for it in iters_x]
 
     # Left panel: registration quality vs target -- LNCC + the actual IO loss.
-    ax_left.plot(iters_x, lncc_y, marker="o", color="C2", label="LNCC  (higher better)")
+    ax_left.plot(iters_x, lncc_y, marker="o", color="C2", label="LNCC")
     ax_left.set_xlabel("IO iterations")
     ax_left.set_ylabel("LNCC", color="C2")
     ax_left.tick_params(axis="y", labelcolor="C2")
     ax_left.grid(True, alpha=0.3)
-    ax_left.set_title("Registration quality", fontsize=11)
+    ax_left.set_title("LNCC and IO loss", fontsize=11)
 
     ax_left2 = ax_left.twinx()
-    ax_left2.plot(iters_x, io_loss_y, marker="s", color="tab:purple",
-                  label="io_loss  (lower better)")
+    ax_left2.plot(iters_x, io_loss_y, marker="s", color="tab:purple", label="IO loss")
     ax_left2.set_ylabel("io_loss", color="tab:purple")
     ax_left2.tick_params(axis="y", labelcolor="tab:purple")
     lines_l, labels_l = ax_left.get_legend_handles_labels()
@@ -854,27 +888,34 @@ def render_sweep_curves(
     ax_left.legend(lines_l + lines_l2, labels_l + labels_l2, loc="center right", fontsize=9)
 
     # Right panel: downstream-target health -- mean(error_map) signal vs neg_jac_pct folds.
-    ax_right.plot(iters_x, err_y, marker="o", color="C1",
-                  label="mean(error_map)  (signal)")
+    ax_right.plot(iters_x, err_y, marker="o", color="C1", label="mean(error_map)")
     ax_right.set_xlabel("IO iterations")
-    ax_right.set_ylabel("mean(error_map)  [px]", color="C1")
+    ax_right.set_ylabel(f"mean(error_map)  [{displacement_unit}]", color="C1")
     ax_right.tick_params(axis="y", labelcolor="C1")
     ax_right.grid(True, alpha=0.3)
-    ax_right.set_title("Error-map signal vs folds", fontsize=11)
+    ax_right.set_title("Error map and Jacobian folds", fontsize=11)
 
     ax_right2 = ax_right.twinx()
-    ax_right2.plot(iters_x, negjac_y, marker="s", color="C3",
-                   label="neg_jac_pct  (folds, lower better)")
+    ax_right2.plot(iters_x, negjac_y, marker="s", color="C3", label="neg. Jacobian %")
     ax_right2.set_ylabel("neg_jac_pct", color="C3")
     ax_right2.tick_params(axis="y", labelcolor="C3")
     lines_r, labels_r = ax_right.get_legend_handles_labels()
     lines_r2, labels_r2 = ax_right2.get_legend_handles_labels()
     ax_right.legend(lines_r + lines_r2, labels_r + labels_r2, loc="lower right", fontsize=9)
 
-    fig.suptitle(_suptitle_str(subject_path, io_optimizer, io_lr, io_sim, atlas_note=atlas_note), fontsize=11)
+    apply_figure_heading(
+        fig,
+        subject_path,
+        io_optimizer=io_optimizer,
+        io_lr=io_lr,
+        io_sim=io_sim,
+        mode=mode,
+        detail=detail,
+        y_main=0.97,
+    )
     # Explicit margins so twinx() right-axis labels never collide with the
     # next subplot's left-axis labels (tight_layout doesn't account for them).
-    fig.subplots_adjust(left=0.07, right=0.94, top=0.86, bottom=0.14, wspace=0.45)
+    fig.subplots_adjust(left=0.07, right=0.94, top=0.82, bottom=0.14, wspace=0.45)
 
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -962,10 +1003,12 @@ def _sweep_one_subject(
         warped_by_iter=warped_by_iter,
         lncc_sigma=lncc_sigma,
     )
+    disp_unit = displacement_unit_for_target(target_img)
     print_sweep_metrics(
         metrics,
         io_loss_at_iter=io_loss_at_iter,
         lncc_sigma=lncc_sigma,
+        displacement_unit=disp_unit,
         header_note="",
     )
 
@@ -985,19 +1028,20 @@ def _sweep_one_subject(
         io_sim=io_sim,
         io_optimizer=io_optimizer,
         axial_slice_idx=None,
-        atlas_note=None,
     )
     render_sweep_curves(
         metrics=metrics,
         io_loss_at_iter=io_loss_at_iter,
         lncc_sigma=lncc_sigma,
+        displacement_unit=disp_unit,
         save_path=curves_path,
         no_show=no_show,
         subject_path=subject_path,
         io_lr=io_lr,
         io_sim=io_sim,
         io_optimizer=io_optimizer,
-        atlas_note=None,
+        mode="2D slice",
+        detail=f"atlas slice z={ATLAS_SLICE_INDEX}",
     )
 
 
@@ -1047,10 +1091,15 @@ def _sweep_one_subject_volume_pkl(
         for it, phi_vox in snapshots.items():
             warped_by_iter[it] = apply_displacement_3d(source_vol, phi_vox, device)
 
-    atlas_note = "full atlas vs subject volumes (.pkl)"
+    viz_mid = (
+        int(viz_axial_index)
+        if viz_axial_index is not None
+        else int(target_vol.shape[2]) // 2
+    )
+    viz_mid = max(0, min(viz_mid, int(target_vol.shape[2]) - 1))
+    slice_detail = f"axial z={viz_mid}"
     metrics_header = (
-        "3D atlas vs moving volume — LNCC over volume; neg_jac_pct via strided "
-        "interior det(J)<0 (approx)"
+        "3D atlas vs subject — volume LNCC; neg_jac_pct = strided interior det(J)<0"
     )
 
     metrics = compute_sweep_metrics(
@@ -1059,10 +1108,12 @@ def _sweep_one_subject_volume_pkl(
         warped_by_iter=warped_by_iter,
         lncc_sigma=lncc_sigma,
     )
+    disp_unit = displacement_unit_for_target(target_vol)
     print_sweep_metrics(
         metrics,
         io_loss_at_iter=io_loss_at_iter,
         lncc_sigma=lncc_sigma,
+        displacement_unit=disp_unit,
         header_note=metrics_header,
     )
 
@@ -1082,19 +1133,20 @@ def _sweep_one_subject_volume_pkl(
         io_sim=io_sim,
         io_optimizer=io_optimizer,
         axial_slice_idx=viz_axial_index,
-        atlas_note=atlas_note,
     )
     render_sweep_curves(
         metrics=metrics,
         io_loss_at_iter=io_loss_at_iter,
         lncc_sigma=lncc_sigma,
+        displacement_unit=disp_unit,
         save_path=curves_path,
         no_show=no_show,
         subject_path=subject_path,
         io_lr=io_lr,
         io_sim=io_sim,
         io_optimizer=io_optimizer,
-        atlas_note=atlas_note,
+        mode="3D volume",
+        detail=slice_detail,
     )
 
 
