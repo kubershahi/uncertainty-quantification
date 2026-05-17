@@ -49,7 +49,14 @@ export SWEEP_IO_SAVE="${ASSETS_IMAGES}/unigrad-io/sweep_io.png"
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# W&B run data on PVC (not /files/wandb). Login later: wandb login → ~/.netrc under $HOME.
+export WANDB_DIR="${HOME}/wandb"
+mkdir -p "${WANDB_DIR}"
+
 if [[ -f "${VENV_DIR}/bin/activate" ]]; then
   # shellcheck source=/dev/null
   source "${VENV_DIR}/bin/activate"
+  if ! python -c "import wandb" >/dev/null 2>&1; then
+    pip install -q --no-cache-dir wandb
+  fi
 fi

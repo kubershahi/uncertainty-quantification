@@ -29,8 +29,8 @@ pip install --upgrade pip
 echo "Installing PyTorch + torchvision (GPU) from pytorch.org..."
 pip install --no-cache-dir torch torchvision --index-url "https://download.pytorch.org/whl/${CUDA_WHEEL}"
 
-echo "Installing UniGradICON, JupyterLab, ipykernel, …"
-pip install --no-cache-dir unigradicon ipykernel torchio jupyterlab
+echo "Installing UniGradICON, JupyterLab, ipykernel, wandb, …"
+pip install --no-cache-dir unigradicon ipykernel torchio jupyterlab wandb
 
 echo "Registering Jupyter kernel..."
 python -m ipykernel install --user --name=unc --display-name "unc"

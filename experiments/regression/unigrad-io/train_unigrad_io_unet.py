@@ -12,8 +12,17 @@ Layout from ``create_unigrad_io_data.py``:
 Model input (5 channels, ``N×C×D×H×W``): robust-normalized subject + atlas,
 ``phi_pred / phi_scale``. Loss and metrics use ``valid_mask`` only.
 
+Optimizer: AdamW (default ``lr=1e-3``). LR schedule: ``ReduceLROnPlateau`` on val MSE
+(``--lr-scheduler none`` for fixed LR). Early stopping on val MSE (``--early-stop-patience``).
+
+Loss: ``total = masked_mse + smooth_weight * tv_3d(pred)``. ``smooth_weight=0.02`` multiplies
+the TV penalty by 0.02 (not “2% of voxels”); lower → sharper error-map predictions.
+
 Example:
 python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --batch-size 1 --out-dir assets/runs/3d/unigrad-io/error_unet_run1
+
+With Weights & Biases (optional; ``pip install wandb``, then ``wandb login``):
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --out-dir assets/runs/unigrad-io/error_unet_run2 --wandb --wandb-project unigrad-io
 """
 
 from __future__ import annotations
@@ -68,7 +77,8 @@ def load_atlas_valid_mask_dhw(data_root: Path) -> np.ndarray | None:
         raise ValueError(f"{path}: valid_mask must be (D, H, W), got {mask.shape}")
     return mask.astype(np.bool_, copy=False)
 
-DEFAULT_EPOCHS = 15
+DEFAULT_EPOCHS = 25
+DEFAULT_EARLY_STOP_PATIENCE = 10
 
 
 def amp_autocast(enabled: bool):
@@ -427,6 +437,80 @@ def train_epoch(
     return sum_mse / n, sum_smooth / n, sum_total / n
 
 
+def init_wandb(args: argparse.Namespace, meta: dict) -> object | None:
+    if not args.wandb:
+        return None
+    try:
+        import wandb
+    except ImportError as e:
+        raise ImportError("wandb is required for --wandb (pip install wandb)") from e
+
+    run_name = args.wandb_run_name or Path(args.out_dir).name
+    init_kwargs: dict = {
+        "project": args.wandb_project,
+        "name": run_name,
+        "config": meta,
+        "dir": str(Path(args.out_dir).resolve()),
+    }
+    if args.wandb_entity:
+        init_kwargs["entity"] = args.wandb_entity
+    tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()]
+    if tags:
+        init_kwargs["tags"] = tags
+    return wandb.init(**init_kwargs)
+
+
+def log_wandb_epoch(
+    wandb_run: object | None,
+    *,
+    epoch: int,
+    train_mse: float,
+    train_smooth: float,
+    train_total: float,
+    val_mse: float,
+    val_l1: float,
+    lr: float,
+    elapsed_s: float,
+    best_val_mse: float,
+) -> None:
+    if wandb_run is None:
+        return
+    import wandb
+
+    wandb.log(
+        {
+            "epoch": epoch,
+            "train/mse": train_mse,
+            "train/smooth": train_smooth,
+            "train/total": train_total,
+            "val/mse": val_mse,
+            "val/l1": val_l1,
+            "lr": lr,
+            "elapsed_s": elapsed_s,
+            "val/best_mse": best_val_mse,
+        },
+        step=epoch,
+    )
+
+
+def finish_wandb(
+    wandb_run: object | None,
+    *,
+    best_val_mse: float,
+    best_epoch: int,
+    best_checkpoint: Path,
+) -> None:
+    if wandb_run is None:
+        return
+    import wandb
+
+    wandb.run.summary["best_val_mse"] = best_val_mse
+    wandb.run.summary["best_epoch"] = best_epoch
+    if best_checkpoint.is_file():
+        wandb.save(str(best_checkpoint), base_path=str(best_checkpoint.parent))
+    wandb.finish()
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Train 3D U-Net for IO error_map from UniGrad IO npz volumes.",
@@ -460,8 +544,58 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--smooth-weight",
         type=float,
-        default=0.05,
-        help="3D TV on predicted error_map (0 = MSE only).",
+        default=0.02,
+        help="Weight on 3D TV of predicted error_map: loss = MSE + w*TV (0 = MSE only).",
+    )
+    p.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=DEFAULT_EARLY_STOP_PATIENCE,
+        help="Stop if val MSE does not improve for this many epochs (0 = disabled).",
+    )
+    p.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="plateau",
+        choices=["plateau", "none"],
+        help="Reduce LR when val MSE plateaus (default), or fixed LR.",
+    )
+    p.add_argument(
+        "--lr-patience",
+        type=int,
+        default=5,
+        help="Epochs without val improvement before ReduceLROnPlateau cuts LR.",
+    )
+    p.add_argument(
+        "--lr-factor",
+        type=float,
+        default=0.5,
+        help="LR multiply factor when plateau scheduler fires.",
+    )
+    p.add_argument("--min-lr", type=float, default=1e-6, help="Floor for scheduled LR.")
+    p.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Log metrics to Weights & Biases (requires wandb package + login).",
+    )
+    p.add_argument(
+        "--wandb-project",
+        type=str,
+        default="unigrad-io",
+        help="W&B project name (with --wandb).",
+    )
+    p.add_argument("--wandb-entity", type=str, default=None, help="W&B entity / team.")
+    p.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="W&B run name (default: out-dir folder name).",
+    )
+    p.add_argument(
+        "--wandb-tags",
+        type=str,
+        default="",
+        help="Comma-separated W&B tags, e.g. '3d,unet,masked'.",
     )
     p.add_argument("--no-progress", action="store_true")
     return p.parse_args(argv)
@@ -511,6 +645,15 @@ def main(argv: list[str] | None = None) -> int:
 
     model = UNet3D(in_channels=5, base=args.base_channels).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None = None
+    if args.lr_scheduler == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt,
+            mode="min",
+            factor=args.lr_factor,
+            patience=args.lr_patience,
+            min_lr=args.min_lr,
+        )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     meta = {
@@ -536,9 +679,19 @@ def main(argv: list[str] | None = None) -> int:
         "device": str(device),
         "metrics_csv": "metrics.csv",
         "smooth_weight": args.smooth_weight,
+        "optimizer": "AdamW",
+        "lr_scheduler": args.lr_scheduler,
+        "lr_patience": args.lr_patience,
+        "lr_factor": args.lr_factor,
+        "min_lr": args.min_lr,
+        "early_stop_patience": args.early_stop_patience,
+        "wandb": args.wandb,
+        "wandb_project": args.wandb_project if args.wandb else None,
         "show_progress": not args.no_progress,
     }
     (args.out_dir / "run_config.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    wandb_run = init_wandb(args, meta)
 
     metrics_path = args.out_dir / "metrics.csv"
     with open(metrics_path, "w", newline="", encoding="utf-8") as f:
@@ -548,6 +701,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     best_val = float("inf")
+    best_epoch = 0
+    epochs_without_improve = 0
     best_path = args.out_dir / "best_model.pt"
     show_p = not args.no_progress
     t0 = time.time()
@@ -600,17 +755,34 @@ def main(argv: list[str] | None = None) -> int:
             desc=f"val {epoch}/{args.epochs}",
             overall_pbar=overall_pbar,
         )
+        if scheduler is not None:
+            scheduler.step(val_mse)
+        lr_now = float(opt.param_groups[0]["lr"])
         dt = time.time() - t0
         print(
             f"epoch {epoch:03d}/{args.epochs}  "
             f"train_mse={tr_mse:.6f}  train_smooth={tr_smooth:.6f}  train_total={tr_total:.6f}  "
-            f"val_mse={val_mse:.6f}  val_l1={val_l1:.6f}  "
+            f"val_mse={val_mse:.6f}  val_l1={val_l1:.6f}  lr={lr_now:.2e}  "
             f"elapsed={dt:.1f}s"
         )
         with open(metrics_path, "a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([epoch, tr_mse, tr_smooth, tr_total, val_mse, val_l1, dt])
+        log_wandb_epoch(
+            wandb_run,
+            epoch=epoch,
+            train_mse=tr_mse,
+            train_smooth=tr_smooth,
+            train_total=tr_total,
+            val_mse=val_mse,
+            val_l1=val_l1,
+            lr=lr_now,
+            elapsed_s=dt,
+            best_val_mse=min(best_val, val_mse),
+        )
         if val_mse < best_val:
             best_val = val_mse
+            best_epoch = epoch
+            epochs_without_improve = 0
             torch.save(
                 {
                     "model_state": model.state_dict(),
@@ -622,11 +794,31 @@ def main(argv: list[str] | None = None) -> int:
                 best_path,
             )
             print(f"  saved best to {best_path}")
+        else:
+            epochs_without_improve += 1
+
+        if (
+            args.early_stop_patience > 0
+            and epochs_without_improve >= args.early_stop_patience
+        ):
+            print(
+                f"Early stopping: no val MSE improvement for {args.early_stop_patience} "
+                f"epoch(s) (best epoch {best_epoch}, val_mse={best_val:.6f})."
+            )
+            break
 
     if overall_pbar is not None:
         overall_pbar.close()
 
-    print(f"Done. Best val MSE={best_val:.6f} -> {best_path}")
+    finish_wandb(
+        wandb_run,
+        best_val_mse=best_val,
+        best_epoch=best_epoch,
+        best_checkpoint=best_path,
+    )
+    print(
+        f"Done. Best val MSE={best_val:.6f} at epoch {best_epoch} -> {best_path}"
+    )
     print(f"Metrics log: {metrics_path}")
     return 0
 
