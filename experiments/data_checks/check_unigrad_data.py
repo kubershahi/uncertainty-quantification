@@ -9,8 +9,8 @@ Post-generation review for UniGradICON synth fivers (*_fiver.npz).
      **interior** means.
 
 Examples:
-  python data_checks/check_unigrad_data.py --data-dir ./data/IXI_2D_unigrad_synth_fiver/
-  python data_checks/check_unigrad_data.py --data-dir ./data/IXI_2D_unigrad_synth_fiver/ --verbose
+python data_checks/check_unigrad_data.py --data-dir ./data/IXI_2D_unigrad_synth_fiver/
+python data_checks/check_unigrad_data.py --data-dir ./data/IXI_2D_unigrad_synth_fiver/ --verbose
 """
 
 from __future__ import annotations

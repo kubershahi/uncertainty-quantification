@@ -6,8 +6,8 @@ Default selection: three slices with **minimum**, **median**, and **maximum** of
 phi statistic (default: mean ‖φ‖ on the slice). Use ``--selection random`` for random slices.
 
 Examples:
-  python visualize_synth_data.py --split Train --phi-view magnitude --save-path ./assets/images/ixi_synth_minmedmax.png --no-show 
-  python visualize_synth_data.py --selection random --num-samples 5 --seed 0
+python visualize_synth_data.py --split Train --phi-view magnitude --save-path ./assets/images/ixi_synth_minmedmax.png --no-show
+python visualize_synth_data.py --selection random --num-samples 5 --seed 0
 """
 
 from __future__ import annotations

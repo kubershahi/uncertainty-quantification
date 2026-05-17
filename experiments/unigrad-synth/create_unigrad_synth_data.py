@@ -11,9 +11,9 @@ Pass ``--process-all-triplets`` to include failures / legacy archives without th
 normalized coordinates; this script uses (phi - identity) and scales to pixel displacement.
 
 Example usage:
-  python create_unigrad_synth_data.py
-  python create_unigrad_synth_data.py --max-per-split 2 --output-path ./data/IXI_2D_unigrad_synth_fiver/
-  python create_unigrad_synth_data.py --input-path ./data/IXI_2D_synth_trip/ --output-path ./data/IXI_2D_unigrad_synth_fiver/
+python create_unigrad_synth_data.py
+python create_unigrad_synth_data.py --max-per-split 2 --output-path ./data/IXI_2D_unigrad_synth_fiver/
+python create_unigrad_synth_data.py --input-path ./data/IXI_2D_synth_trip/ --output-path ./data/IXI_2D_unigrad_synth_fiver/
 
 """
 
@@ -219,13 +219,13 @@ def run_fiver_generation(
 
 def parse_args():
     examples = """
-        Examples:
-        python create_unigrad_synth_data.py
-        python create_unigrad_synth_data.py --max-per-split 2 --output-path ./data/IXI_2D_unigrad_synth_fiver/
-        python create_unigrad_synth_data.py --process-all-triplets
-        python create_unigrad_synth_data.py --device cpu
-        python create_unigrad_synth_data.py --input-path ./data/IXI_2D_synth_trip/ --output-path ./data/IXI_2D_unigrad_synth_fiver/
-    """.strip()
+Examples:
+python create_unigrad_synth_data.py
+python create_unigrad_synth_data.py --max-per-split 2 --output-path ./data/IXI_2D_unigrad_synth_fiver/
+python create_unigrad_synth_data.py --process-all-triplets
+python create_unigrad_synth_data.py --device cpu
+python create_unigrad_synth_data.py --input-path ./data/IXI_2D_synth_trip/ --output-path ./data/IXI_2D_unigrad_synth_fiver/
+""".strip()
     
     p = argparse.ArgumentParser(
         description="Generate UniGradICON fivers (phi_pred, phi_diff, error_map) from synthetic triplets.",

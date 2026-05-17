@@ -15,9 +15,9 @@ displacements). Regeneration uses higher RandomAffine / RandomElastic ``p`` so b
 almost always apply—avoids re-drawing near-identity φ when replacing excess near-zero samples.
 
 Examples:
-  python modify_synth_data.py --dry-run
-  python modify_synth_data.py --workers 64
-  python modify_synth_data.py --near-zero-keep-frac 0.10 --near-zero-eps 1e-4
+python modify_synth_data.py --dry-run
+python modify_synth_data.py --workers 64
+python modify_synth_data.py --near-zero-keep-frac 0.10 --near-zero-eps 1e-4
 """
 
 from __future__ import annotations

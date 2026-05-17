@@ -6,8 +6,8 @@ Default: pick three files with **min / median / max** of a ranking scalar (defau
 error_map**). Use ``--selection random`` for random files.
 
 Examples:
-  python visualize_unigrad_data.py --split Train --save-path ./assets/images/ixi_unigrad_train_minmedmax.png --no-show --selection random --num-samples 3
-  python visualize_unigrad_data.py --split Train --save-path ./assets/images/ixi_unigrad_train_minmedmax.png --no-show  --rank-by max_error
+python visualize_unigrad_data.py --split Train --save-path ./assets/images/ixi_unigrad_train_minmedmax.png --no-show --selection random --num-samples 3
+python visualize_unigrad_data.py --split Train --save-path ./assets/images/ixi_unigrad_train_minmedmax.png --no-show  --rank-by max_error
 """
 
 from __future__ import annotations
