@@ -22,7 +22,7 @@ Example:
 python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --batch-size 1 --out-dir assets/runs/3d/unigrad-io/error_unet_run1
 
 With Weights & Biases (optional; ``pip install wandb``, then ``wandb login``):
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --out-dir assets/runs/unigrad-io/error_unet_run2 --wandb --wandb-project unigrad-io
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --out-dir assets/runs/unigrad-io/error_unet_run2 --wandb --wandb-project unc-quan
 """
 
 from __future__ import annotations
