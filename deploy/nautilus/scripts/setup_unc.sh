@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CUDA PyTorch + UniGradICON into ${VENV_DIR:-$HOME/venvs/unc}. Example Nautilus: VENV_DIR=/files/venvs/unc bash scripts/setup_unc.sh
-# Vars: CUDA_WHEEL=cu124 (default), FORCE=1 to recreate venv.
+# Vars: CUDA_WHEEL=cu124 (default), FORCE=1 to recreate venv (mv old tree aside, rm in background).
 
 set -euo pipefail
 
@@ -14,9 +14,16 @@ if [[ -f "${VENV_DIR}/bin/activate" && "${FORCE}" != "1" ]]; then
   echo "Existing venv found at ${VENV_DIR}. Reusing it. (Set FORCE=1 to rebuild.)"
 else
   if [[ -d "${VENV_DIR}" ]]; then
-    echo "FORCE=1: removing existing ${VENV_DIR} (large tree on PVC — may take several minutes)..."
-    rm -rf "${VENV_DIR}"
-    echo "Removed ${VENV_DIR}."
+    _venv_parent="$(dirname "${VENV_DIR}")"
+    _venv_name="$(basename "${VENV_DIR}")"
+    _old="${_venv_parent}/${_venv_name}.old.$$"
+    _rm_log_dir="/files/tmp"
+    mkdir -p "${_rm_log_dir}"
+    _rm_log="${_rm_log_dir}/rm-${_venv_name}-$$.log"
+    echo "FORCE=1: moving ${VENV_DIR} -> ${_old}"
+    mv "${VENV_DIR}" "${_old}"
+    nohup rm -rf "${_old}" >"${_rm_log}" 2>&1 &
+    echo "Old venv deleting in background (PID $!, log ${_rm_log}). Continuing with fresh install."
   fi
   echo "Creating venv at ${VENV_DIR} (CUDA wheel: ${CUDA_WHEEL})..."
   python3 -m venv "${VENV_DIR}"

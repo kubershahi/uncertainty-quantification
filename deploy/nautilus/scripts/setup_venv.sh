@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time venv on PVC (persists across pods). Run from unc-dev, unc-heavy, or unc-jupyter.
 #   bash /files/repo/uncertainty-quantification/deploy/nautilus/scripts/setup_venv.sh
-# If venv was built on another image: FORCE=1 bash .../setup_venv.sh
+# Rebuild: FORCE=1 bash .../setup_venv.sh  (mv old venv aside; rm runs in background on PVC)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
