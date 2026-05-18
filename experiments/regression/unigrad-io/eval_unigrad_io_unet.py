@@ -407,8 +407,19 @@ def plot_training_curves_from_csv(
 
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.plot(epochs, train_mse, label="train MSE", color="C0", marker=".", markersize=3)
+    y_for_scale: list[float] = list(train_mse)
     if val_ep_plot.size:
         ax.plot(val_ep_plot, val_mse_plot, label="val MSE", color="C1", marker=".", markersize=3)
+        ax.plot(
+            val_ep_plot,
+            val_l1_plot,
+            label=f"val L1 ({DISPLACEMENT_UNIT})",
+            color="C2",
+            marker=".",
+            markersize=3,
+        )
+        y_for_scale.extend(val_mse_plot.tolist())
+        y_for_scale.extend(val_l1_plot.tolist())
         best_i = int(np.argmin(val_mse_plot))
         ax.axvline(
             val_ep_plot[best_i],
@@ -417,32 +428,19 @@ def plot_training_curves_from_csv(
             linewidth=0.8,
             label=f"best val (ep {val_ep_plot[best_i]})",
         )
-        y_hi = float(np.nanpercentile(np.concatenate([train_mse, val_mse_plot]), 99))
-        if y_hi > 0:
-            ax.set_ylim(0.0, y_hi * 1.05)
     else:
         ax.plot([], [], label="val MSE", color="C1", marker=".", markersize=3)
+        ax.plot([], [], label=f"val L1 ({DISPLACEMENT_UNIT})", color="C2", marker=".", markersize=3)
+
+    y_hi = float(np.nanpercentile(np.asarray(y_for_scale, dtype=float), 99))
+    if y_hi > 0:
+        ax.set_ylim(0.0, y_hi * 1.05)
+
     ax.set_xlabel("epoch")
-    ax.set_ylabel("volume MSE")
+    ax.set_ylabel(f"volume loss (MSE; L1 in {DISPLACEMENT_UNIT})")
     ax.set_title(format_training_curves_title(run_label), fontsize=11)
     ax.grid(True, alpha=0.3)
-
-    ax_r = ax.twinx()
-    if val_ep_plot.size:
-        ax_r.plot(
-            val_ep_plot,
-            val_l1_plot,
-            label=f"val L1 ({DISPLACEMENT_UNIT})",
-            color="C2",
-            marker=".",
-            markersize=3,
-        )
-    ax_r.set_ylabel(f"L1 ({DISPLACEMENT_UNIT})")
-    ax_r.tick_params(axis="y", labelcolor="C2")
-
-    h1, l1 = ax.get_legend_handles_labels()
-    h2, l2 = ax_r.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=9)
+    ax.legend(loc="upper right", fontsize=9)
     fig.tight_layout()
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
