@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
-Evaluate a trained 3D error-map U-Net on UniGrad IO data from ``create_unigrad_io_data.py``.
+Evaluate a trained 3D IO error-map U-Net on UniGrad IO data from ``create_unigrad_io_data.py``.
 
-Expects ``<eval-dir>/atlas_valid_mask.npz`` and split ``*.npz`` with
-``source``, ``phi_pred``, ``phi_predio``, ``error_map``. Metrics and ranking use
-``valid_mask``. Writes under ``--run-path``: ``training_curves.png``,
-``test_metrics.json``, ``test_error_pred_random.png``, ``test_error_pred_easy_normal_hard.png``.
+Default writes under ``--run-path``:
+
+- ``training_curves.png`` (from ``metrics.csv``)
+- ``test_metrics.json``
+- ``test_error_pred_random.png`` — random Test subjects, 5 columns per row (see below)
+- ``test_error_pred_easy_normal_hard.png`` — lowest / median / highest mean ``error_map`` in atlas mask
+
+Each QC figure is one axial slice (default z = depth/4) with shared color scales across rows:
+subject source, atlas target, |φ_pred|, GT error map, U-Net predicted error map (voxels).
+
+Use ``--curves-only`` to skip Test eval (no GPU). Checkpoints from ``torch.compile`` training load via ``_orig_mod`` key fix.
 
 Example:
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run1 --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run2 --eval-dir datasets/IXI_unigrad_io --no-show
 """
 
 from __future__ import annotations
@@ -184,13 +191,23 @@ def infer_slices(
     )
 
 
-def format_main_title(arrangement: str) -> str:
+def format_run_caption(run_label: str) -> str:
+    return f"({run_label})"
+
+
+def format_test_qc_title(arrangement: str, run_label: str) -> str:
     if arrangement == "random":
-        return f"{PRODUCT_NAME} · Test samples | random selection"
-    return f"{PRODUCT_NAME} · Test samples | ranked by {RANK_METRIC_LABEL}"
+        line1 = f"{PRODUCT_NAME} Test QC | random selection"
+    else:
+        line1 = f"{PRODUCT_NAME} Test QC | ranked by {RANK_METRIC_LABEL}"
+    return f"{line1}\n{format_run_caption(run_label)}"
 
 
-def format_subtitle(z: int, depth: int, nrows: int) -> str:
+def format_training_curves_title(run_label: str) -> str:
+    return f"{PRODUCT_NAME} | Train vs Val\n{format_run_caption(run_label)}"
+
+
+def format_slice_caption(z: int, depth: int, nrows: int) -> str:
     line = f"axial slice z = {z} / {depth - 1}"
     if nrows > 1:
         line += f"  ·  {nrows} subjects"
@@ -234,6 +251,7 @@ def plot_samples_grid(
     no_show: bool,
     err_percentile: float,
     arrangement: str,
+    run_label: str,
     *,
     show_progress: bool,
     slice_z: int | None,
@@ -296,9 +314,11 @@ def plot_samples_grid(
             set_column_headers(axes[row])
         add_row_side_label(axes[row, 0], format_row_side_label(fp, tag, mean_err))
 
-    main_title = format_main_title(arrangement)
     assert z_show is not None and depth is not None
-    suptitle = f"{main_title}\n{format_subtitle(z_show, depth, nrows)}"
+    suptitle = (
+        f"{format_test_qc_title(arrangement, run_label)}\n"
+        f"{format_slice_caption(z_show, depth, nrows)}"
+    )
 
     left = 0.11 if nrows > 1 else 0.08
     fig.tight_layout(rect=(left, 0.02, 1, 0.97), pad=0.35, h_pad=0.5, w_pad=0.15)
@@ -347,7 +367,7 @@ def plot_training_curves_from_csv(
     ax.axvline(epochs[best_i], color="0.5", linestyle="--", linewidth=0.8, label=f"best val (ep {epochs[best_i]})")
     ax.set_xlabel("epoch")
     ax.set_ylabel("volume MSE")
-    ax.set_title(f"Training vs validation ({run_label})")
+    ax.set_title(format_training_curves_title(run_label), fontsize=11)
     ax.grid(True, alpha=0.3)
 
     ax_r = ax.twinx()
@@ -372,7 +392,7 @@ def plot_training_curves_from_csv(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Evaluate 3D error-map U-Net on UniGrad IO npz volumes.",
+        description="Training curves + Test metrics and QC figures for IO error-map U-Net.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -395,6 +415,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-progress", action="store_true")
     p.add_argument("--metrics-csv", type=Path, default=None)
     p.add_argument("--no-training-curves", action="store_true")
+    p.add_argument(
+        "--curves-only",
+        action="store_true",
+        help="Only plot training_curves.png; skip Test metrics and figures.",
+    )
     return p.parse_args(argv)
 
 
@@ -410,23 +435,28 @@ def main(argv: list[str] | None = None) -> int:
     run_path.mkdir(parents=True, exist_ok=True)
     show_p = not args.no_progress
 
-    checkpoint_path = run_path / CHECKPOINT_FILENAME
-    if not checkpoint_path.is_file():
-        print(f"ERROR: checkpoint not found: {checkpoint_path}", file=sys.stderr)
-        return 2
-
     metrics_csv = Path(args.metrics_csv) if args.metrics_csv else run_path / "metrics.csv"
 
     if not args.no_training_curves:
         if metrics_csv.is_file():
-            plot_training_curves_from_csv(
+            if not plot_training_curves_from_csv(
                 metrics_csv,
                 run_path / "training_curves.png",
                 args.no_show,
                 run_path.name,
-            )
+            ):
+                print(f"ERROR: failed to plot from {metrics_csv}", file=sys.stderr)
+                return 2
         else:
-            print(f"NOTE: no metrics.csv at {metrics_csv}", file=sys.stderr)
+            print(f"WARNING: no metrics.csv at {metrics_csv}", file=sys.stderr)
+
+    if args.curves_only:
+        return 0
+
+    checkpoint_path = run_path / CHECKPOINT_FILENAME
+    if not checkpoint_path.is_file():
+        print(f"ERROR: checkpoint not found: {checkpoint_path}", file=sys.stderr)
+        return 2
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     try:
@@ -435,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
         ckpt = torch.load(checkpoint_path, map_location=device)
     cfg = load_train_config(ckpt, args.base_channels)
     model = build_model(cfg).to(device)
-    model.load_state_dict(ckpt["model_state"])
+    teu.load_checkpoint_state_dict(model, ckpt["model_state"])
     model.eval()
 
     test_mse, test_l1, n_test = evaluate_split(
@@ -494,6 +524,7 @@ def main(argv: list[str] | None = None) -> int:
             args.no_show,
             args.err_percentile,
             "random",
+            run_path.name,
             show_progress=show_p,
             slice_z=args.slice_index,
             phi_percentile=args.phi_percentile,
@@ -511,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
         args.no_show,
         args.err_percentile,
         "easy_normal_hard",
+        run_path.name,
         show_progress=show_p,
         slice_z=args.slice_index,
         phi_percentile=args.phi_percentile,

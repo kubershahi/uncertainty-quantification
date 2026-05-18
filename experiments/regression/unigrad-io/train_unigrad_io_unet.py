@@ -358,6 +358,27 @@ def collate_batch(samples: list[dict]) -> dict:
     }
 
 
+def eager_module(model: nn.Module) -> nn.Module:
+    """Underlying module when ``torch.compile`` wrapped (``_orig_mod``)."""
+    return getattr(model, "_orig_mod", model)
+
+
+def checkpoint_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Save/load-friendly weights (no ``_orig_mod.`` prefix from ``torch.compile``)."""
+    return eager_module(model).state_dict()
+
+
+def load_checkpoint_state_dict(model: nn.Module, state_dict: dict) -> None:
+    """Load weights from ``best_model.pt`` (handles legacy ``_orig_mod.*`` keys)."""
+    fixed: dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        if key.startswith("_orig_mod."):
+            fixed[key.removeprefix("_orig_mod.")] = value
+        else:
+            fixed[key] = value
+    eager_module(model).load_state_dict(fixed, strict=True)
+
+
 def make_dataloader(
     ds: Dataset,
     *,
@@ -874,10 +895,9 @@ def main(argv: list[str] | None = None) -> int:
                 best_val = val_mse
                 best_epoch = epoch
                 epochs_without_improve = 0
-                state = model.state_dict()
                 torch.save(
                     {
-                        "model_state": state,
+                        "model_state": checkpoint_state_dict(model),
                         "epoch": epoch,
                         "val_mse": val_mse,
                         "val_l1": val_l1,
