@@ -15,8 +15,9 @@ Model input (5 channels, ``N×C×D×H×W``): robust-normalized subject + atlas,
 Optimizer: AdamW (default ``lr=1e-3``). LR schedule: ``ReduceLROnPlateau`` on val MSE
 (``--lr-scheduler none`` for fixed LR). Early stopping on val MSE (``--early-stop-patience``).
 
-Loss: ``total = masked_mse + smooth_weight * tv_3d(pred)``. ``smooth_weight=0.02`` multiplies
-the TV penalty by 0.02 (not “2% of voxels”); lower → sharper error-map predictions.
+Loss: ``total = masked_mse + smooth_weight * tv_3d(pred)``. Default ``smooth_weight=0`` (MSE only).
+Optional TV uses the atlas mask so differences are penalised mainly at mask transitions (not
+interior foreground edges); try ``--smooth-weight 0.02`` if boundary artefacts dominate.
 
 Speed (full volumes are expensive; default is one 3D U-Net step per subject per epoch):
 
@@ -596,7 +597,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--val-every",
         type=int,
-        default=3,
+        default=1,
         help="Run validation every N epochs (1 = every epoch).",
     )
     p.add_argument(
@@ -626,8 +627,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--smooth-weight",
         type=float,
-        default=0.02,
-        help="Weight on 3D TV of predicted error_map: loss = MSE + w*TV (0 = MSE only).",
+        default=0.0,
+        help="Weight on masked 3D TV of pred (0 = MSE only; >0 penalises |Δpred| at mask edges).",
     )
     p.add_argument(
         "--early-stop-patience",

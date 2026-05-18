@@ -45,6 +45,10 @@ datasets/**
 # Logs
 *.log
 
+# Training run artifacts (W&B syncs best_model.pt; keep metrics/plots in git if needed)
+**/best_model.pt
+**/wandb/
+
 # Cursor artifacts
 .cursor/
 .cursorrules
