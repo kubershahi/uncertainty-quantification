@@ -18,6 +18,16 @@ Optimizer: AdamW (default ``lr=1e-3``). LR schedule: ``ReduceLROnPlateau`` on va
 Loss: ``total = masked_mse + smooth_weight * tv_3d(pred)``. ``smooth_weight=0.02`` multiplies
 the TV penalty by 0.02 (not “2% of voxels”); lower → sharper error-map predictions.
 
+Speed (full volumes are expensive; default is one 3D U-Net step per subject per epoch):
+
+- ``--num-workers 4`` — parallel NPZ load + normalize (default on CUDA).
+- Cached normalized atlas (not recomputed every subject).
+- ``--val-every 5`` — skip most val passes (~12% of epoch time at 58 val / 461 steps).
+- ``--compile`` — ``torch.compile`` when supported.
+- Try ``--batch-size 2`` if GPU memory allows (same H×W×D per volume).
+
+True multi-GPU needs DDP (not implemented); one epoch ≈ 403 train + 58 val forward passes at batch 1.
+
 Example:
 python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --batch-size 1 --out-dir assets/runs/3d/unigrad-io/error_unet_run1
 
@@ -167,6 +177,8 @@ class UniGradIOErrorDataset(Dataset):
                 f"Missing valid_mask in {atlas_npz}. "
                 "Regenerate data with create_unigrad_io_data.py."
             )
+        self._atlas_target_dhw = volume_hw_d_to_dhw(self.atlas_target_hw_d)
+        self._atlas_target_n = self._norm_volume(self._atlas_target_dhw)
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -188,13 +200,9 @@ class UniGradIOErrorDataset(Dataset):
             source = volume_hw_d_to_dhw(np.asarray(data["source"]))
             if "target" in data.files:
                 target = volume_hw_d_to_dhw(np.asarray(data["target"]))
-            elif self.atlas_target_hw_d is not None:
-                target = volume_hw_d_to_dhw(self.atlas_target_hw_d)
+                target_n = self._norm_volume(target)
             else:
-                raise KeyError(
-                    f"{path.name}: no 'target' in npz and no shared atlas under "
-                    f"{path.parent.parent / ATLAS_MASK_FILENAME}"
-                )
+                target_n = self._atlas_target_n
             phi_pred = np.asarray(data["phi_pred"], dtype=np.float32)
             err = np.asarray(data["error_map"], dtype=np.float32)
 
@@ -209,7 +217,6 @@ class UniGradIOErrorDataset(Dataset):
             )
 
         source_n = self._norm_volume(source)
-        target_n = self._norm_volume(target)
         phi_n = phi_pred / self.phi_scale
 
         x = np.concatenate(
@@ -349,6 +356,32 @@ def collate_batch(samples: list[dict]) -> dict:
         "mask": torch.stack([s["mask"] for s in samples], dim=0),
         "path": [s["path"] for s in samples],
     }
+
+
+def make_dataloader(
+    ds: Dataset,
+    *,
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+    pin_memory: bool,
+) -> DataLoader:
+    kw: dict = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "collate_fn": collate_batch,
+    }
+    if num_workers > 0:
+        kw["persistent_workers"] = True
+        kw["prefetch_factor"] = 2
+    return DataLoader(ds, **kw)
+
+
+def subset_dataset_paths(ds: UniGradIOErrorDataset, max_files: int | None) -> None:
+    if max_files is not None and max_files > 0 and max_files < len(ds.paths):
+        ds.paths = ds.paths[: int(max_files)]
 
 
 @torch.no_grad()
@@ -533,7 +566,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--image-norm", type=str, default="robust", choices=["none", "robust"])
     p.add_argument("--quantile-high", type=float, default=0.99)
     p.add_argument("--phi-scale", type=float, default=64.0)
-    p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument(
+        "--num-workers",
+        type=int,
+        default=-1,
+        help="DataLoader workers (-1 = 4 on CUDA, 0 on CPU).",
+    )
+    p.add_argument(
+        "--val-every",
+        type=int,
+        default=1,
+        help="Run validation every N epochs (1 = every epoch).",
+    )
+    p.add_argument(
+        "--max-train-files",
+        type=int,
+        default=None,
+        help="Cap train subjects (debug / smoke).",
+    )
+    p.add_argument(
+        "--max-val-files",
+        type=int,
+        default=None,
+        help="Cap val subjects (debug / smoke).",
+    )
+    p.add_argument(
+        "--compile",
+        action="store_true",
+        help="torch.compile(UNet3D) when supported (PyTorch 2+).",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--out-dir",
@@ -610,6 +671,12 @@ def main(argv: list[str] | None = None) -> int:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda" and not args.no_amp
     scaler = make_grad_scaler(use_amp)
+    if args.num_workers < 0:
+        args.num_workers = 4 if device.type == "cuda" else 0
+    if args.val_every < 1:
+        raise ValueError("--val-every must be >= 1")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
 
     train_ds = UniGradIOErrorDataset(
         args.data_dir,
@@ -625,25 +692,32 @@ def main(argv: list[str] | None = None) -> int:
         quantile_high=args.quantile_high,
         phi_scale=args.phi_scale,
     )
+    subset_dataset_paths(train_ds, args.max_train_files)
+    subset_dataset_paths(val_ds, args.max_val_files)
 
-    train_loader = DataLoader(
+    pin = device.type == "cuda"
+    train_loader = make_dataloader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-        collate_fn=collate_batch,
+        pin_memory=pin,
     )
-    val_loader = DataLoader(
+    val_loader = make_dataloader(
         val_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-        collate_fn=collate_batch,
+        pin_memory=pin,
     )
 
     model = UNet3D(in_channels=5, base=args.base_channels).to(device)
+    if args.compile:
+        try:
+            model = torch.compile(model)  # type: ignore[assignment]
+            print("Using torch.compile(UNet3D)")
+        except Exception as exc:
+            print(f"WARNING: torch.compile failed ({exc}); using eager mode.", file=sys.stderr)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None = None
     if args.lr_scheduler == "plateau":
@@ -685,6 +759,11 @@ def main(argv: list[str] | None = None) -> int:
         "lr_factor": args.lr_factor,
         "min_lr": args.min_lr,
         "early_stop_patience": args.early_stop_patience,
+        "val_every": args.val_every,
+        "num_workers": args.num_workers,
+        "compile": args.compile,
+        "max_train_files": args.max_train_files,
+        "max_val_files": args.max_val_files,
         "wandb": args.wandb,
         "wandb_project": args.wandb_project if args.wandb else None,
         "show_progress": not args.no_progress,
@@ -703,11 +782,15 @@ def main(argv: list[str] | None = None) -> int:
     best_val = float("inf")
     best_epoch = 0
     epochs_without_improve = 0
+    last_val_mse = float("inf")
+    last_val_l1 = float("nan")
     best_path = args.out_dir / "best_model.pt"
     show_p = not args.no_progress
     t0 = time.time()
-    steps_per_epoch = len(train_loader) + len(val_loader)
-    total_steps = args.epochs * steps_per_epoch
+    train_steps = len(train_loader)
+    val_steps = len(val_loader)
+    val_epochs = (args.epochs + args.val_every - 1) // args.val_every
+    total_steps = args.epochs * train_steps + val_epochs * val_steps
 
     overall_pbar: tqdm | None = None
     if show_p:
@@ -746,16 +829,23 @@ def main(argv: list[str] | None = None) -> int:
             total_epochs=args.epochs,
             overall_pbar=overall_pbar,
         )
-        val_mse, val_l1 = evaluate(
-            model,
-            val_loader,
-            device,
-            use_amp=use_amp,
-            show_progress=show_p,
-            desc=f"val {epoch}/{args.epochs}",
-            overall_pbar=overall_pbar,
-        )
-        if scheduler is not None:
+        run_val = (epoch % args.val_every == 0) or (epoch == args.epochs)
+        if run_val:
+            val_mse, val_l1 = evaluate(
+                model,
+                val_loader,
+                device,
+                use_amp=use_amp,
+                show_progress=show_p,
+                desc=f"val {epoch}/{args.epochs}",
+                overall_pbar=overall_pbar,
+            )
+            last_val_mse, last_val_l1 = val_mse, val_l1
+        else:
+            val_mse, val_l1 = last_val_mse, last_val_l1
+            if show_p:
+                print(f"  (skipped val; last val_mse={val_mse:.6f})")
+        if scheduler is not None and run_val:
             scheduler.step(val_mse)
         lr_now = float(opt.param_groups[0]["lr"])
         dt = time.time() - t0
@@ -779,26 +869,29 @@ def main(argv: list[str] | None = None) -> int:
             elapsed_s=dt,
             best_val_mse=min(best_val, val_mse),
         )
-        if val_mse < best_val:
-            best_val = val_mse
-            best_epoch = epoch
-            epochs_without_improve = 0
-            torch.save(
-                {
-                    "model_state": model.state_dict(),
-                    "epoch": epoch,
-                    "val_mse": val_mse,
-                    "val_l1": val_l1,
-                    "config": meta,
-                },
-                best_path,
-            )
-            print(f"  saved best to {best_path}")
-        else:
-            epochs_without_improve += 1
+        if run_val:
+            if val_mse < best_val:
+                best_val = val_mse
+                best_epoch = epoch
+                epochs_without_improve = 0
+                state = model.state_dict()
+                torch.save(
+                    {
+                        "model_state": state,
+                        "epoch": epoch,
+                        "val_mse": val_mse,
+                        "val_l1": val_l1,
+                        "config": meta,
+                    },
+                    best_path,
+                )
+                print(f"  saved best to {best_path}")
+            else:
+                epochs_without_improve += 1
 
         if (
-            args.early_stop_patience > 0
+            run_val
+            and args.early_stop_patience > 0
             and epochs_without_improve >= args.early_stop_patience
         ):
             print(
