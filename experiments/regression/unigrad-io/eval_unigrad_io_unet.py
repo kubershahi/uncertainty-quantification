@@ -15,7 +15,11 @@ subject source, atlas target, |φ_pred|, GT error map, U-Net predicted error map
 Use ``--curves-only`` to skip Test eval (no GPU). Checkpoints from ``torch.compile`` training load via ``_orig_mod`` key fix.
 
 Example:
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run2 --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run1 --eval-dir datasets/IXI_unigrad_io --no-show
+
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run1 --eval-dir datasets/IXI_unigrad_io --curves-only --no-show
+
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run1 --eval-dir datasets/IXI_unigrad_io --curves-only --no-show --val-plot-min-epoch 5
 """
 
 from __future__ import annotations
@@ -336,11 +340,37 @@ def plot_samples_grid(
         plt.show()
 
 
+def resolve_val_plot_min_epoch(
+    epochs: list[int],
+    run_path: Path,
+    *,
+    val_plot_min_epoch: int | None,
+    val_plot_min_frac: float,
+) -> int:
+    if val_plot_min_epoch is not None and val_plot_min_epoch > 0:
+        return min(val_plot_min_epoch, max(epochs) if epochs else 1)
+    cfg_path = run_path / "run_config.json"
+    if cfg_path.is_file():
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if cfg.get("val_start_epoch"):
+                return min(int(cfg["val_start_epoch"]), max(epochs) if epochs else 1)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    if val_plot_min_frac > 0.0 and epochs:
+        return min(max(1, int(np.ceil(val_plot_min_frac * max(epochs)))), max(epochs))
+    return 1
+
+
 def plot_training_curves_from_csv(
     metrics_csv: Path,
     save_path: Path | None,
     no_show: bool,
     run_label: str,
+    *,
+    run_path: Path | None = None,
+    val_plot_min_epoch: int | None = None,
+    val_plot_min_frac: float = 0.1,
 ) -> bool:
     if not metrics_csv.is_file():
         return False
@@ -360,18 +390,53 @@ def plot_training_curves_from_csv(
     if not epochs:
         return False
 
+    plot_root = run_path if run_path is not None else (metrics_csv.parent if metrics_csv else Path("."))
+    vmin_ep = resolve_val_plot_min_epoch(
+        epochs,
+        plot_root,
+        val_plot_min_epoch=val_plot_min_epoch,
+        val_plot_min_frac=val_plot_min_frac,
+    )
+    ep_arr = np.asarray(epochs, dtype=int)
+    val_mse_arr = np.asarray(val_mse, dtype=float)
+    val_l1_arr = np.asarray(val_l1, dtype=float)
+    val_mask = (ep_arr >= vmin_ep) & np.isfinite(val_mse_arr)
+    val_ep_plot = ep_arr[val_mask]
+    val_mse_plot = val_mse_arr[val_mask]
+    val_l1_plot = val_l1_arr[val_mask]
+
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.plot(epochs, train_mse, label="train MSE", color="C0", marker=".", markersize=3)
-    ax.plot(epochs, val_mse, label="val MSE", color="C1", marker=".", markersize=3)
-    best_i = int(np.argmin(np.array(val_mse)))
-    ax.axvline(epochs[best_i], color="0.5", linestyle="--", linewidth=0.8, label=f"best val (ep {epochs[best_i]})")
+    if val_ep_plot.size:
+        ax.plot(val_ep_plot, val_mse_plot, label="val MSE", color="C1", marker=".", markersize=3)
+        best_i = int(np.argmin(val_mse_plot))
+        ax.axvline(
+            val_ep_plot[best_i],
+            color="0.5",
+            linestyle="--",
+            linewidth=0.8,
+            label=f"best val (ep {val_ep_plot[best_i]})",
+        )
+        y_hi = float(np.nanpercentile(np.concatenate([train_mse, val_mse_plot]), 99))
+        if y_hi > 0:
+            ax.set_ylim(0.0, y_hi * 1.05)
+    else:
+        ax.plot([], [], label="val MSE", color="C1", marker=".", markersize=3)
     ax.set_xlabel("epoch")
     ax.set_ylabel("volume MSE")
     ax.set_title(format_training_curves_title(run_label), fontsize=11)
     ax.grid(True, alpha=0.3)
 
     ax_r = ax.twinx()
-    ax_r.plot(epochs, val_l1, label=f"val L1 ({DISPLACEMENT_UNIT})", color="C2", marker=".", markersize=3)
+    if val_ep_plot.size:
+        ax_r.plot(
+            val_ep_plot,
+            val_l1_plot,
+            label=f"val L1 ({DISPLACEMENT_UNIT})",
+            color="C2",
+            marker=".",
+            markersize=3,
+        )
     ax_r.set_ylabel(f"L1 ({DISPLACEMENT_UNIT})")
     ax_r.tick_params(axis="y", labelcolor="C2")
 
@@ -420,6 +485,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Only plot training_curves.png; skip Test metrics and figures.",
     )
+    p.add_argument(
+        "--val-plot-min-epoch",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Plot val curves only from epoch N (default: run_config val_start_epoch or --val-plot-min-frac).",
+    )
+    p.add_argument(
+        "--val-plot-min-frac",
+        type=float,
+        default=0.1,
+        help="If val plot min epoch unset: hide val before ceil(frac * epochs) (0 = show all).",
+    )
     return p.parse_args(argv)
 
 
@@ -444,6 +522,9 @@ def main(argv: list[str] | None = None) -> int:
                 run_path / "training_curves.png",
                 args.no_show,
                 run_path.name,
+                run_path=run_path,
+                val_plot_min_epoch=args.val_plot_min_epoch,
+                val_plot_min_frac=args.val_plot_min_frac,
             ):
                 print(f"ERROR: failed to plot from {metrics_csv}", file=sys.stderr)
                 return 2
