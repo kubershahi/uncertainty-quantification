@@ -24,6 +24,7 @@ Speed (full volumes are expensive; default is one 3D U-Net step per subject per 
 - ``--num-workers 4`` — parallel NPZ load + normalize (default on CUDA).
 - Cached normalized atlas (not recomputed every subject).
 - ``--val-every 5`` — skip most val passes (~12% of epoch time at 58 val / 461 steps).
+- ``--val-start-frac 0.1`` — first validation at epoch ``ceil(0.1 * epochs)`` (avoids early unstable val spikes on curves).
 - ``--compile`` — ``torch.compile`` when supported.
 - Try ``--batch-size 2`` if GPU memory allows (same H×W×D per volume).
 
@@ -33,7 +34,7 @@ Example:
 python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --batch-size 1 --out-dir assets/runs/3d/unigrad-io/error_unet_run1
 
 With Weights & Biases (optional; ``pip install wandb``, then ``wandb login``):
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --out-dir assets/runs/unigrad-io/error_unet_run2 --wandb --wandb-project unc-quan
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --out-dir assets/runs/unigrad-io/error_unet_run3 --epoch 50  --num-workers 4  --compile --wandb --wandb-project unc-quan --wandb-run-name unigradio_unet_run3
 """
 
 from __future__ import annotations
@@ -60,6 +61,30 @@ SUBJECT_NPZ_KEYS = frozenset({"source", "phi_pred", "phi_predio", "error_map"})
 
 def default_slice_index(depth: int) -> int:
     return depth // 2
+
+
+def resolve_val_start_epoch(
+    epochs: int,
+    *,
+    val_start_epoch: int | None = None,
+    val_start_frac: float = 0.0,
+) -> int:
+    """First epoch (1-based) at which validation, LR schedule, and best checkpoint apply."""
+    if val_start_epoch is not None and val_start_epoch > 0:
+        return min(int(val_start_epoch), epochs)
+    if val_start_frac > 0.0:
+        return min(max(1, int(np.ceil(val_start_frac * epochs))), epochs)
+    return 1
+
+
+def count_val_passes(total_epochs: int, val_every: int, val_start_epoch: int) -> int:
+    n = 0
+    for e in range(1, total_epochs + 1):
+        if e < val_start_epoch:
+            continue
+        if (e % val_every == 0) or (e == total_epochs):
+            n += 1
+    return n
 
 
 def load_atlas_target_hw_d(data_root: Path) -> np.ndarray | None:
@@ -601,6 +626,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Run validation every N epochs (1 = every epoch).",
     )
     p.add_argument(
+        "--val-start-epoch",
+        type=int,
+        default=None,
+        metavar="N",
+        help="First epoch to run val / LR schedule / best checkpoint (overrides --val-start-frac).",
+    )
+    p.add_argument(
+        "--val-start-frac",
+        type=float,
+        default=0.1,
+        help="If --val-start-epoch unset: first val at ceil(frac * epochs). 0 = epoch 1.",
+    )
+    p.add_argument(
         "--max-train-files",
         type=int,
         default=None,
@@ -697,6 +735,13 @@ def main(argv: list[str] | None = None) -> int:
         args.num_workers = 4 if device.type == "cuda" else 0
     if args.val_every < 1:
         raise ValueError("--val-every must be >= 1")
+    if args.val_start_frac < 0.0:
+        raise ValueError("--val-start-frac must be >= 0")
+    val_start_epoch = resolve_val_start_epoch(
+        args.epochs,
+        val_start_epoch=args.val_start_epoch,
+        val_start_frac=args.val_start_frac,
+    )
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
 
@@ -782,6 +827,9 @@ def main(argv: list[str] | None = None) -> int:
         "min_lr": args.min_lr,
         "early_stop_patience": args.early_stop_patience,
         "val_every": args.val_every,
+        "val_start_epoch": val_start_epoch,
+        "val_start_frac": args.val_start_frac,
+        "val_start_epoch_arg": args.val_start_epoch,
         "num_workers": args.num_workers,
         "compile": args.compile,
         "max_train_files": args.max_train_files,
@@ -811,8 +859,13 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.time()
     train_steps = len(train_loader)
     val_steps = len(val_loader)
-    val_epochs = (args.epochs + args.val_every - 1) // args.val_every
+    val_epochs = count_val_passes(args.epochs, args.val_every, val_start_epoch)
     total_steps = args.epochs * train_steps + val_epochs * val_steps
+    if val_start_epoch > 1:
+        print(
+            f"Validation starts at epoch {val_start_epoch} "
+            f"(epochs 1–{val_start_epoch - 1}: train only; val columns logged as nan)."
+        )
 
     overall_pbar: tqdm | None = None
     if show_p:
@@ -851,7 +904,8 @@ def main(argv: list[str] | None = None) -> int:
             total_epochs=args.epochs,
             overall_pbar=overall_pbar,
         )
-        run_val = (epoch % args.val_every == 0) or (epoch == args.epochs)
+        want_val = (epoch % args.val_every == 0) or (epoch == args.epochs)
+        run_val = want_val and (epoch >= val_start_epoch)
         if run_val:
             val_mse, val_l1 = evaluate(
                 model,
@@ -863,6 +917,10 @@ def main(argv: list[str] | None = None) -> int:
                 overall_pbar=overall_pbar,
             )
             last_val_mse, last_val_l1 = val_mse, val_l1
+        elif epoch < val_start_epoch:
+            val_mse, val_l1 = float("nan"), float("nan")
+            if show_p:
+                print(f"  (warmup: no val before epoch {val_start_epoch})")
         else:
             val_mse, val_l1 = last_val_mse, last_val_l1
             if show_p:
@@ -889,7 +947,7 @@ def main(argv: list[str] | None = None) -> int:
             val_l1=val_l1,
             lr=lr_now,
             elapsed_s=dt,
-            best_val_mse=min(best_val, val_mse),
+            best_val_mse=best_val if np.isnan(val_mse) else min(best_val, val_mse),
         )
         if run_val:
             if val_mse < best_val:
