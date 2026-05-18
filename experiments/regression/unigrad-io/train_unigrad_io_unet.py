@@ -559,7 +559,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--train-split", type=str, default="Train")
     p.add_argument("--val-split", type=str, default="Val")
     p.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
-    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-5)
     p.add_argument("--base-channels", type=int, default=32)
@@ -575,7 +575,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--val-every",
         type=int,
-        default=1,
+        default=3,
         help="Run validation every N epochs (1 = every epoch).",
     )
     p.add_argument(
