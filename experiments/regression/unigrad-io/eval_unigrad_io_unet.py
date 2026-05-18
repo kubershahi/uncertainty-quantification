@@ -432,9 +432,15 @@ def plot_training_curves_from_csv(
         ax.plot([], [], label="val MSE", color="C1", marker=".", markersize=3)
         ax.plot([], [], label=f"val L1 ({DISPLACEMENT_UNIT})", color="C2", marker=".", markersize=3)
 
-    y_hi = float(np.nanpercentile(np.asarray(y_for_scale, dtype=float), 99))
-    if y_hi > 0:
-        ax.set_ylim(0.0, y_hi * 1.05)
+    y_arr = np.asarray(y_for_scale, dtype=float)
+    y_arr = y_arr[np.isfinite(y_arr)]
+    if y_arr.size:
+        y_lo = float(np.nanpercentile(y_arr, 1))
+        y_hi = float(np.nanpercentile(y_arr, 99))
+        if y_hi <= y_lo:
+            y_lo, y_hi = float(np.min(y_arr)), float(np.max(y_arr))
+        pad = max((y_hi - y_lo) * 0.08, 1e-6)
+        ax.set_ylim(y_lo - pad, y_hi + pad)
 
     ax.set_xlabel("epoch")
     ax.set_ylabel(f"volume loss (MSE; L1 in {DISPLACEMENT_UNIT})")
