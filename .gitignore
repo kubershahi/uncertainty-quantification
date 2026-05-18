@@ -67,3 +67,6 @@ deploy/nautilus/local/
 
 # Commands
 commands.sh
+
+# Documentation
+docs/unigrad-io-error-unet-next-steps.md
