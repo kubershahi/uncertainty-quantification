@@ -1,122 +1,198 @@
-# UniGradICON IO Sweep — experiment notes
+# UniGrad IO experiment — data, error-map U-Net, and runs
 
-How to read the outputs of `experiments/unigrad-io/sweep_io_iterations.py`, the
-config it runs under, and the recipe for picking a non-overfitting IO
-iteration count for the downstream `error_map` U-Net.
+End-to-end notes for **3D UniGrad ICON instance optimization (IO)** on IXI, building
+`error_map` training data, and training a **3D U-Net** to predict per-voxel IO error
+magnitude. IO iteration sweeps are documented briefly at the end.
 
-## What the experiment does
+Artifact roots (this repo):
 
-For each chosen subject, run a single instance-optimization (IO) trajectory of
-UniGradICON against the fixed atlas slice (`atlas_slice_111.npy`) and snapshot
-the displacement field `phi` at every iteration count given in
-`--checkpoints`. The sweep gives us a way to *visualise* how `phi`, the warped
-image, and the downstream regression target evolve with IO budget — without
-having to restart Adam for each iteration count separately.
+| Role | Path |
+| --- | --- |
+| IO NPZ dataset | `datasets/IXI_unigrad_io/` |
+| Train / eval scripts | `experiments/regression/unigrad-io/` |
+| Run outputs | `assets/runs/unigrad-io/error_unet_run{N}/` |
+| Sweep figures | `assets/images/unigrad-io/3d/` |
 
-For each subject we emit:
+---
 
-| file                                       | content                                                     |
-| ------------------------------------------ | ----------------------------------------------------------- |
-| `sweep_io_<subject>_images.png`            | 4-row image grid (warped+grid / residual / `||phi||` / `error_map`), one column per checkpoint. |
-| `sweep_io_<subject>_curves.png`            | 2-panel metric curves — quality + field health.             |
-| `sweep_io_<subject>_metrics.csv`           | per-iter metrics: `iter, io_loss, lncc, mean_phi_px, mean_error_map_px, neg_jac_pct`. |
+## Pipeline
 
-## IO config (matches the official UniGradICON protocol)
+1. **Data** — `experiments/unigrad-io/create_unigrad_io_data.py` writes shared
+   `atlas_valid_mask.npz` and per-subject `Train|Val|Test/*.npz` with `source`,
+   `phi_pred`, `phi_predio`, `error_map`, `io_iterations`.
+2. **Train** — `train_unigrad_io_unet.py`: 5-channel 3D U-Net → scalar `error_map`
+   (masked loss inside atlas foreground).
+3. **Eval** — `eval_unigrad_io_unet.py`: training curves, Test metrics JSON, QC PNGs
+   (random + easy/normal/hard by mean `error_map`).
 
-| setting              | value         | source                                                            |
-| -------------------- | ------------- | ----------------------------------------------------------------- |
-| optimiser            | Adam          | `icon_registration.itk_wrapper.finetune_execute`                  |
-| learning rate        | `2e-5`        | `DEFAULT_FINETUNE_LEARNING_RATE`                                  |
-| similarity           | LNCC          | paper section 2.3 ("We use 1 − LNCC as similarity measure")               |
-| regulariser          | gradICON, λ=1.5 | paper section 2.3 / Eq. (1)                                            |
-| input preprocessing  | clip 99th %ile → `[0, 1]`, resample to `175 × 175 × 175` (pseudo-volume = 5-slice replication) | paper section 2.1 |
-| atlas slice          | index 111     | this repo (`ATLAS_SLICE_INDEX` in `create_unigrad_io_data.py`)   |
-| LNCC window (eval)   | σ = 5  ⇒ 11-px window | `icon_registration.losses.LNCC` default; `--lncc-sigma` flag |
+Model inputs: robust-normalized **subject**, **atlas**, **`phi_pred / phi_scale`**.
+Target: **`error_map`** (voxels). Loss and metrics use **`valid_mask`** only.
 
-Memory hygiene used during IO (so a 50-iter Adam fit doesn't OOM an 11 GiB GPU):
-CPU-side `state_dict` backup, `zero_grad(set_to_none=True)`, eager `del` of
-optimiser + loss graph, and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
-(set inside the script). See `docs/GPU_MEMORY_OPTIMIZATIONS.md` for the full
-write-up.
+---
 
-## The IO loss (Eq. 1 of the paper)
+## Training (`train_unigrad_io_unet.py`)
 
-The quantity Adam descends each step:
+### Loss and metrics
 
-L = L_sim(I_A ∘ Φ_AB, I_B)  +  L_sim(I_B ∘ Φ_BA, I_A)  +  λ · ‖∇(Φ_AB ∘ Φ_BA − I)‖²_F
+- **`--loss`**: `mse` (default), `l1`, or `huber` (with **`--huber-delta`**, default `1.0` voxels).
+- **`--smooth-weight`**: optional 3D TV on the prediction at **mask transitions** (default `0`).
+- **Optimization**: AdamW, `ReduceLROnPlateau` on **primary val loss** matching `--loss`
+  (`val_mse`, `val_l1`, or `val_huber`).
+- **Checkpoint / early stop**: same primary val metric as `--loss`.
+- **Val warmup**: **`--val-start-frac 0.1`** (default) — first full val at
+  `ceil(0.1 × epochs)` (50 epochs → epoch 5). All three val losses are computed together
+  when val runs. Set **`--val-start-frac 0`** for val from epoch 1.
 
-with `L_sim = 1 − LNCC`. So three pieces:
+### `metrics.csv` columns (current format)
 
-1. **Forward similarity**: warped source matches target.
-2. **Backward similarity**: warped target matches source. Symmetry hedge — stops the network from over-tuning one direction.
-3. **gradICON regulariser**: penalises the *gradient* of the inverse-consistency error. Soft diffeomorphism prior — forgives a globally constant translation but penalises any spatially varying inverse-error. Designed to be weak enough that a single λ = 1.5 generalises across lung CT / brain MRI / abdominal CT.
+`epoch, loss, train_{loss}, val_{loss}, val_mse, val_l1, val_huber, elapsed_s`
 
-The Jacobian-determinant fold count (`neg_jac_pct`, the percent of pixels with `det J < 0` of T = id + phi) is a separate *post-hoc*
-diagnostic; the loss does **not** directly penalise `det(J)`.
+The primary `val_{loss}` is not duplicated in the matching extra column (that cell is `nan`).
+W&B uses the same names (`train_l1`, `val_l1`, …).
 
-## How to read the figures
+### Example commands
 
-### `sweep_io_<subject>_images.png` — 4-row grid, one column per checkpoint
-
-| row | what          | how to read it                                                       |
-| --- | ------------- | -------------------------------------------------------------------- |
-| 1   | `warped` + grid | source warped by `phi@N` with deformation grid overlay. Grid lines stay smooth = field is regular; visible folds in the grid = bad.|
-| 2   | `residual`    | signed `warped@N − target` (coolwarm). Pixels saturate red/blue where alignment still fails. Should fade with N. |
-| 3   | `||phi||`     | per-pixel field magnitude in pixels (viridis). Lights up where IO is moving anatomy. |
-| 4   | `error_map`   | `||phi@N − phi@0||_2` per pixel (magma). **This is exactly what the downstream U-Net regresses if `--io-iterations=N` is chosen.** Should light up over real anatomical interfaces (sulci, ventricles), not isolated speckles. |
-
-### `sweep_io_<subject>_curves.png` — 2 panels, 4 curves
-
-**Left panel — Registration quality.**
-
-- `LNCC` (green, ↑ better): local cross-correlation between warped 2D slice and target. Same metric the network was trained on, but evaluated externally on the saved 2D output (sigma=5, native resolution).
-- `io_loss` (purple, ↓ better): the **full Eq. 1 value** — bidirectional `1 − LNCC` + 1.5 · gradICON regulariser, in 3D pseudo-volume space. Smoking-gun "is Adam descending?" check.
-
-The two are correlated but not identical (3D vs 2D, with vs without regulariser, symmetric vs forward-only). When they agree, IO is healthy.
-
-**Right panel — Error-map signal vs folds.**
-
-- `mean(error_map)` (orange, signal strength): mean of `||phi@N − phi@0||_2` over pixels. By definition starts at 0 (no signal at iter 0) and grows. The U-Net sees a **bigger** regression target as N grows — but…
-- `neg_jac_pct` (red, ↓ better): percentage of pixels with negative Jacobian determinant of the transform. Each non-zero pixel is a folded location (unphysical, locally non-invertible). Should stay essentially zero. If it climbs, IO is generating folds and your `error_map` will contain garbage in those regions.
-
-## Picking the IO iteration count (recipe)
-
-You want the smallest `N` such that:
-
-1. `neg_jac_pct` is still negligible (≤ ~0.1%) → no/few folds.
-2. `LNCC` has reached the elbow of its curve → most of the registration gain is captured.
-3. `mean(error_map)` has grown to a reasonable fraction of its asymptotic value → enough signal for the U-Net to learn.
-4. The row-4 `error_map` image lights up over real anatomy (cortical boundaries, ventricles), not isolated speckles.
-
-If all four agree on the same `N` across all swept subjects, that's your IO
-budget. From early runs on IXI 2D, that's typically `N = 40–80`.
-
-Anti-patterns to watch for:
-
-- `LNCC` flat but `mean(error_map)` and `neg_jac_pct` still climbing → IO is just adding folds without improving alignment. **Stop earlier.**
-- `io_loss` falling while `LNCC` is flat → the gradICON regulariser term is dropping (more invertible) but 2D similarity isn't moving. Usually benign, but it means you're past the "useful sim improvement" regime.
-- `neg_jac_pct` close to zero but `error_map` is all noise → either IO is doing essentially nothing (zero-shot already perfect for this pair) or the dynamic range is just below visibility. Check `mean_error_map_px` in the CSV.
-
-## Reproducing
-
-Defaults: `--checkpoints 0,50,100,150,200,250`, `--seed 42`.
+Smoke / MSE baseline:
 
 ```bash
-python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl --split Train --num-subjects 5 --save-path ./assets/images/unigrad-io/3d/sweep_io.png --no-show
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 2 --num-workers 4 --out-dir assets/runs/unigrad-io/error_unet_run4
 ```
 
-Fixed indices instead of `--num-subjects`:
+Planned **run4** (masked L1, no TV, compile, W&B):
 
 ```bash
-python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl --split Train --subject-indices 0,17,42,93,128 --save-path ./assets/images/unigrad-io/3d/sweep_io.png --no-show
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 2 --num-workers 4 --loss l1 --smooth-weight 0 --val-every 3 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run4 --out-dir assets/runs/unigrad-io/error_unet_run4
 ```
 
-Outputs are `<stem>_<subject_stem>_images.png`, `_curves.png`, `_metrics.csv` beside `--save-path`.
+Use **`--val-start-epoch N`** to override warmup fraction. **`--val-every 3`** reduces val
+noise and cost (as in run2).
+
+---
+
+## Evaluation (`eval_unigrad_io_unet.py`)
+
+Default under **`--run-path`**:
+
+- `training_curves.png` — `train_{loss}`, `val_{loss}`, plus the two other val metrics
+- `test_metrics.json` — masked Test MSE and L1
+- `test_error_pred_random.png`, `test_error_pred_easy_normal_hard.png`
+
+```bash
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4 --eval-dir datasets/IXI_unigrad_io --no-show
+```
+
+Curves only (no GPU Test pass):
+
+```bash
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4 --curves-only --no-show
+```
+
+Legacy runs (old `metrics.csv` without val warmup): hide early val spikes on the plot:
+
+```bash
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run3 --curves-only --no-show --val-plot-min-epoch 5
+```
+
+---
+
+## Error-map U-Net runs (1–3)
+
+Summary of completed runs under `assets/runs/unigrad-io/`. Test metrics are **masked**
+over the full Test split (115 volumes). QC figures are qualitative (one axial slice;
+shared color scale can make predictions look “dim” vs peaky GT).
+
+### Comparison
+
+| Run | Epochs | Batch | Loss | TV (`smooth_weight`) | Val every | Best val (metric) | Test MSE | Test L1 | Notes |
+| --- | ---: | ---: | --- | ---: | ---: | --- | ---: | ---: | --- |
+| **run1** | 15 | 1 | MSE | 0.05 | 1 | ep 15: val MSE 0.709 | **0.691** | 0.566 | Short smoke; under-trained vs later runs |
+| **run2** | 50 | 2 | MSE | 0.02 | 3 | ep 48: val MSE **0.514** | **0.511** | 0.478 | Main 50-epoch MSE baseline; W&B, compile |
+| **run3** | 50 | 2 | MSE | **0** | 1 | ep 44: val MSE **0.518** | 0.528 | **0.474** | TV ablation; similar curves/QC to run2 |
+
+### run1 — `error_unet_run1`
+
+- **Config**: 15 epochs, batch 1, MSE + TV 0.05, no `torch.compile` in saved config.
+- **Val at ep 15**: val MSE 0.709, val L1 0.610.
+- **Test**: MSE 0.691, L1 0.566.
+- **Takeaway**: Useful smoke test; not comparable to 50-epoch runs.
+
+### run2 — `error_unet_run2`
+
+- **Config**: 50 epochs, batch 2, MSE + TV 0.02, `val_every=3`, compile, W&B (`unc-quan`).
+- **Training**: Train MSE fell steadily (~0.95 → ~0.40); val MSE plateaued ~0.51–0.53 with
+  gap vs train → **overfitting** after ~epoch 35–40. Val L1 slightly below val MSE (typical
+  when per-voxel errors are often &lt; 1 voxel).
+- **Best checkpoint**: epoch 48 (val MSE 0.514).
+- **Test**: MSE 0.511, L1 0.478 — best Test MSE of the three runs.
+- **QC**: Spatial structure visible but **under-predicted peaks** (“dim” vs GT) and **sharp
+  mask-boundary rims** in `error pred`; easy/normal/hard ranking still sensible.
+
+### run3 — `error_unet_run3`
+
+- **Config**: Same as run2 except **`smooth_weight=0`**, **`val_every=1`** (val every epoch).
+- **Training**: Similar train/val trends to run2; early val spikes when plotted from epoch 1
+  (run2 avoided this with `val_every=3` + first val at epoch 3).
+- **Best checkpoint**: epoch 44 (val MSE 0.518).
+- **Test**: MSE 0.528, L1 **0.474** (slightly better L1 than run2, slightly worse MSE).
+- **Takeaway**: **TV is not the main cause** of dim peaks or rim artefacts — QC and curves
+  are similar to run2 with TV off.
+
+### Shared QC / metric interpretation
+
+- **Val L1 &lt; val MSE** is expected when most masked residuals have |error| &lt; 1 voxel.
+- **Train metric &lt; val metric** with late-epoch val stall → reduce epochs, tighter early
+  stop, or change loss (MSE regresses toward conditional mean → dull peaks).
+- See also `docs/unigrad-io-error-unet-next-steps.md` for mask-vs-plot notes and ablation list.
+
+---
+
+## Plan: run4
+
+**Goal**: Improve **peak fidelity** and QC without abandoning the IO setup.
+
+| Setting | Value | Rationale |
+| --- | --- | --- |
+| `--loss` | **`l1`** | Less mean-seeking than MSE on heavy-tailed `error_map` |
+| `--smooth-weight` | **`0`** | run3 showed TV is not the main lever |
+| `--val-every` | **`3`** | stabler val curves (run2) |
+| `--val-start-frac` | **`0.1`** (default) | skip unstable early val |
+| Epochs / batch / compile / W&B | same as run2 | comparable budget |
+
+**Success criteria**
+
+1. Test **L1** ≤ run2/run3 (~0.47) with **visually brighter** peak regions on QC PNGs.
+2. Val **L1** used for checkpoint (automatic with `--loss l1`).
+3. Re-run full eval on `best_model.pt`; compare `test_error_pred_*.png` to run2 side by side.
+
+**Optional run5** if run4 is still too smooth: `--loss huber --huber-delta 1.0`, or weighted MSE.
+
+Train and eval commands are in the sections above (`error_unet_run4`).
+
+---
+
+## IO iteration sweep (upstream)
+
+Before fixing IO budget for `create_unigrad_io_data.py`, use
+`experiments/unigrad-io/sweep_io_iterations.py` to pick iteration count `N` (LNCC elbow,
+low `neg_jac_pct`, sensible `error_map` anatomy). Defaults and figure reading:
+
+```bash
+python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl --split Train --num-subjects 5 --save-path assets/images/unigrad-io/3d/sweep_io.png --no-show
+```
+
+Outputs: `sweep_io_<subject>_images.png`, `_curves.png`, `_metrics.csv` beside `--save-path`.
+Pick `N` where LNCC plateaus, folds stay ~0, and row-4 `error_map` highlights real anatomy
+(typically **40–80** on IXI). Full sweep protocol was the original content of this file;
+see `reports/uniGradICON.pdf` Eq. (1) and `docs/GPU_MEMORY_OPTIMIZATIONS.md`.
+
+---
 
 ## Related files
 
-- `experiments/unigrad-io/sweep_io_iterations.py` — this experiment.
-- `experiments/unigrad-io/create_unigrad_io_data.py` — full-dataset `error_map` generator that picks one IO iteration count based on what the sweep told you.
-- `experiments/unigrad-io/visualize_unigrad_io_data.py` — visualiser for the resulting NPZs (`source / target / phi_pred / warped_pred / phi_predio / warped_predio / error_map`).
-- `docs/GPU_MEMORY_OPTIMIZATIONS.md` — notes on the memory hygiene used in IO.
-- `reports/uniGradICON.pdf` — Eq. (1) and section 2.3.
+| File | Role |
+| --- | --- |
+| `experiments/unigrad-io/create_unigrad_io_data.py` | Build `datasets/IXI_unigrad_io/` |
+| `experiments/regression/unigrad-io/train_unigrad_io_unet.py` | Train error-map U-Net |
+| `experiments/regression/unigrad-io/eval_unigrad_io_unet.py` | Curves + Test QC |
+| `experiments/unigrad-io/visualize_unigrad_io_data.py` | NPZ QC |
+| `docs/unigrad-io-error-unet-next-steps.md` | Ablations and diagnostics checklist |
