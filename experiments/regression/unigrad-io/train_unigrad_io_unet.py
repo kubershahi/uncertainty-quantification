@@ -12,12 +12,12 @@ Layout from ``create_unigrad_io_data.py``:
 Model input (5 channels, ``N×C×D×H×W``): robust-normalized subject + atlas,
 ``phi_pred / phi_scale``. Loss and metrics use ``valid_mask`` only.
 
-Optimizer: AdamW (default ``lr=1e-3``). LR schedule: ``ReduceLROnPlateau`` on val MSE
-(``--lr-scheduler none`` for fixed LR). Early stopping on val MSE (``--early-stop-patience``).
+Optimizer: AdamW (default ``lr=1e-3``). LR schedule: ``ReduceLROnPlateau`` on the validation
+metric that matches ``--loss`` (``val_mse``, ``val_l1``, or ``val_huber``).
 
-Loss: ``total = masked_mse + smooth_weight * tv_3d(pred)``. Default ``smooth_weight=0`` (MSE only).
-Optional TV uses the atlas mask so differences are penalised mainly at mask transitions (not
-interior foreground edges); try ``--smooth-weight 0.02`` if boundary artefacts dominate.
+Loss: ``total = regression_loss + smooth_weight * tv_3d(pred)``. Regression is one of
+``--loss mse`` (default), ``l1``, or ``huber`` (``--huber-delta``, default 1.0 in same units as
+``error_map``). Default ``smooth_weight=0`` (no TV).
 
 Speed (full volumes are expensive; default is one 3D U-Net step per subject per epoch):
 
@@ -30,11 +30,12 @@ Speed (full volumes are expensive; default is one 3D U-Net step per subject per 
 
 True multi-GPU needs DDP (not implemented); one epoch ≈ 403 train + 58 val forward passes at batch 1.
 
-Example:
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --batch-size 1 --out-dir assets/runs/3d/unigrad-io/error_unet_run1
+Example (MSE, default):
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --out-dir assets/runs/unigrad-io/error_unet_run4 --epochs 50 --batch-size 2 --num-workers 4 
 
-With Weights & Biases (optional; ``pip install wandb``, then ``wandb login``):
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --out-dir assets/runs/unigrad-io/error_unet_run3 --epoch 50  --num-workers 4  --compile --wandb --wandb-project unc-quan --wandb-run-name unigradio_unet_run3
+Example (L1 + W&B + compile, planned run4):
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --out-dir assets/runs/unigrad-io/error_unet_run4 --epochs 50 --batch-size 2 --num-workers 4 --loss l1 --smooth-weight 0 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run4
+
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -280,18 +282,30 @@ def masked_l1(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> t
     return diff.sum() / m.sum().clamp_min(1.0)
 
 
-def masked_mse_plus_smoothness_3d(
+def masked_huber(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, delta: float) -> torch.Tensor:
+    m = mask.unsqueeze(1).float()
+    raw = F.huber_loss(pred, target, reduction="none", delta=delta)
+    return (raw * m).sum() / m.sum().clamp_min(1.0)
+
+
+def masked_regression_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
     *,
-    smooth_weight: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    mse = masked_mse(pred, target, mask)
-    if smooth_weight <= 0.0:
-        z = torch.zeros_like(mse)
-        return mse, z, mse
+    loss: str,
+    huber_delta: float,
+) -> torch.Tensor:
+    if loss == "mse":
+        return masked_mse(pred, target, mask)
+    if loss == "l1":
+        return masked_l1(pred, target, mask)
+    if loss == "huber":
+        return masked_huber(pred, target, mask, huber_delta)
+    raise ValueError(f"Unknown --loss {loss!r}; expected mse, l1, huber.")
 
+
+def masked_tv_smoothness_3d(pred: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     m = mask.float()
     if m.dim() == 5:
         m = m.squeeze(1)
@@ -311,9 +325,42 @@ def masked_mse_plus_smoothness_3d(
     w_w = 1.0 - (m[:, :, :, :-1] * m[:, :, :, 1:])
     tv_w = edge_tv(gw, w_w)
 
-    smooth = (tv_d + tv_h + tv_w) / 3.0
-    total = mse + smooth_weight * smooth
-    return mse, smooth, total
+    return (tv_d + tv_h + tv_w) / 3.0
+
+
+def masked_regression_plus_smoothness_3d(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    loss: str,
+    smooth_weight: float,
+    huber_delta: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    reg = masked_regression_loss(pred, target, mask, loss=loss, huber_delta=huber_delta)
+    if smooth_weight <= 0.0:
+        z = torch.zeros_like(reg)
+        return reg, z, reg
+    smooth = masked_tv_smoothness_3d(pred, mask)
+    total = reg + smooth_weight * smooth
+    return reg, smooth, total
+
+
+def masked_mse_plus_smoothness_3d(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    smooth_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return masked_regression_plus_smoothness_3d(
+        pred,
+        target,
+        mask,
+        loss="mse",
+        smooth_weight=smooth_weight,
+        huber_delta=1.0,
+    )
 
 
 class DoubleConv3d(nn.Module):
@@ -438,13 +485,15 @@ def evaluate(
     device: torch.device,
     *,
     use_amp: bool,
+    huber_delta: float,
     show_progress: bool = True,
     desc: str = "val",
     overall_pbar: tqdm | None = None,
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     model.eval()
     sum_mse = 0.0
     sum_l1 = 0.0
+    sum_huber = 0.0
     n = 0
     it = tqdm(loader, desc=desc, leave=False, unit="batch", disable=not show_progress, position=2)
     for batch in it:
@@ -455,11 +504,12 @@ def evaluate(
             pred = model(x)
             sum_mse += float(masked_mse(pred, y, mask))
             sum_l1 += float(masked_l1(pred, y, mask))
+            sum_huber += float(masked_huber(pred, y, mask, huber_delta))
         n += 1
         if overall_pbar is not None:
             overall_pbar.update(1)
             overall_pbar.set_postfix(phase="val", val_mse=f"{sum_mse / n:.3f}")
-    return sum_mse / max(n, 1), sum_l1 / max(n, 1)
+    return sum_mse / max(n, 1), sum_l1 / max(n, 1), sum_huber / max(n, 1)
 
 
 def train_epoch(
@@ -470,16 +520,16 @@ def train_epoch(
     *,
     use_amp: bool,
     scaler,
+    loss: str,
     smooth_weight: float,
+    huber_delta: float,
     show_progress: bool = True,
     epoch: int = 1,
     total_epochs: int = 1,
     overall_pbar: tqdm | None = None,
-) -> tuple[float, float, float]:
+) -> float:
     model.train()
-    sum_mse = 0.0
-    sum_smooth = 0.0
-    sum_total = 0.0
+    sum_reg = 0.0
     steps = 0
     desc = f"train {epoch}/{total_epochs}"
     it = tqdm(loader, desc=desc, leave=False, unit="batch", disable=not show_progress, position=2)
@@ -490,31 +540,84 @@ def train_epoch(
         opt.zero_grad(set_to_none=True)
         with amp_autocast(use_amp):
             pred = model(x)
-            mse, smooth, loss = masked_mse_plus_smoothness_3d(
-                pred, y, mask, smooth_weight=smooth_weight
+            reg, smooth, total = masked_regression_plus_smoothness_3d(
+                pred, y, mask, loss=loss, smooth_weight=smooth_weight, huber_delta=huber_delta
             )
         if use_amp and scaler is not None:
-            scaler.scale(loss).backward()
+            scaler.scale(total).backward()
             scaler.step(opt)
             scaler.update()
         else:
-            loss.backward()
+            total.backward()
             opt.step()
-        sum_mse += float(mse)
-        sum_smooth += float(smooth)
-        sum_total += float(loss)
+        sum_reg += float(reg)
         steps += 1
         if show_progress:
-            it.set_postfix(mse=float(mse), total=float(loss))
+            it.set_postfix(reg=float(reg), total=float(total))
         if overall_pbar is not None:
             overall_pbar.update(1)
             overall_pbar.set_postfix(
                 phase="train",
                 epoch=f"{epoch}/{total_epochs}",
-                mse=f"{mse:.3f}",
+                reg=f"{float(reg):.3f}",
             )
-    n = max(steps, 1)
-    return sum_mse / n, sum_smooth / n, sum_total / n
+    return sum_reg / max(steps, 1)
+
+
+ALL_LOSSES = ("mse", "l1", "huber")
+
+
+def primary_train_col(loss: str) -> str:
+    return f"train_{loss}"
+
+
+def primary_val_col(loss: str) -> str:
+    return f"val_{loss}"
+
+
+def metrics_csv_header(loss: str) -> list[str]:
+    return [
+        "epoch",
+        "loss",
+        primary_train_col(loss),
+        primary_val_col(loss),
+        "val_mse",
+        "val_l1",
+        "val_huber",
+        "elapsed_s",
+    ]
+
+
+def metric_plot_label(split_loss: str) -> str:
+    """Legend / axis label, e.g. train_l1, val_mse."""
+    return split_loss
+
+
+def loss_display_name(loss: str) -> str:
+    if loss == "mse":
+        return "MSE"
+    if loss == "l1":
+        return "L1"
+    if loss == "huber":
+        return "Huber"
+    raise ValueError(f"Unknown loss {loss!r}")
+
+
+def val_metric_for_training_loss(loss: str, val_mse: float, val_l1: float, val_huber: float) -> float:
+    by_name = {"mse": val_mse, "l1": val_l1, "huber": val_huber}
+    return by_name[loss]
+
+
+def val_metrics_row(
+    loss: str, val_mse: float, val_l1: float, val_huber: float
+) -> tuple[float, float, float, float]:
+    """Primary val metric plus val_mse / val_l1 / val_huber (nan on the primary column)."""
+    by_name = {"mse": val_mse, "l1": val_l1, "huber": val_huber}
+    primary = by_name[loss]
+    row_mse = float("nan") if loss == "mse" else val_mse
+    row_l1 = float("nan") if loss == "l1" else val_l1
+    row_huber = float("nan") if loss == "huber" else val_huber
+    return primary, row_mse, row_l1, row_huber
 
 
 def init_wandb(args: argparse.Namespace, meta: dict) -> object | None:
@@ -544,48 +647,55 @@ def log_wandb_epoch(
     wandb_run: object | None,
     *,
     epoch: int,
-    train_mse: float,
-    train_smooth: float,
-    train_total: float,
+    loss_name: str,
+    train: float,
+    val: float,
     val_mse: float,
     val_l1: float,
+    val_huber: float,
     lr: float,
     elapsed_s: float,
-    best_val_mse: float,
+    best_val_metric: float,
 ) -> None:
     if wandb_run is None:
         return
     import wandb
 
-    wandb.log(
-        {
-            "epoch": epoch,
-            "train/mse": train_mse,
-            "train/smooth": train_smooth,
-            "train/total": train_total,
-            "val/mse": val_mse,
-            "val/l1": val_l1,
-            "lr": lr,
-            "elapsed_s": elapsed_s,
-            "val/best_mse": best_val_mse,
-        },
-        step=epoch,
-    )
+    train_col = primary_train_col(loss_name)
+    val_col = primary_val_col(loss_name)
+    payload: dict = {
+        "epoch": epoch,
+        "loss": loss_name,
+        train_col: train,
+        val_col: val,
+        "lr": lr,
+        "elapsed_s": elapsed_s,
+        f"best_{val_col}": best_val_metric,
+    }
+    if loss_name != "mse" and np.isfinite(val_mse):
+        payload["val_mse"] = val_mse
+    if loss_name != "l1" and np.isfinite(val_l1):
+        payload["val_l1"] = val_l1
+    if loss_name != "huber" and np.isfinite(val_huber):
+        payload["val_huber"] = val_huber
+    wandb.log(payload, step=epoch)
 
 
 def finish_wandb(
     wandb_run: object | None,
     *,
-    best_val_mse: float,
+    best_val_metric: float,
     best_epoch: int,
     best_checkpoint: Path,
+    training_loss: str,
 ) -> None:
     if wandb_run is None:
         return
     import wandb
 
-    wandb.run.summary["best_val_mse"] = best_val_mse
+    wandb.run.summary[f"best_{primary_val_col(training_loss)}"] = best_val_metric
     wandb.run.summary["best_epoch"] = best_epoch
+    wandb.run.summary["training_loss"] = training_loss
     if best_checkpoint.is_file():
         wandb.save(str(best_checkpoint), base_path=str(best_checkpoint.parent))
     wandb.finish()
@@ -666,7 +776,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--smooth-weight",
         type=float,
         default=0.0,
-        help="Weight on masked 3D TV of pred (0 = MSE only; >0 penalises |Δpred| at mask edges).",
+        help="Weight on masked 3D TV of pred (0 = no TV; >0 penalises |Δpred| at mask edges).",
+    )
+    p.add_argument(
+        "--loss",
+        type=str,
+        default="mse",
+        choices=["mse", "l1", "huber"],
+        help="Masked regression term in total loss (before TV). Val + checkpoint use the matching metric.",
+    )
+    p.add_argument(
+        "--huber-delta",
+        type=float,
+        default=1.0,
+        help="Huber delta (same units as error_map voxels); used for --loss huber and for val/huber.",
     )
     p.add_argument(
         "--early-stop-patience",
@@ -735,6 +858,8 @@ def main(argv: list[str] | None = None) -> int:
         args.num_workers = 4 if device.type == "cuda" else 0
     if args.val_every < 1:
         raise ValueError("--val-every must be >= 1")
+    if args.huber_delta <= 0:
+        raise ValueError("--huber-delta must be positive")
     if args.val_start_frac < 0.0:
         raise ValueError("--val-start-frac must be >= 0")
     val_start_epoch = resolve_val_start_epoch(
@@ -820,6 +945,8 @@ def main(argv: list[str] | None = None) -> int:
         "device": str(device),
         "metrics_csv": "metrics.csv",
         "smooth_weight": args.smooth_weight,
+        "loss": args.loss,
+        "huber_delta": args.huber_delta,
         "optimizer": "AdamW",
         "lr_scheduler": args.lr_scheduler,
         "lr_patience": args.lr_patience,
@@ -845,15 +972,14 @@ def main(argv: list[str] | None = None) -> int:
     metrics_path = args.out_dir / "metrics.csv"
     with open(metrics_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(
-            ["epoch", "train_mse", "train_smooth", "train_total", "val_mse", "val_l1", "elapsed_s"]
-        )
+        w.writerow(metrics_csv_header(args.loss))
 
     best_val = float("inf")
     best_epoch = 0
     epochs_without_improve = 0
     last_val_mse = float("inf")
     last_val_l1 = float("nan")
+    last_val_huber = float("nan")
     best_path = args.out_dir / "best_model.pt"
     show_p = not args.no_progress
     t0 = time.time()
@@ -891,14 +1017,16 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     for epoch in epoch_loop:
-        tr_mse, tr_smooth, tr_total = train_epoch(
+        tr_reg = train_epoch(
             model,
             train_loader,
             opt,
             device,
             use_amp=use_amp,
             scaler=scaler if use_amp else None,
+            loss=args.loss,
             smooth_weight=args.smooth_weight,
+            huber_delta=args.huber_delta,
             show_progress=show_p,
             epoch=epoch,
             total_epochs=args.epochs,
@@ -907,51 +1035,61 @@ def main(argv: list[str] | None = None) -> int:
         want_val = (epoch % args.val_every == 0) or (epoch == args.epochs)
         run_val = want_val and (epoch >= val_start_epoch)
         if run_val:
-            val_mse, val_l1 = evaluate(
+            val_mse, val_l1, val_huber = evaluate(
                 model,
                 val_loader,
                 device,
                 use_amp=use_amp,
+                huber_delta=args.huber_delta,
                 show_progress=show_p,
                 desc=f"val {epoch}/{args.epochs}",
                 overall_pbar=overall_pbar,
             )
-            last_val_mse, last_val_l1 = val_mse, val_l1
+            last_val_mse, last_val_l1, last_val_huber = val_mse, val_l1, val_huber
         elif epoch < val_start_epoch:
-            val_mse, val_l1 = float("nan"), float("nan")
+            val_mse, val_l1, val_huber = float("nan"), float("nan"), float("nan")
             if show_p:
                 print(f"  (warmup: no val before epoch {val_start_epoch})")
         else:
-            val_mse, val_l1 = last_val_mse, last_val_l1
+            val_mse, val_l1, val_huber = last_val_mse, last_val_l1, last_val_huber
             if show_p:
-                print(f"  (skipped val; last val_mse={val_mse:.6f})")
-        if scheduler is not None and run_val:
-            scheduler.step(val_mse)
+                print(
+                    f"  (skipped val; last val_{args.loss}="
+                    f"{val_metric_for_training_loss(args.loss, val_mse, val_l1, val_huber):.6f})"
+                )
+        val_primary, row_mse, row_l1, row_huber = val_metrics_row(args.loss, val_mse, val_l1, val_huber)
+        val_metric = val_primary
+        if scheduler is not None and run_val and np.isfinite(val_metric):
+            scheduler.step(val_metric)
         lr_now = float(opt.param_groups[0]["lr"])
         dt = time.time() - t0
         print(
             f"epoch {epoch:03d}/{args.epochs}  "
-            f"train_mse={tr_mse:.6f}  train_smooth={tr_smooth:.6f}  train_total={tr_total:.6f}  "
-            f"val_mse={val_mse:.6f}  val_l1={val_l1:.6f}  lr={lr_now:.2e}  "
-            f"elapsed={dt:.1f}s"
+            f"train_{args.loss}={tr_reg:.6f}  val_{args.loss}={val_primary:.6f}  "
+            f"val_mse={row_mse:.6f}  val_l1={row_l1:.6f}  val_huber={row_huber:.6f}  "
+            f"loss={args.loss}  lr={lr_now:.2e}  elapsed={dt:.1f}s"
         )
         with open(metrics_path, "a", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow([epoch, tr_mse, tr_smooth, tr_total, val_mse, val_l1, dt])
+            csv.writer(f).writerow(
+                [epoch, args.loss, tr_reg, val_primary, row_mse, row_l1, row_huber, dt]
+            )
+        best_so_far = best_val if np.isnan(val_metric) else min(best_val, val_metric)
         log_wandb_epoch(
             wandb_run,
             epoch=epoch,
-            train_mse=tr_mse,
-            train_smooth=tr_smooth,
-            train_total=tr_total,
-            val_mse=val_mse,
-            val_l1=val_l1,
+            loss_name=args.loss,
+            train=tr_reg,
+            val=val_primary,
+            val_mse=row_mse,
+            val_l1=row_l1,
+            val_huber=row_huber,
             lr=lr_now,
             elapsed_s=dt,
-            best_val_mse=best_val if np.isnan(val_mse) else min(best_val, val_mse),
+            best_val_metric=best_so_far,
         )
-        if run_val:
-            if val_mse < best_val:
-                best_val = val_mse
+        if run_val and np.isfinite(val_metric):
+            if val_metric < best_val:
+                best_val = val_metric
                 best_epoch = epoch
                 epochs_without_improve = 0
                 torch.save(
@@ -960,6 +1098,9 @@ def main(argv: list[str] | None = None) -> int:
                         "epoch": epoch,
                         "val_mse": val_mse,
                         "val_l1": val_l1,
+                        "val_huber": val_huber,
+                        "val_metric": val_metric,
+                        "training_loss": args.loss,
                         "config": meta,
                     },
                     best_path,
@@ -974,8 +1115,8 @@ def main(argv: list[str] | None = None) -> int:
             and epochs_without_improve >= args.early_stop_patience
         ):
             print(
-                f"Early stopping: no val MSE improvement for {args.early_stop_patience} "
-                f"epoch(s) (best epoch {best_epoch}, val_mse={best_val:.6f})."
+                f"Early stopping: no val {args.loss} improvement for {args.early_stop_patience} "
+                f"epoch(s) (best epoch {best_epoch}, val_{args.loss}={best_val:.6f})."
             )
             break
 
@@ -984,12 +1125,13 @@ def main(argv: list[str] | None = None) -> int:
 
     finish_wandb(
         wandb_run,
-        best_val_mse=best_val,
+        best_val_metric=best_val,
         best_epoch=best_epoch,
         best_checkpoint=best_path,
+        training_loss=args.loss,
     )
     print(
-        f"Done. Best val MSE={best_val:.6f} at epoch {best_epoch} -> {best_path}"
+        f"Done. Best val {args.loss}={best_val:.6f} at epoch {best_epoch} -> {best_path}"
     )
     print(f"Metrics log: {metrics_path}")
     return 0
