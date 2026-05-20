@@ -4,8 +4,8 @@
   "eval_split": "Test",
   "atlas_mask_file": "atlas_valid_mask.npz",
   "n_volumes": 115,
-  "masked_mse": 0.5357154496338057,
-  "masked_l1": 0.46712456552878673,
+  "masked_mse": 0.5629692777343418,
+  "masked_l1": 0.47869862058888313,
   "unit": "voxels",
   "config": {
     "model": "UNet3D",
