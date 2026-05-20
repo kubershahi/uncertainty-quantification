@@ -1,0 +1,18 @@
+{
+  "checkpoint": "/files/repo/uncertainty-quantification/assets/runs/unigrad-io/error_unet_run4/best_model.pt",
+  "eval_dir": "/files/repo/uncertainty-quantification/datasets/IXI_unigrad_io",
+  "eval_split": "Test",
+  "atlas_mask_file": "atlas_valid_mask.npz",
+  "n_volumes": 115,
+  "masked_mse": 0.5357154496338057,
+  "masked_l1": 0.46712456552878673,
+  "unit": "voxels",
+  "config": {
+    "model": "UNet3D",
+    "in_channels": 5,
+    "base_channels": 32,
+    "image_norm": "robust",
+    "quantile_high": 0.99,
+    "phi_scale": 64.0
+  }
+}
