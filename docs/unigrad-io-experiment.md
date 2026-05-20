@@ -36,36 +36,36 @@ Target: **`error_map`** (voxels). Loss and metrics use **`valid_mask`** only.
 
 - **`--loss`**: `mse` (default), `l1`, or `huber` (with **`--huber-delta`**, default `1.0` voxels).
 - **`--smooth-weight`**: optional 3D TV on the prediction at **mask transitions** (default `0`).
-- **Optimization**: AdamW, `ReduceLROnPlateau` on **primary val loss** matching `--loss`
-  (`val_mse`, `val_l1`, or `val_huber`).
-- **Checkpoint / early stop**: same primary val metric as `--loss`.
-- **Val warmup**: **`--val-start-frac 0.1`** (default) — first full val at
-  `ceil(0.1 × epochs)` (50 epochs → epoch 5). All three val losses are computed together
-  when val runs. Set **`--val-start-frac 0`** for val from epoch 1.
+- **Optimization**: AdamW, `ReduceLROnPlateau` on **`val_{loss}`** (matches `--loss`).
+- **Checkpoint / early stop**: same **`val_{loss}`** as `--loss`.
+- **Early stop**: **`--early-stop-min-delta`** (default `0.005`) — improvements smaller than this
+  do not reset patience; fixes “micro-improvements” that prevented stop on run4.
+- **Val warmup**: **`--val-start-frac 0.1`** (default) — first val at `ceil(0.1 × epochs)`.
+  Set **`--val-start-frac 0`** for val from epoch 1.
 
 ### `metrics.csv` columns (current format)
 
-`epoch, loss, train_{loss}, val_mse, val_l1, val_huber, elapsed_s`
+`epoch, loss, train_{loss}, val_{loss}, elapsed_s`
 
-All three val metrics are logged every val pass (no duplicate CSV columns). W&B logs
-`train_{loss}`, `val_{loss}`, and the two other val metrics.
+W&B logs the same two loss columns plus `lr` and `elapsed_s`. Eval curves plot only
+**`train_{loss}`** and **`val_{loss}`** (legacy CSVs with `val_mse` / `val_l1` / `val_huber`
+still load for old runs).
 
 ### Example commands
 
-Smoke / MSE baseline:
+MSE baseline (run2-style):
 
 ```bash
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 2 --num-workers 4 --out-dir assets/runs/unigrad-io/error_unet_run4
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 2 --loss mse --val-every 3 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run2 --out-dir assets/runs/unigrad-io/error_unet_run2
 ```
 
-Planned **run4** (masked L1, no TV, compile, W&B):
+**run4b** (L1 re-run: meaningful early stop, val every 3):
 
 ```bash
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 2 --num-workers 4 --loss l1 --smooth-weight 0 --val-every 3 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run4 --out-dir assets/runs/unigrad-io/error_unet_run4
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 60 --batch-size 2 --loss l1 --val-every 3 --early-stop-patience 8 --early-stop-min-delta 0.005 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run4b --out-dir assets/runs/unigrad-io/error_unet_run4b
 ```
 
-Use **`--val-start-epoch N`** to override warmup fraction. **`--val-every 3`** reduces val
-noise and cost (as in run2).
+Use **`--val-start-epoch N`** to override warmup fraction.
 
 ---
 
@@ -73,12 +73,12 @@ noise and cost (as in run2).
 
 Default under **`--run-path`**:
 
-- `training_curves.png` — `train_{loss}`, `val_{loss}`, plus the two other val metrics
+- `training_curves.png` — `train_{loss}` and `val_{loss}` only
 - `test_metrics.json` — masked Test MSE and L1
 - `test_error_pred_random.png`, `test_error_pred_easy_normal_hard.png`
 
 ```bash
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4 --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4b --eval-dir datasets/IXI_unigrad_io --no-show
 ```
 
 Curves only (no GPU Test pass):
@@ -95,7 +95,28 @@ python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path asse
 
 ---
 
-## Error-map U-Net runs (1–3)
+## Model architecture (runs 1–4, unchanged)
+
+Implementation: **`UNet3D`** in `train_unigrad_io_unet.py` (`--base-channels`, default **32**).
+
+| Item | Setting |
+| --- | --- |
+| Inputs (5 ch) | Robust-normalized **subject**, **atlas**, **`phi_pred / phi_scale`** (3 displacement components) |
+| Output (1 ch) | **`error_map`** magnitude (voxels), trained only inside **`valid_mask`** |
+| Encoder | 4 × `DoubleConv3d` (3×3×3 conv → BN → ReLU ×2) + `MaxPool3d(2)`; channels **32 → 64 → 128 → 256** |
+| Bottleneck | `DoubleConv3d` at **512** channels (`base × 16`) |
+| Decoder | 4 × `ConvTranspose3d(2, stride=2)` upsample + skip concat + `DoubleConv3d` |
+| Head | `Conv3d(base, 1, kernel_size=1)` |
+| Regularization | Optional 3D TV on pred at mask edges (`--smooth-weight`; **0** from run3 onward) |
+
+**Runs 1–4** all use this same U-Net; only loss, TV, epochs, and training schedule differ.
+**Planned run5+** (if run4b still too smooth): document-only ideas below — wider base
+(`--base-channels 48`), dropout in `DoubleConv3d`, or shallow extra conv head before `out`;
+implement only after run4b QC.
+
+---
+
+## Error-map U-Net runs (1–4)
 
 Summary of completed runs under `assets/runs/unigrad-io/`. Test metrics are **masked**
 over the full Test split (115 volumes). QC figures are qualitative (one axial slice;
@@ -108,6 +129,7 @@ shared color scale can make predictions look “dim” vs peaky GT).
 | **run1** | 15 | 1 | MSE | 0.05 | 1 | ep 15: val MSE 0.709 | **0.691** | 0.566 | Short smoke; under-trained vs later runs |
 | **run2** | 50 | 2 | MSE | 0.02 | 3 | ep 48: val MSE **0.514** | **0.511** | 0.478 | Main 50-epoch MSE baseline; W&B, compile |
 | **run3** | 50 | 2 | MSE | **0** | 1 | ep 44: val MSE **0.518** | 0.528 | **0.474** | TV ablation; similar curves/QC to run2 |
+| **run4** | 60 | 2 | **L1** | **0** | 1 | ep 58: val L1 **0.464** | 0.536 | 0.467 | Same arch as 1–3; L1 did not fix blur; no early stop |
 
 ### run1 — `error_unet_run1`
 
@@ -144,29 +166,59 @@ shared color scale can make predictions look “dim” vs peaky GT).
   stop, or change loss (MSE regresses toward conditional mean → dull peaks).
 - See also `docs/unigrad-io-error-unet-next-steps.md` for mask-vs-plot notes and ablation list.
 
+### run4 — `error_unet_run4` (first L1 attempt)
+
+- **Config**: 60 epochs, batch 2, **L1**, TV 0, `val_every=1`, val from epoch 6, compile, W&B.
+  **No** `--early-stop-min-delta` (old code): tiny val L1 gains reset patience → trained to epoch 60.
+- **Architecture**: Same as runs 1–3 (`base_channels=32`, 5→1 U-Net above).
+- **Training**: `train_l1` fell steadily; `val_l1` plateaued ~0.47 after ~epoch 40; train/val gap →
+  overfitting. Curves logged all three val metrics (legacy CSV).
+- **Best checkpoint**: epoch 58 (val L1 **0.464**).
+- **Test**: MSE 0.536, L1 0.467 — similar QC to run2/run3 (blurry peaks, rim artefacts).
+- **Takeaway**: Switching loss to L1 alone did not materially improve spatial QC; need **earlier stop**
+  and possibly **architecture** changes next.
+
 ---
 
-## Plan: run4
+## Plan: run4b (L1 re-run)
 
-**Goal**: Improve **peak fidelity** and QC without abandoning the IO setup.
+**Goal**: Stop near the val L1 plateau (~epoch 40–45), not epoch 58–60.
 
 | Setting | Value | Rationale |
 | --- | --- | --- |
-| `--loss` | **`l1`** | Less mean-seeking than MSE on heavy-tailed `error_map` |
-| `--smooth-weight` | **`0`** | run3 showed TV is not the main lever |
-| `--val-every` | **`3`** | stabler val curves (run2) |
-| `--val-start-frac` | **`0.1`** (default) | skip unstable early val |
-| Epochs / batch / compile / W&B | same as run2 | comparable budget |
+| `--loss` | **`l1`** | Same objective as run4 |
+| `--smooth-weight` | **`0`** | Unchanged |
+| `--val-every` | **`3`** | Fewer, stabler val checks (run2) |
+| `--early-stop-min-delta` | **`0.005`** | Ignore sub-0.005 val L1 noise |
+| `--early-stop-patience` | **`8`** | 8 val checks without meaningful gain |
+| Metrics / curves | **`train_l1`, `val_l1` only** | Less clutter; matches checkpoint metric |
+| Architecture | **same as runs 1–4** | Isolate schedule/logging fixes |
 
 **Success criteria**
 
-1. Test **L1** ≤ run2/run3 (~0.47) with **visually brighter** peak regions on QC PNGs.
-2. Val **L1** used for checkpoint (automatic with `--loss l1`).
-3. Re-run full eval on `best_model.pt`; compare `test_error_pred_*.png` to run2 side by side.
+1. Training stops before ~epoch 50 with best checkpoint near the val L1 knee.
+2. Test L1 ≤ run4 (~0.47); QC at least not worse than run4 on easy/normal/hard panels.
+3. If still too smooth → **run5** architecture ablation (wider U-Net or dropout), not another 60-epoch L1 sweep.
 
-**Optional run5** if run4 is still too smooth: `--loss huber --huber-delta 1.0`, or weighted MSE.
+Train command: **run4b** block in Training section above. Eval:
 
-Train and eval commands are in the sections above (`error_unet_run4`).
+```bash
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4b --eval-dir datasets/IXI_unigrad_io --no-show
+```
+
+---
+
+## Plan: run5 (architecture — not implemented)
+
+Only if run4b QC is still peak-blurred:
+
+| Change | Flag / code | Notes |
+| --- | --- | --- |
+| Wider U-Net | `--base-channels 48` | More capacity for localized errors |
+| Dropout | `DoubleConv3d` p=0.1–0.2 | Reduce overfitting on train L1 |
+| Huber loss | `--loss huber --huber-delta 1.0` | Between L1 and MSE on heavy tails |
+
+Keep inputs/target/mask pipeline unchanged.
 
 ---
 

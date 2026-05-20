@@ -12,8 +12,9 @@ Layout from ``create_unigrad_io_data.py``:
 Model input (5 channels, ``N×C×D×H×W``): robust-normalized subject + atlas,
 ``phi_pred / phi_scale``. Loss and metrics use ``valid_mask`` only.
 
-Optimizer: AdamW (default ``lr=1e-3``). LR schedule: ``ReduceLROnPlateau`` on the validation
-metric that matches ``--loss`` (``val_mse``, ``val_l1``, or ``val_huber``).
+Optimizer: AdamW (default ``lr=1e-3``). LR schedule: ``ReduceLROnPlateau`` on ``val_{loss}``.
+Early stopping: no improvement > ``--early-stop-min-delta`` (default 0.005) for
+``--early-stop-patience`` val checks (default 10).
 
 Loss: ``total = regression_loss + smooth_weight * tv_3d(pred)``. Regression is one of
 ``--loss mse`` (default), ``l1``, or ``huber`` (``--huber-delta``, default 1.0 in same units as
@@ -31,10 +32,10 @@ Speed (full volumes are expensive; default is one 3D U-Net step per subject per 
 True multi-GPU needs DDP (not implemented); one epoch ≈ 403 train + 58 val forward passes at batch 1.
 
 Example (MSE, default):
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --out-dir assets/runs/unigrad-io/error_unet_run4 --epochs 50 --batch-size 2 --num-workers 4 
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 2 --out-dir assets/runs/unigrad-io/error_unet_run2
 
-Example (L1 + W&B + compile, planned run4):
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --out-dir assets/runs/unigrad-io/error_unet_run4 --epochs 50 --batch-size 2 --num-workers 4 --loss l1 --smooth-weight 0 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run4
+Example (L1 re-run with early stop, run4b):
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 60 --batch-size 2 --loss l1 --val-every 3 --early-stop-patience 8 --early-stop-min-delta 0.005 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run4b --out-dir assets/runs/unigrad-io/error_unet_run4b
 
 """
 
@@ -116,7 +117,7 @@ def load_atlas_valid_mask_dhw(data_root: Path) -> np.ndarray | None:
     return mask.astype(np.bool_, copy=False)
 
 DEFAULT_EPOCHS = 25
-DEFAULT_EARLY_STOP_PATIENCE = 10
+DEFAULT_EARLY_STOP_PATIENCE = 8
 
 
 def amp_autocast(enabled: bool):
@@ -479,21 +480,20 @@ def subset_dataset_paths(ds: UniGradIOErrorDataset, max_files: int | None) -> No
 
 
 @torch.no_grad()
-def evaluate(
+def evaluate_primary(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
     *,
+    loss: str,
     use_amp: bool,
     huber_delta: float,
     show_progress: bool = True,
     desc: str = "val",
     overall_pbar: tqdm | None = None,
-) -> tuple[float, float, float]:
+) -> float:
     model.eval()
-    sum_mse = 0.0
-    sum_l1 = 0.0
-    sum_huber = 0.0
+    total = 0.0
     n = 0
     it = tqdm(loader, desc=desc, leave=False, unit="batch", disable=not show_progress, position=2)
     for batch in it:
@@ -502,14 +502,14 @@ def evaluate(
         mask = batch["mask"].to(device, non_blocking=True)
         with amp_autocast(use_amp):
             pred = model(x)
-            sum_mse += float(masked_mse(pred, y, mask))
-            sum_l1 += float(masked_l1(pred, y, mask))
-            sum_huber += float(masked_huber(pred, y, mask, huber_delta))
+            total += float(
+                masked_regression_loss(pred, y, mask, loss=loss, huber_delta=huber_delta)
+            )
         n += 1
         if overall_pbar is not None:
             overall_pbar.update(1)
-            overall_pbar.set_postfix(phase="val", val_mse=f"{sum_mse / n:.3f}")
-    return sum_mse / max(n, 1), sum_l1 / max(n, 1), sum_huber / max(n, 1)
+            overall_pbar.set_postfix(phase="val", val=f"{total / max(n, 1):.3f}")
+    return total / max(n, 1)
 
 
 def train_epoch(
@@ -580,9 +580,7 @@ def metrics_csv_header(loss: str) -> list[str]:
         "epoch",
         "loss",
         primary_train_col(loss),
-        "val_mse",
-        "val_l1",
-        "val_huber",
+        primary_val_col(loss),
         "elapsed_s",
     ]
 
@@ -600,11 +598,6 @@ def loss_display_name(loss: str) -> str:
     if loss == "huber":
         return "Huber"
     raise ValueError(f"Unknown loss {loss!r}")
-
-
-def val_metric_for_training_loss(loss: str, val_mse: float, val_l1: float, val_huber: float) -> float:
-    by_name = {"mse": val_mse, "l1": val_l1, "huber": val_huber}
-    return by_name[loss]
 
 
 def init_wandb(args: argparse.Namespace, meta: dict) -> object | None:
@@ -637,9 +630,6 @@ def log_wandb_epoch(
     loss_name: str,
     train: float,
     val: float,
-    val_mse: float,
-    val_l1: float,
-    val_huber: float,
     lr: float,
     elapsed_s: float,
     best_val_metric: float,
@@ -650,22 +640,18 @@ def log_wandb_epoch(
 
     train_col = primary_train_col(loss_name)
     val_col = primary_val_col(loss_name)
-    payload: dict = {
-        "epoch": epoch,
-        "loss": loss_name,
-        train_col: train,
-        val_col: val,
-        "lr": lr,
-        "elapsed_s": elapsed_s,
-        f"best_{val_col}": best_val_metric,
-    }
-    if loss_name != "mse" and np.isfinite(val_mse):
-        payload["val_mse"] = val_mse
-    if loss_name != "l1" and np.isfinite(val_l1):
-        payload["val_l1"] = val_l1
-    if loss_name != "huber" and np.isfinite(val_huber):
-        payload["val_huber"] = val_huber
-    wandb.log(payload, step=epoch)
+    wandb.log(
+        {
+            "epoch": epoch,
+            "loss": loss_name,
+            train_col: train,
+            val_col: val,
+            "lr": lr,
+            "elapsed_s": elapsed_s,
+            f"best_{val_col}": best_val_metric,
+        },
+        step=epoch,
+    )
 
 
 def finish_wandb(
@@ -782,14 +768,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--early-stop-patience",
         type=int,
         default=DEFAULT_EARLY_STOP_PATIENCE,
-        help="Stop if val MSE does not improve for this many epochs (0 = disabled).",
+        help="Stop after this many val checks without meaningful improvement (0 = off).",
+    )
+    p.add_argument(
+        "--early-stop-min-delta",
+        type=float,
+        default=0.005,
+        help="Min decrease in val loss (matching --loss) to reset early-stop counter.",
     )
     p.add_argument(
         "--lr-scheduler",
         type=str,
         default="plateau",
         choices=["plateau", "none"],
-        help="Reduce LR when val MSE plateaus (default), or fixed LR.",
+        help="Reduce LR when primary val loss plateaus (default), or fixed LR.",
     )
     p.add_argument(
         "--lr-patience",
@@ -940,6 +932,7 @@ def main(argv: list[str] | None = None) -> int:
         "lr_factor": args.lr_factor,
         "min_lr": args.min_lr,
         "early_stop_patience": args.early_stop_patience,
+        "early_stop_min_delta": args.early_stop_min_delta,
         "val_every": args.val_every,
         "val_start_epoch": val_start_epoch,
         "val_start_frac": args.val_start_frac,
@@ -964,9 +957,7 @@ def main(argv: list[str] | None = None) -> int:
     best_val = float("inf")
     best_epoch = 0
     epochs_without_improve = 0
-    last_val_mse = float("inf")
-    last_val_l1 = float("nan")
-    last_val_huber = float("nan")
+    last_val = float("nan")
     best_path = args.out_dir / "best_model.pt"
     show_p = not args.no_progress
     t0 = time.time()
@@ -1022,29 +1013,26 @@ def main(argv: list[str] | None = None) -> int:
         want_val = (epoch % args.val_every == 0) or (epoch == args.epochs)
         run_val = want_val and (epoch >= val_start_epoch)
         if run_val:
-            val_mse, val_l1, val_huber = evaluate(
+            val_metric = evaluate_primary(
                 model,
                 val_loader,
                 device,
+                loss=args.loss,
                 use_amp=use_amp,
                 huber_delta=args.huber_delta,
                 show_progress=show_p,
                 desc=f"val {epoch}/{args.epochs}",
                 overall_pbar=overall_pbar,
             )
-            last_val_mse, last_val_l1, last_val_huber = val_mse, val_l1, val_huber
+            last_val = val_metric
         elif epoch < val_start_epoch:
-            val_mse, val_l1, val_huber = float("nan"), float("nan"), float("nan")
+            val_metric = float("nan")
             if show_p:
                 print(f"  (warmup: no val before epoch {val_start_epoch})")
         else:
-            val_mse, val_l1, val_huber = last_val_mse, last_val_l1, last_val_huber
-            if show_p:
-                print(
-                    f"  (skipped val; last val_{args.loss}="
-                    f"{val_metric_for_training_loss(args.loss, val_mse, val_l1, val_huber):.6f})"
-                )
-        val_metric = val_metric_for_training_loss(args.loss, val_mse, val_l1, val_huber)
+            val_metric = last_val
+            if show_p and np.isfinite(val_metric):
+                print(f"  (skipped val; last val_{args.loss}={val_metric:.6f})")
         if scheduler is not None and run_val and np.isfinite(val_metric):
             scheduler.step(val_metric)
         lr_now = float(opt.param_groups[0]["lr"])
@@ -1052,11 +1040,10 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"epoch {epoch:03d}/{args.epochs}  "
             f"train_{args.loss}={tr_reg:.6f}  val_{args.loss}={val_metric:.6f}  "
-            f"val_mse={val_mse:.6f}  val_l1={val_l1:.6f}  val_huber={val_huber:.6f}  "
-            f"loss={args.loss}  lr={lr_now:.2e}  elapsed={dt:.1f}s"
+            f"lr={lr_now:.2e}  elapsed={dt:.1f}s"
         )
         with open(metrics_path, "a", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow([epoch, args.loss, tr_reg, val_mse, val_l1, val_huber, dt])
+            csv.writer(f).writerow([epoch, args.loss, tr_reg, val_metric, dt])
         best_so_far = best_val if np.isnan(val_metric) else min(best_val, val_metric)
         log_wandb_epoch(
             wandb_run,
@@ -1064,15 +1051,12 @@ def main(argv: list[str] | None = None) -> int:
             loss_name=args.loss,
             train=tr_reg,
             val=val_metric,
-            val_mse=val_mse,
-            val_l1=val_l1,
-            val_huber=val_huber,
             lr=lr_now,
             elapsed_s=dt,
             best_val_metric=best_so_far,
         )
         if run_val and np.isfinite(val_metric):
-            if val_metric < best_val:
+            if val_metric < best_val - args.early_stop_min_delta:
                 best_val = val_metric
                 best_epoch = epoch
                 epochs_without_improve = 0
@@ -1080,9 +1064,6 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "model_state": checkpoint_state_dict(model),
                         "epoch": epoch,
-                        "val_mse": val_mse,
-                        "val_l1": val_l1,
-                        "val_huber": val_huber,
                         "val_metric": val_metric,
                         "training_loss": args.loss,
                         "config": meta,
@@ -1099,8 +1080,9 @@ def main(argv: list[str] | None = None) -> int:
             and epochs_without_improve >= args.early_stop_patience
         ):
             print(
-                f"Early stopping: no val {args.loss} improvement for {args.early_stop_patience} "
-                f"epoch(s) (best epoch {best_epoch}, val_{args.loss}={best_val:.6f})."
+                f"Early stopping: no val {args.loss} improvement > {args.early_stop_min_delta} "
+                f"for {args.early_stop_patience} val check(s) "
+                f"(best epoch {best_epoch}, val_{args.loss}={best_val:.6f})."
             )
             break
 
