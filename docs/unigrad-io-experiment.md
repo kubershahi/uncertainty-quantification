@@ -45,10 +45,10 @@ Target: **`error_map`** (voxels). Loss and metrics use **`valid_mask`** only.
 
 ### `metrics.csv` columns (current format)
 
-`epoch, loss, train_{loss}, val_{loss}, val_mse, val_l1, val_huber, elapsed_s`
+`epoch, loss, train_{loss}, val_mse, val_l1, val_huber, elapsed_s`
 
-The primary `val_{loss}` is not duplicated in the matching extra column (that cell is `nan`).
-W&B uses the same names (`train_l1`, `val_l1`, …).
+All three val metrics are logged every val pass (no duplicate CSV columns). W&B logs
+`train_{loss}`, `val_{loss}`, and the two other val metrics.
 
 ### Example commands
 

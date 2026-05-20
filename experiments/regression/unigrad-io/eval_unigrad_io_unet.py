@@ -13,7 +13,7 @@ Each QC figure is one axial slice (default z = depth/4) with shared color scales
 subject source, atlas target, |φ_pred|, GT error map, U-Net predicted error map (voxels).
 
 Use ``--curves-only`` to skip Test eval (no GPU). Checkpoints from ``torch.compile`` training load via ``_orig_mod`` key fix.
-Training curves plot ``train_{loss}``, primary ``val_{loss}``, and the two other val metrics (see ``metrics.csv``).
+Training curves plot ``train_{loss}`` plus ``val_mse``, ``val_l1``, and ``val_huber`` (see ``metrics.csv``).
 
 Example (full eval):
 python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4 --eval-dir datasets/IXI_unigrad_io --no-show
@@ -368,10 +368,6 @@ def _csv_float(row: dict[str, str], key: str, default: float = float("nan")) -> 
     return float(row[key])
 
 
-def _loss_plot_label(loss_key: str, split: str) -> str:
-    return teu.metric_plot_label(f"{split}_{loss_key}")
-
-
 def load_metrics_table(metrics_csv: Path) -> tuple[str, dict[str, np.ndarray]] | None:
     """Return (training loss name, column arrays) from metrics.csv (new or legacy format)."""
     if not metrics_csv.is_file():
@@ -395,16 +391,8 @@ def load_metrics_table(metrics_csv: Path) -> tuple[str, dict[str, np.ndarray]] |
         loss_name = rows[-1]["loss"].strip().lower()
 
     train_col = teu.primary_train_col(loss_name)
-    val_col = teu.primary_val_col(loss_name)
-    if train_col in fields and val_col in fields:
+    if train_col in fields:
         train = np.asarray([_csv_float(r, train_col) for r in rows], dtype=float)
-        val = np.asarray([_csv_float(r, val_col) for r in rows], dtype=float)
-        val_mse = np.asarray([_csv_float(r, "val_mse") for r in rows], dtype=float)
-        val_l1 = np.asarray([_csv_float(r, "val_l1") for r in rows], dtype=float)
-        val_huber = np.asarray([_csv_float(r, "val_huber") for r in rows], dtype=float)
-    elif "train" in fields and "val" in fields:
-        train = np.asarray([_csv_float(r, "train") for r in rows], dtype=float)
-        val = np.asarray([_csv_float(r, "val") for r in rows], dtype=float)
         val_mse = np.asarray([_csv_float(r, "val_mse") for r in rows], dtype=float)
         val_l1 = np.asarray([_csv_float(r, "val_l1") for r in rows], dtype=float)
         val_huber = np.asarray([_csv_float(r, "val_huber") for r in rows], dtype=float)
@@ -413,28 +401,17 @@ def load_metrics_table(metrics_csv: Path) -> tuple[str, dict[str, np.ndarray]] |
             [_csv_float(r, f"train_{loss_name}", _csv_float(r, "train_mse")) for r in rows],
             dtype=float,
         )
-        val = np.asarray(
-            [_csv_float(r, f"val_{loss_name}", _csv_float(r, "val_mse")) for r in rows],
-            dtype=float,
-        )
         val_mse = np.asarray([_csv_float(r, "val_mse") for r in rows], dtype=float)
         val_l1 = np.asarray([_csv_float(r, "val_l1") for r in rows], dtype=float)
         val_huber = np.asarray(
             [_csv_float(r, "val_huber") if "val_huber" in fields else float("nan") for r in rows],
             dtype=float,
         )
-        if loss_name == "mse":
-            val_mse[:] = np.nan
-        elif loss_name == "l1":
-            val_l1[:] = np.nan
-        elif loss_name == "huber":
-            val_huber[:] = np.nan
 
     ep = np.asarray(epochs, dtype=int)
     return loss_name, {
         "epoch": ep,
         "train": train,
-        "val": val,
         "val_mse": val_mse,
         "val_l1": val_l1,
         "val_huber": val_huber,
@@ -473,63 +450,56 @@ def plot_training_curves_from_csv(
         val_plot_min_frac=val_plot_min_frac,
     )
     ep_arr = cols["epoch"]
-    val_primary = cols["val"]
-    val_mask = (ep_arr >= vmin_ep) & np.isfinite(val_primary)
-    val_ep_plot = ep_arr[val_mask]
-    val_primary_plot = val_primary[val_mask]
+    val_after_warmup = ep_arr >= vmin_ep
 
     fig, ax = plt.subplots(figsize=(9, 5))
     y_for_scale: list[float] = []
     ax.plot(
         ep_arr,
         cols["train"],
-        label=_loss_plot_label(train_loss, "train"),
+        label=teu.metric_plot_label(teu.primary_train_col(train_loss)),
         color="C0",
         marker=".",
         markersize=3,
     )
     y_for_scale.extend([x for x in cols["train"] if np.isfinite(x)])
 
-    extra_specs = [
-        ("mse", cols["val_mse"], "C1"),
-        ("l1", cols["val_l1"], "C2"),
-        ("huber", cols["val_huber"], "C4"),
+    val_specs = [
+        ("val_mse", cols["val_mse"], "C1"),
+        ("val_l1", cols["val_l1"], "C2"),
+        ("val_huber", cols["val_huber"], "C4"),
     ]
-    if val_ep_plot.size:
+    primary_val_key = teu.primary_val_col(train_loss)
+    val_by_name = {"mse": cols["val_mse"], "l1": cols["val_l1"], "huber": cols["val_huber"]}
+    primary_series = val_by_name[train_loss]
+
+    for label, series, color in val_specs:
+        mask = val_after_warmup & np.isfinite(series)
+        if not np.any(mask):
+            continue
         ax.plot(
-            val_ep_plot,
-            val_primary_plot,
-            label=_loss_plot_label(train_loss, "val"),
-            color="C3",
+            ep_arr[mask],
+            series[mask],
+            label=label,
+            color=color,
             marker=".",
             markersize=3,
+            linewidth=2.0 if label == primary_val_key else 1.2,
         )
-        y_for_scale.extend(val_primary_plot.tolist())
-        for name, series, color in extra_specs:
-            if name == train_loss:
-                continue
-            extra_plot = series[val_mask]
-            if not np.any(np.isfinite(extra_plot)):
-                continue
-            ax.plot(
-                val_ep_plot,
-                extra_plot,
-                label=teu.metric_plot_label(f"val_{name}"),
-                color=color,
-                marker=".",
-                markersize=3,
-                alpha=0.9,
-            )
-            y_for_scale.extend([x for x in extra_plot if np.isfinite(x)])
+        y_for_scale.extend([x for x in series[mask] if np.isfinite(x)])
 
-        best_i = int(np.argmin(val_primary_plot))
-        best_ep = int(val_ep_plot[best_i])
+    best_mask = val_after_warmup & np.isfinite(primary_series)
+    if np.any(best_mask):
+        best_ep_arr = ep_arr[best_mask]
+        best_vals = primary_series[best_mask]
+        best_i = int(np.argmin(best_vals))
+        best_ep = int(best_ep_arr[best_i])
         ax.axvline(
             best_ep,
             color="0.5",
             linestyle="--",
             linewidth=0.8,
-            label=f"best {teu.primary_val_col(train_loss)} (ep {best_ep})",
+            label=f"best {primary_val_key} (ep {best_ep})",
         )
 
     y_arr = np.asarray(y_for_scale, dtype=float)
@@ -543,8 +513,7 @@ def plot_training_curves_from_csv(
         ax.set_ylim(y_lo - pad, y_hi + pad)
 
     ax.set_xlabel("epoch")
-    primary = teu.primary_train_col(train_loss)
-    ax.set_ylabel(f"volume loss ({primary}, val extras)")
+    ax.set_ylabel("volume loss (train + val MSE / L1 / Huber)")
     ax.set_title(format_training_curves_title(run_label), fontsize=11)
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", fontsize=9)
