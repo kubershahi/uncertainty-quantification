@@ -580,7 +580,6 @@ def metrics_csv_header(loss: str) -> list[str]:
         "epoch",
         "loss",
         primary_train_col(loss),
-        primary_val_col(loss),
         "val_mse",
         "val_l1",
         "val_huber",
@@ -606,18 +605,6 @@ def loss_display_name(loss: str) -> str:
 def val_metric_for_training_loss(loss: str, val_mse: float, val_l1: float, val_huber: float) -> float:
     by_name = {"mse": val_mse, "l1": val_l1, "huber": val_huber}
     return by_name[loss]
-
-
-def val_metrics_row(
-    loss: str, val_mse: float, val_l1: float, val_huber: float
-) -> tuple[float, float, float, float]:
-    """Primary val metric plus val_mse / val_l1 / val_huber (nan on the primary column)."""
-    by_name = {"mse": val_mse, "l1": val_l1, "huber": val_huber}
-    primary = by_name[loss]
-    row_mse = float("nan") if loss == "mse" else val_mse
-    row_l1 = float("nan") if loss == "l1" else val_l1
-    row_huber = float("nan") if loss == "huber" else val_huber
-    return primary, row_mse, row_l1, row_huber
 
 
 def init_wandb(args: argparse.Namespace, meta: dict) -> object | None:
@@ -1057,32 +1044,29 @@ def main(argv: list[str] | None = None) -> int:
                     f"  (skipped val; last val_{args.loss}="
                     f"{val_metric_for_training_loss(args.loss, val_mse, val_l1, val_huber):.6f})"
                 )
-        val_primary, row_mse, row_l1, row_huber = val_metrics_row(args.loss, val_mse, val_l1, val_huber)
-        val_metric = val_primary
+        val_metric = val_metric_for_training_loss(args.loss, val_mse, val_l1, val_huber)
         if scheduler is not None and run_val and np.isfinite(val_metric):
             scheduler.step(val_metric)
         lr_now = float(opt.param_groups[0]["lr"])
         dt = time.time() - t0
         print(
             f"epoch {epoch:03d}/{args.epochs}  "
-            f"train_{args.loss}={tr_reg:.6f}  val_{args.loss}={val_primary:.6f}  "
-            f"val_mse={row_mse:.6f}  val_l1={row_l1:.6f}  val_huber={row_huber:.6f}  "
+            f"train_{args.loss}={tr_reg:.6f}  val_{args.loss}={val_metric:.6f}  "
+            f"val_mse={val_mse:.6f}  val_l1={val_l1:.6f}  val_huber={val_huber:.6f}  "
             f"loss={args.loss}  lr={lr_now:.2e}  elapsed={dt:.1f}s"
         )
         with open(metrics_path, "a", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(
-                [epoch, args.loss, tr_reg, val_primary, row_mse, row_l1, row_huber, dt]
-            )
+            csv.writer(f).writerow([epoch, args.loss, tr_reg, val_mse, val_l1, val_huber, dt])
         best_so_far = best_val if np.isnan(val_metric) else min(best_val, val_metric)
         log_wandb_epoch(
             wandb_run,
             epoch=epoch,
             loss_name=args.loss,
             train=tr_reg,
-            val=val_primary,
-            val_mse=row_mse,
-            val_l1=row_l1,
-            val_huber=row_huber,
+            val=val_metric,
+            val_mse=val_mse,
+            val_l1=val_l1,
+            val_huber=val_huber,
             lr=lr_now,
             elapsed_s=dt,
             best_val_metric=best_so_far,
