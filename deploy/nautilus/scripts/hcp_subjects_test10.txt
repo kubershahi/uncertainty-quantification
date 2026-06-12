@@ -1,0 +1,13 @@
+# Ten HCP S1200 subjects (common tutorial / smoke-test IDs). One ID per line.
+# Use without listing S3 first:
+#   SUBJECT_LIST_FILE=deploy/nautilus/scripts/hcp_subjects_test10.txt PARALLEL_JOBS=4 bash deploy/nautilus/scripts/download_hcp.sh
+100206
+100307
+100408
+100610
+101006
+101107
+101309
+101915
+102008
+102109
