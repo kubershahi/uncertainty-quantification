@@ -32,18 +32,17 @@ T1_KEY="T1w/T1w_acpc_dc_restore_brain.nii.gz"
 SEG_KEY="T1w/aparc+aseg.nii.gz"
 MASK_KEY="T1w/brainmask_fs.nii.gz"
 
-# Read 6-digit subject IDs from a file (skip # comments, blank lines, CRLF).
+# Read 6-digit subject IDs (skip # comments, blank lines, CRLF).
+# Use grep for {6} — POSIX awk (mawk in pytorch image) does not support {n} intervals.
+filter_subject_ids() {
+  sed 's/\r$//' |
+    grep -vE '^[[:space:]]*#|^[[:space:]]*$' |
+    sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+    grep -E '^[0-9]{6}$'
+}
+
 normalize_subject_list() {
-  local src="$1"
-  local dst="$2"
-  sed 's/\r$//' "$src" | awk '
-    /^[[:space:]]*#/ { next }
-    /^[[:space:]]*$/ { next }
-    {
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
-      if ($0 ~ /^[0-9]{6}$/) print
-    }
-  ' >"$dst"
+  filter_subject_ids <"$1" >"$2"
 }
 
 log() {
@@ -123,7 +122,7 @@ elif [[ "$REFRESH_SUBJECT_LIST" == "1" || ! -s "$SUBJECT_LIST" ]]; then
   log "Listing subjects under ${BUCKET}/ ..."
   aws s3 ls "${BUCKET}/" --region "$AWS_REGION" |
     awk '/PRE/ { gsub(/\//, "", $NF); print $NF }' |
-    awk '/^[0-9]{6}$/' |
+    filter_subject_ids |
     sort -u >"$SUBJECT_LIST"
   log "Wrote ${SUBJECT_LIST}"
   cp "$SUBJECT_LIST" "$ACTIVE_LIST"
@@ -140,7 +139,7 @@ if [[ "$N_SUBJ" -lt 1 ]]; then
   if [[ -n "${SUBJECT_LIST_FILE:-}" && -f "${SUBJECT_LIST_FILE}" ]]; then
     echo "  Source file (${SUBJECT_LIST_FILE}) has $(wc -l <"${SUBJECT_LIST_FILE}" | tr -d ' ') line(s). First lines:" >&2
     head -5 "${SUBJECT_LIST_FILE}" | sed 's/^/    /' >&2
-    echo "  If IDs are missing, run: git pull   (need deploy/nautilus/scripts/hcp_subjects_test10.txt)" >&2
+    echo "  IDs look valid but were not parsed — update download_hcp.sh (filter_subject_ids fix)." >&2
   fi
   exit 1
 fi
