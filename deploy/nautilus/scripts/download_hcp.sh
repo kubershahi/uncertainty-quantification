@@ -61,12 +61,13 @@ mark_failure() {
 pull_object() {
   local subj="$1"
   local rel_key="$2"
-  local dest="$3"
+  local dest="${OUTDIR}/${subj}/${rel_key}"
   local src="${BUCKET}/${subj}/${rel_key}"
 
   if [[ -s "$dest" ]]; then
     return 0
   fi
+  mkdir -p "$(dirname "$dest")"
   if aws s3 cp "$src" "$dest" --region "$AWS_REGION" --only-show-errors; then
     return 0
   fi
@@ -77,7 +78,6 @@ pull_object() {
 
 download_subject() {
   local subj="$1"
-  local base="${OUTDIR}/${subj}/T1w"
 
   if [[ ! "$subj" =~ ^[0-9]{6}$ ]]; then
     log "WARN: skipping invalid subject id: ${subj}"
@@ -85,11 +85,10 @@ download_subject() {
   fi
 
   log "Downloading ${subj}"
-  mkdir -p "$base"
 
-  pull_object "$subj" "$T1_KEY" "${base}/T1.nii.gz" || true
-  pull_object "$subj" "$SEG_KEY" "${base}/seg.nii.gz" || true
-  pull_object "$subj" "$MASK_KEY" "${base}/mask.nii.gz" || true
+  pull_object "$subj" "$T1_KEY" || true
+  pull_object "$subj" "$SEG_KEY" || true
+  pull_object "$subj" "$MASK_KEY" || true
 }
 
 export AWS_REGION BUCKET OUTDIR T1_KEY SEG_KEY MASK_KEY LOG LOG_LOCK FAIL_DIR
