@@ -32,6 +32,20 @@ T1_KEY="T1w/T1w_acpc_dc_restore_brain.nii.gz"
 SEG_KEY="T1w/aparc+aseg.nii.gz"
 MASK_KEY="T1w/brainmask_fs.nii.gz"
 
+# Read 6-digit subject IDs from a file (skip # comments, blank lines, CRLF).
+normalize_subject_list() {
+  local src="$1"
+  local dst="$2"
+  sed 's/\r$//' "$src" | awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+      if ($0 ~ /^[0-9]{6}$/) print
+    }
+  ' >"$dst"
+}
+
 log() {
   {
     flock -x 200
@@ -95,13 +109,16 @@ command -v aws >/dev/null 2>&1 || {
 log "Checking AWS credentials (region=${AWS_REGION})..."
 aws sts get-caller-identity --region "$AWS_REGION" >>"$LOG" 2>&1
 
+ACTIVE_LIST="${OUTDIR}/.subjects.active.txt"
+
 if [[ -n "${SUBJECT_LIST_FILE:-}" ]]; then
   if [[ ! -f "$SUBJECT_LIST_FILE" ]]; then
     echo "ERROR: SUBJECT_LIST_FILE not found: ${SUBJECT_LIST_FILE}" >&2
     exit 1
   fi
-  SUBJECT_LIST="$SUBJECT_LIST_FILE"
-  log "Using subject list: ${SUBJECT_LIST}"
+  normalize_subject_list "$SUBJECT_LIST_FILE" "$ACTIVE_LIST"
+  SUBJECT_LIST="$ACTIVE_LIST"
+  log "Using subject list: ${SUBJECT_LIST_FILE} -> ${SUBJECT_LIST}"
 elif [[ "$REFRESH_SUBJECT_LIST" == "1" || ! -s "$SUBJECT_LIST" ]]; then
   log "Listing subjects under ${BUCKET}/ ..."
   aws s3 ls "${BUCKET}/" --region "$AWS_REGION" |
@@ -109,17 +126,26 @@ elif [[ "$REFRESH_SUBJECT_LIST" == "1" || ! -s "$SUBJECT_LIST" ]]; then
     awk '/^[0-9]{6}$/' |
     sort -u >"$SUBJECT_LIST"
   log "Wrote ${SUBJECT_LIST}"
+  cp "$SUBJECT_LIST" "$ACTIVE_LIST"
+  SUBJECT_LIST="$ACTIVE_LIST"
 else
   log "Reusing cached subject list: ${SUBJECT_LIST} (set REFRESH_SUBJECT_LIST=1 to rebuild)"
+  cp "$SUBJECT_LIST" "$ACTIVE_LIST"
+  SUBJECT_LIST="$ACTIVE_LIST"
 fi
 
-N_SUBJ="$(grep -cE '^[0-9]{6}$' "$SUBJECT_LIST" || true)"
+N_SUBJ="$(wc -l <"$SUBJECT_LIST" | tr -d ' ')"
 if [[ "$N_SUBJ" -lt 1 ]]; then
-  echo "ERROR: no subjects in ${SUBJECT_LIST}" >&2
+  echo "ERROR: no 6-digit subject IDs in ${SUBJECT_LIST}" >&2
+  if [[ -n "${SUBJECT_LIST_FILE:-}" && -f "${SUBJECT_LIST_FILE}" ]]; then
+    echo "  Source file (${SUBJECT_LIST_FILE}) has $(wc -l <"${SUBJECT_LIST_FILE}" | tr -d ' ') line(s). First lines:" >&2
+    head -5 "${SUBJECT_LIST_FILE}" | sed 's/^/    /' >&2
+    echo "  If IDs are missing, run: git pull   (need deploy/nautilus/scripts/hcp_subjects_test10.txt)" >&2
+  fi
   exit 1
 fi
 
-log "Sample subjects: $(grep -E '^[0-9]{6}$' "$SUBJECT_LIST" | head -3 | tr '\n' ' ')..."
+log "Sample subjects: $(head -3 "$SUBJECT_LIST" | tr '\n' ' ')..."
 log "Total subjects: ${N_SUBJ}"
 log "Output: ${OUTDIR}"
 log "Parallel jobs: ${PARALLEL_JOBS} (set PARALLEL_JOBS=8 or 16 to go faster)"
@@ -130,8 +156,7 @@ if [[ "$PARALLEL_JOBS" -le 1 ]]; then
     download_subject "$subj"
   done <"$SUBJECT_LIST"
 else
-  grep -E '^[0-9]{6}$' "$SUBJECT_LIST" |
-    xargs -P "$PARALLEL_JOBS" -I{} bash -c 'download_subject "$@"' _ {}
+  xargs -P "$PARALLEL_JOBS" -I{} bash -c 'download_subject "$@"' _ {} <"$SUBJECT_LIST"
 fi
 
 FAILURES="$(find "$FAIL_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
