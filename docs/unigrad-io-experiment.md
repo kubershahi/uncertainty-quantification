@@ -39,7 +39,7 @@ Target: **`error_map`** (voxels). Loss and metrics use **`valid_mask`** only.
 - **Optimization**: AdamW, `ReduceLROnPlateau` on **`val_{loss}`** (matches `--loss`).
 - **Checkpoint / early stop**: same **`val_{loss}`** as `--loss`.
 - **Early stop**: **`--early-stop-min-delta`** (default `0.005`) — improvements smaller than this
-  do not reset patience; fixes “micro-improvements” that prevented stop on run4.
+  do not reset patience (used on run4; stopped at epoch 54 with best val at epoch 46).
 - **Val warmup**: **`--val-start-frac 0.1`** (default) — first val at `ceil(0.1 × epochs)`.
   Set **`--val-start-frac 0`** for val from epoch 1.
 
@@ -78,7 +78,7 @@ Default under **`--run-path`**:
 - `test_error_pred_random.png`, `test_error_pred_easy_normal_hard.png`
 
 ```bash
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4b --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4 --eval-dir datasets/IXI_unigrad_io --no-show
 ```
 
 Curves only (no GPU Test pass):
@@ -110,7 +110,7 @@ Implementation: **`UNet3D`** in `train_unigrad_io_unet.py` (`--base-channels`, d
 | Regularization | Optional 3D TV on pred at mask edges (`--smooth-weight`; **0** from run3 onward) |
 
 **Runs 1–4** all use this same U-Net; only loss, TV, epochs, and training schedule differ.
-**Planned run5+** (if run4b still too smooth): document-only ideas below — wider base
+**Planned run5+** (if run4 QC still too smooth): document-only ideas below — wider base
 (`--base-channels 48`), dropout in `DoubleConv3d`, or shallow extra conv head before `out`;
 implement only after run4b QC.
 
@@ -129,7 +129,7 @@ shared color scale can make predictions look “dim” vs peaky GT).
 | **run1** | 15 | 1 | MSE | 0.05 | 1 | ep 15: val MSE 0.709 | **0.691** | 0.566 | Short smoke; under-trained vs later runs |
 | **run2** | 50 | 2 | MSE | 0.02 | 3 | ep 48: val MSE **0.514** | **0.511** | 0.478 | Main 50-epoch MSE baseline; W&B, compile |
 | **run3** | 50 | 2 | MSE | **0** | 1 | ep 44: val MSE **0.518** | 0.528 | **0.474** | TV ablation; similar curves/QC to run2 |
-| **run4** | 60 | 2 | **L1** | **0** | 1 | ep 58: val L1 **0.464** | 0.536 | 0.467 | Same arch as 1–3; L1 did not fix blur; no early stop |
+| **run4** | 54 (of 60) | 2 | **L1** | **0** | 1 | ep 46: val L1 **0.469** | 0.563 | 0.479 | L1 + early stop; QC ≈ run3 |
 
 ### run1 — `error_unet_run1`
 
@@ -166,51 +166,52 @@ shared color scale can make predictions look “dim” vs peaky GT).
   stop, or change loss (MSE regresses toward conditional mean → dull peaks).
 - See also `docs/unigrad-io-error-unet-next-steps.md` for mask-vs-plot notes and ablation list.
 
-### run4 — `error_unet_run4` (first L1 attempt)
+### run4 — `error_unet_run4` (L1 + early stop)
 
-- **Config**: 60 epochs, batch 2, **L1**, TV 0, `val_every=1`, val from epoch 6, compile, W&B.
-  **No** `--early-stop-min-delta` (old code): tiny val L1 gains reset patience → trained to epoch 60.
-- **Architecture**: Same as runs 1–3 (`base_channels=32`, 5→1 U-Net above).
-- **Training**: `train_l1` fell steadily; `val_l1` plateaued ~0.47 after ~epoch 40; train/val gap →
-  overfitting. Curves logged all three val metrics (legacy CSV).
-- **Best checkpoint**: epoch 58 (val L1 **0.464**).
-- **Test**: MSE 0.536, L1 0.467 — similar QC to run2/run3 (blurry peaks, rim artefacts).
-- **Takeaway**: Switching loss to L1 alone did not materially improve spatial QC; need **earlier stop**
-  and possibly **architecture** changes next.
+Artifacts: `assets/runs/unigrad-io/error_unet_run4/` (`training_curves.png`,
+`test_error_pred_random.png`, `test_error_pred_easy_normal_hard.png`, `test_metrics.json`).
+
+- **Config**: max 60 epochs, batch 2, **`--loss l1`**, TV 0, `val_every=1`, val from epoch 6,
+  **`--early-stop-patience 8`**, **`--early-stop-min-delta 0.005`**, compile, W&B (`unc-quan`).
+  Same **`UNet3D`** as runs 1–3 (`base_channels=32`).
+- **Training** (see `metrics.csv`, two-curve plot):
+  - **`train_l1`**: ~0.62 → **0.37** by epoch 54 (steady drop).
+  - **`val_l1`**: noisy; best **0.469** at **epoch 46**; plateaus ~0.47–0.48 after ~epoch 40.
+  - **Early stop** fired at **epoch 54** (8 val checks without improvement > 0.005 after the ep-46 best).
+  - Train/val gap widens after ~epoch 40 → same overfitting pattern as MSE runs, but stop lands near the val knee.
+- **Best checkpoint**: epoch **46** (`val_l1` **0.469**).
+- **Test** (masked, 115 volumes, `test_metrics.json`): MSE **0.563**, L1 **0.479**.
+- **vs run3** (MSE, TV 0): Test L1 **0.474**, MSE **0.528**. Run4 is **marginally worse** on
+  aggregate Test L1/MSE despite a slightly lower best **val** L1; **QC is largely unchanged** vs run3
+  (still smooth/blurred `error pred`, correct easy/normal/hard ranking; hard row may look slightly
+  brighter — worth a side-by-side with run3 PNGs).
+- **Takeaway**: **L1 alone** did not fix peak blur or mask rims. Early stop + min-delta worked as
+  intended (54 epochs, best ~46). Next lever is likely **architecture** (run5) or **`val_every=3`**
+  (run4b) rather than another long L1 run with the same schedule.
 
 ---
 
-## Plan: run4b (L1 re-run)
+## Plan: run4b (optional — stabler val)
 
-**Goal**: Stop near the val L1 plateau (~epoch 40–45), not epoch 58–60.
+Only if you want to re-run L1 with **`--val-every 3`** (less noisy val curve, as in run2) while
+keeping the same early-stop settings. Run4 already used min-delta early stop successfully.
 
 | Setting | Value | Rationale |
 | --- | --- | --- |
-| `--loss` | **`l1`** | Same objective as run4 |
-| `--smooth-weight` | **`0`** | Unchanged |
-| `--val-every` | **`3`** | Fewer, stabler val checks (run2) |
-| `--early-stop-min-delta` | **`0.005`** | Ignore sub-0.005 val L1 noise |
-| `--early-stop-patience` | **`8`** | 8 val checks without meaningful gain |
-| Metrics / curves | **`train_l1`, `val_l1` only** | Less clutter; matches checkpoint metric |
-| Architecture | **same as runs 1–4** | Isolate schedule/logging fixes |
-
-**Success criteria**
-
-1. Training stops before ~epoch 50 with best checkpoint near the val L1 knee.
-2. Test L1 ≤ run4 (~0.47); QC at least not worse than run4 on easy/normal/hard panels.
-3. If still too smooth → **run5** architecture ablation (wider U-Net or dropout), not another 60-epoch L1 sweep.
-
-Train command: **run4b** block in Training section above. Eval:
+| `--loss` | **`l1`** | Same as run4 |
+| `--val-every` | **`3`** | Fewer val spikes on curves |
+| `--early-stop-min-delta` | **`0.005`** | Same as run4 |
+| `--early-stop-patience` | **`8`** | Same as run4 |
 
 ```bash
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4b --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4 --eval-dir datasets/IXI_unigrad_io --no-show
 ```
 
 ---
 
 ## Plan: run5 (architecture — not implemented)
 
-Only if run4b QC is still peak-blurred:
+Only if run4 (or run4b) QC is still peak-blurred:
 
 | Change | Flag / code | Notes |
 | --- | --- | --- |
