@@ -57,7 +57,7 @@ With default `b = 32`, the channel ladder is **32 → 64 → 128 → 256 → 512
 ├── assets/                # Report figures; example run under assets/runs/error_unet_run1/
 ├── data/                  # Local tensors (gitignored; use Drive or regenerate)
 ├── scripts/               # IXI 2D slicing, PKL/NIfTI helpers
-├── docs/                  # See docs/NAUTILUS.md (cluster runbook), GPU_MEMORY_OPTIMIZATIONS.md, unigrad-io-experiment.md
+├── docs/                  # See docs/nautilus.md (cluster runbook), gpu-memory-optimizations.md, unigrad-io-experiment.md
 ├── models/                # Optional local checkpoints (gitignored)
 ├── requirements.txt
 └── README.md
