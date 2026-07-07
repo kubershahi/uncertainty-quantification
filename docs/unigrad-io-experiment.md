@@ -236,7 +236,7 @@ python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl --split Train
 Outputs: `sweep_io_<subject>_images.png`, `_curves.png`, `_metrics.csv` beside `--save-path`.
 Pick `N` where LNCC plateaus, folds stay ~0, and row-4 `error_map` highlights real anatomy
 (typically **40–80** on IXI). Full sweep protocol was the original content of this file;
-see `reports/uniGradICON.pdf` Eq. (1) and `docs/GPU_MEMORY_OPTIMIZATIONS.md`.
+see `reports/uniGradICON.pdf` Eq. (1) and `docs/gpu-memory-optimizations.md`.
 
 ---
 

@@ -90,7 +90,7 @@ spec:
                           }
                           SCRIPT=/files/repo/uncertainty-quantification/deploy/nautilus/scripts/start-jupyter-lab.sh
                           if [[ ! -f "${SCRIPT}" ]]; then
-                            echo "ERROR: ${SCRIPT} not found. Clone the repo onto PVC under /files/repo/ (see docs/NAUTILUS.md), then: kubectl rollout restart deployment unc-jupyter" >&2
+                            echo "ERROR: ${SCRIPT} not found. Clone the repo onto PVC under /files/repo/ (see docs/nautilus.md), then: kubectl rollout restart deployment unc-jupyter" >&2
                             exit 1
                           fi
                           exec bash "${SCRIPT}"
