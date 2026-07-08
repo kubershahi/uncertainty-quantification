@@ -8,7 +8,7 @@ Layout (columns = subjects):
   row 3 — aparc+aseg (only with ``--show-segmentation``)
 
 Example:
-python experiments/unigrad-synth/visualize_hcp_data.py --data-dir datasets/hcp --num-samples 3 --save-path assets/images/unigrad-synth/hcp/hcp_random3.png --no-show
+ 
 python experiments/unigrad-synth/visualize_hcp_data.py --data-dir datasets/hcp --num-samples 3 --show-segmentation --save-path assets/images/unigrad-synth/hcp/hcp_random3_seg.png --no-show
 """
 
@@ -22,7 +22,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
-from matplotlib.patches import Patch
+from nibabel.orientations import aff2axcodes
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 T1_NAME = "T1w_acpc_dc_restore_brain.nii.gz"
@@ -57,6 +57,13 @@ def load_nifti(path: Path) -> np.ndarray:
     return np.asarray(nib.load(str(path)).get_fdata(dtype=np.float32))
 
 
+def load_nifti_with_axcodes(path: Path) -> tuple[np.ndarray, tuple[str, str, str]]:
+    img = nib.load(str(path))
+    data = np.asarray(img.get_fdata(dtype=np.float32))
+    axcodes = tuple(str(c) for c in aff2axcodes(img.affine))
+    return data, axcodes  # e.g., ('R', 'A', 'S')
+
+
 def default_slice_index(vol: np.ndarray) -> int:
     return int(vol.shape[2] // 2)
 
@@ -72,6 +79,25 @@ def orient_axial(sl: np.ndarray) -> np.ndarray:
     return np.rot90(sl)
 
 
+def _opposite_axis_label(code: str) -> str:
+    pairs = {"L": "R", "R": "L", "A": "P", "P": "A", "S": "I", "I": "S"}
+    return pairs.get(code, "?")
+
+
+def _display_lr_labels_from_axcodes(axcodes: tuple[str, str, str]) -> tuple[str, str]:
+    """
+    For display = np.rot90(axial_slice), derive left/right patient labels.
+
+    With sl = vol[:, :, z], axis 0 and 1 are in-plane. np.rot90 makes:
+      - display-left  -> low index of original axis 0
+      - display-right -> high index of original axis 0
+    If axcodes[0] is positive-dir label for axis 0, low index is its opposite.
+    """
+    right_label = axcodes[0]
+    left_label = _opposite_axis_label(right_label)
+    return left_label, right_label
+
+
 def select_subjects(
     subjects: list[Path],
     *,
@@ -83,14 +109,12 @@ def select_subjects(
     return rng.sample(subjects, n)
 
 
-def _style_axes(ax: plt.Axes, *, show_xlabel: bool, show_ylabel: bool, ylabel: str) -> None:
+def _style_axes(ax: plt.Axes, *, show_ylabel: bool, ylabel: str) -> None:
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_linewidth(0.8)
         spine.set_color("0.35")
-    if show_xlabel:
-        ax.set_xlabel("R ←  axial (L–R)  → L", fontsize=_TICK_SIZE, labelpad=4)
     if show_ylabel:
         ax.set_ylabel(ylabel, fontsize=_LABEL_SIZE, rotation=90, labelpad=8)
 
@@ -103,6 +127,22 @@ def _add_colorbar(fig: plt.Figure, ax: plt.Axes, im, label: str) -> None:
     cbar.ax.tick_params(labelsize=_TICK_SIZE)
 
 
+def zscore_with_mask(vol: np.ndarray, mask: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Z-score normalize using only in-mask voxels; outside-mask set to 0."""
+    m = mask > 0.5
+    in_vals = vol[m]
+    in_vals = in_vals[np.isfinite(in_vals)]
+    if in_vals.size == 0:
+        return np.zeros_like(vol, dtype=np.float32)
+    mu = float(np.mean(in_vals))
+    sigma = float(np.std(in_vals))
+    sigma = max(sigma, eps)
+    z = (vol.astype(np.float32) - mu) / sigma
+    z[~m] = 0.0
+    z[~np.isfinite(z)] = 0.0
+    return z.astype(np.float32)
+
+
 def plot_hcp_samples(
     data_dir: Path,
     save_path: Path | None,
@@ -112,6 +152,8 @@ def plot_hcp_samples(
     seed: int = 42,
     slice_index: int | None = None,
     show_segmentation: bool = False,
+    print_orientation: bool = True,
+    show_orientation_note: bool = True,
 ) -> None:
     subjects = collect_subjects(data_dir, require_seg=show_segmentation)
     if not subjects:
@@ -127,16 +169,17 @@ def plot_hcp_samples(
     ncols = len(picked)
     nrows = 3 if show_segmentation else 2
 
-    # Preload slices for shared T1 intensity scale and consistent z labels
+    # Preload slices and apply masked z-score normalization for T1 display
     rows_data: list[dict] = []
-    t1_vals: list[np.ndarray] = []
     seg_vals: list[np.ndarray] = []
     for subj_dir in picked:
         t1w = subj_dir / "T1w"
-        t1 = load_nifti(t1w / T1_NAME)
+        t1, axcodes = load_nifti_with_axcodes(t1w / T1_NAME)
         mask = load_nifti(t1w / MASK_NAME)
-        t1_sl, z = axial_slice(t1, slice_index)
+        t1_z = zscore_with_mask(t1, mask)
+        t1_sl, z = axial_slice(t1_z, slice_index)
         mask_sl, _ = axial_slice(mask, slice_index)
+        left_label, right_label = _display_lr_labels_from_axcodes(axcodes)
         entry: dict = {
             "id": subj_dir.name,
             "t1": orient_axial(t1_sl),
@@ -144,18 +187,23 @@ def plot_hcp_samples(
             "z": z,
             "nz": t1.shape[2],
             "shape": t1.shape,
+            "left_label": left_label,
+            "right_label": right_label,
+            "axcodes": axcodes,
         }
-        t1_vals.append(t1_sl[np.isfinite(t1_sl) & (t1_sl > 0)])
         if show_segmentation:
             seg = load_nifti(t1w / SEG_NAME)
             seg_sl, _ = axial_slice(seg, slice_index)
             entry["seg"] = orient_axial(seg_sl)
             seg_vals.append(seg_sl[seg_sl > 0])
         rows_data.append(entry)
+        if print_orientation:
+            print(
+                f"{subj_dir.name}: axcodes={axcodes} "
+                f"(affine axis+ = {axcodes[0]}/{axcodes[1]}/{axcodes[2]})"
+            )
 
-    t1_vmax = float(np.percentile(np.concatenate(t1_vals), 99.0)) if t1_vals else 1.0
-    if t1_vmax <= 0:
-        t1_vmax = 1.0
+    t1_vmin, t1_vmax = -3.0, 3.0
     seg_vmax = float(np.max(np.concatenate(seg_vals))) if seg_vals else 1.0
 
     plt.rcParams.update(
@@ -180,18 +228,15 @@ def plot_hcp_samples(
         constrained_layout=False,
     )
 
-    row_ylabels = [
-        "T1w (brain-extracted)\nintensity",
-        "Brain mask\n(brainmask_fs)",
-    ]
+    row_ylabels = ["T1w image", "Brain mask"]
     if show_segmentation:
-        row_ylabels.append("Segmentation\n(aparc+aseg)")
+        row_ylabels.append("Segmentation labels")
 
     im_t1_last = None
     im_seg_last = None
 
     for col, entry in enumerate(rows_data):
-        # Column header: subject id + slice
+        # Top-row panel title: subject id + slice location
         axes[0, col].set_title(
             f"Subject {entry['id']}\naxial $z$ = {entry['z']} / {entry['nz'] - 1}",
             fontsize=_SUBTITLE_SIZE,
@@ -203,14 +248,13 @@ def plot_hcp_samples(
         im_t1_last = axes[0, col].imshow(
             entry["t1"],
             cmap="gray",
-            vmin=0.0,
+            vmin=t1_vmin,
             vmax=t1_vmax,
             interpolation="nearest",
             origin="upper",
         )
         _style_axes(
             axes[0, col],
-            show_xlabel=False,
             show_ylabel=(col == 0),
             ylabel=row_ylabels[0],
         )
@@ -225,9 +269,9 @@ def plot_hcp_samples(
             interpolation="nearest",
             origin="upper",
         )
+        axes[1, col].set_title("Brain mask", fontsize=_SUBTITLE_SIZE, pad=6)
         _style_axes(
             axes[1, col],
-            show_xlabel=(not show_segmentation),
             show_ylabel=(col == 0),
             ylabel=row_ylabels[1],
         )
@@ -243,55 +287,50 @@ def plot_hcp_samples(
                 interpolation="nearest",
                 origin="upper",
             )
+            axes[2, col].set_title("Segmentation labels", fontsize=_SUBTITLE_SIZE, pad=6)
             _style_axes(
                 axes[2, col],
-                show_xlabel=True,
                 show_ylabel=(col == 0),
                 ylabel=row_ylabels[2],
             )
-
-    # Colorbar on last column of T1 row
-    if im_t1_last is not None:
-        _add_colorbar(fig, axes[0, -1], im_t1_last, "T1 intensity (a.u.)")
 
     # Colorbar on last column of segmentation row
     if show_segmentation and im_seg_last is not None:
         _add_colorbar(fig, axes[2, -1], im_seg_last, "FreeSurfer label ID")
 
-    # Mask legend (binary)
-    mask_handles = [
-        Patch(facecolor="black", edgecolor="0.35", label="Background (0)"),
-        Patch(facecolor="white", edgecolor="0.35", label="Brain (1)"),
-    ]
-    axes[1, -1].legend(
-        handles=mask_handles,
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.0),
-        fontsize=_TICK_SIZE,
-        frameon=True,
-        fancybox=False,
-        edgecolor="0.5",
-        title="Mask",
-        title_fontsize=_TICK_SIZE,
-    )
+    z_values = sorted({int(e["z"]) for e in rows_data})
+    nz_values = sorted({int(e["nz"] - 1) for e in rows_data})
+    if len(z_values) == 1 and len(nz_values) == 1:
+        z_note = f"axial z = {z_values[0]} / {nz_values[0]}"
+    else:
+        z_note = "axial z shown per panel"
 
-    z_note = "mid-volume" if slice_index is None else f"z = {slice_index}"
     fig.suptitle(
-        "HCP Young Adult (S1200) — structural T1w QC",
+        "HCP Young Adult (S1200) — Structural T1w Plot",
         fontsize=_TITLE_SIZE,
         fontweight="bold",
         y=0.98,
     )
+    left_right_pairs = sorted({(e["left_label"], e["right_label"]) for e in rows_data})
+    if len(left_right_pairs) == 1:
+        orient_note = (
+            f"Display convention from NIfTI affine: image-left = {left_right_pairs[0][0]}, "
+            f"image-right = {left_right_pairs[0][1]}"
+        )
+    else:
+        orient_note = "Display convention from NIfTI affine varies across selected subjects"
+
+    subtitle = (
+        f"Random sample of {ncols} / {len(subjects)} subjects "
+        f"(seed = {seed})  ·  {z_note}"
+    )
+    if show_orientation_note:
+        subtitle = subtitle + f"\n{orient_note}"
+
     fig.text(
         0.5,
         0.935,
-        (
-            f"Random sample of {ncols} / {len(subjects)} subjects "
-            f"(seed = {seed})  ·  axial slice ({z_note})\n"
-            f"Radiological display (top = superior; left of panel = subject right).  "
-            f"Files: {T1_NAME}, {MASK_NAME}"
-            + (f", {SEG_NAME}" if show_segmentation else "")
-        ),
+        subtitle,
         ha="center",
         va="top",
         fontsize=_TICK_SIZE,
@@ -300,11 +339,11 @@ def plot_hcp_samples(
 
     fig.subplots_adjust(
         left=0.12,
-        right=0.88 if show_segmentation else 0.86,
-        top=0.86,
+        right=0.90 if show_segmentation else 0.88,
+        top=0.84,
         bottom=0.08,
-        wspace=0.20,
-        hspace=0.30,
+        wspace=0.24,
+        hspace=0.34,
     )
 
     if save_path is not None:
@@ -348,6 +387,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Add a third row with aparc+aseg FreeSurfer labels.",
     )
     p.add_argument(
+        "--no-orientation-note",
+        action="store_true",
+        help="Hide orientation convention line from figure subtitle.",
+    )
+    p.add_argument(
+        "--no-print-orientation",
+        action="store_true",
+        help="Disable per-subject orientation printout to stdout.",
+    )
+    p.add_argument(
         "--save-path",
         type=Path,
         default=Path("assets/images/unigrad-synth/hcp/hcp_random3.png"),
@@ -369,6 +418,8 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         slice_index=args.slice_index,
         show_segmentation=args.show_segmentation,
+        print_orientation=not args.no_print_orientation,
+        show_orientation_note=not args.no_orientation_note,
     )
     return 0
 
