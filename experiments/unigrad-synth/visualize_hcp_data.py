@@ -8,7 +8,7 @@ Layout (columns = subjects):
   row 3 — aparc+aseg (only with ``--show-segmentation``)
 
 Example:
- 
+python experiments/unigrad-synth/visualize_hcp_data.py --data-dir datasets/hcp --num-samples 3 --save-path assets/images/unigrad-synth/hcp/hcp_random3.png --no-show
 python experiments/unigrad-synth/visualize_hcp_data.py --data-dir datasets/hcp --num-samples 3 --show-segmentation --save-path assets/images/unigrad-synth/hcp/hcp_random3_seg.png --no-show
 """
 

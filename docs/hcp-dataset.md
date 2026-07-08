@@ -13,7 +13,7 @@ vocabulary and `docs/unigrad-synth-experiment.md` for the IXI synth pipeline.
 | --- | --- | --- | --- |
 | **Synth (IXI 2D)** | TorchIO triplets → UniGrad fivers | 2D slices, pixels | Known `phi_true` |
 | **IO (IXI 3D)** | UniGrad ICON instance optimization | 3D volumes, voxels | `phi_predio` vs `phi_pred` |
-| **HCP (this doc)** | Minimally preprocessed T1w NIfTI | **Native** 3D, voxels | *Planned:* real registration / synth on volumes |
+| **HCP (this doc)** | Minimally preprocessed T1w NIfTI | **Native** 3D, LAS voxels | Synth `u` in `hcp_synth/` |
 
 **Why HCP (vs IXI for real data):**
 
@@ -127,6 +127,10 @@ datasets/hcp/
 
 Layout: **columns = subjects**, **rows = modality** (T1 top, mask middle; optional segmentation row).
 
+**Orientation:** volumes are stored as **LAS** (`aff2axcodes` → `L/A/S`). Training and synth data
+keep this native voxel order. `visualize_hcp_data.py` applies `np.rot90` for **radiological** axial
+display only (image-left = R, image-right = L); see figure subtitle.
+
 ```bash
 python experiments/unigrad-synth/visualize_hcp_data.py --data-dir datasets/hcp --num-samples 3 --save-path assets/images/unigrad-synth/hcp/hcp_random3.png --no-show
 python experiments/unigrad-synth/visualize_hcp_data.py --data-dir datasets/hcp --num-samples 3 --show-segmentation --save-path assets/images/unigrad-synth/hcp/hcp_random3_seg.png --no-show
@@ -134,14 +138,28 @@ python experiments/unigrad-synth/visualize_hcp_data.py --data-dir datasets/hcp -
 
 ---
 
-## Planned downstream (not implemented in repo yet)
+## HCP 3D synthetic data (Phase I)
 
-Outline only — fill in as experiments land in `docs/unigrad-synth-experiment.md` or a future HCP doc:
+**Script:** `experiments/unigrad-synth/create_synth_data.py`  
+**Output:** `datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<suffix>.npz`
 
-- [ ] Volume prep: resampling / slicing strategy for 3D registration
-- [ ] Synthetic deformations on HCP T1 (TorchIO 3D?) or pairwise registration
-- [ ] UniGradICON / UniGrad IO on HCP volumes
-- [ ] Error-map U-Net training (likely 3D, analogous to `experiments/regression/unigrad-io/`)
+One warp per subject; balanced deformation classes; masked z-score intensities; ground-truth `u` in
+voxels. Pipeline detail (implicit backward warp, identity-grid trick, z-score vs φ):
+`docs/registration-concepts.md` § *3D synthetic deformation and displacement extraction*;
+experiment config: `docs/unigrad-synth-experiment.md`.
+
+```bash
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --workers 8
+```
+
+---
+
+## Planned downstream
+
+- [x] Synthetic deformations on HCP T1 (TorchIO 3D) — `create_synth_data.py`
+- [ ] UniGradICON on HCP synth pairs → predicted displacement, error map
+- [ ] 3D error-map U-Net training
+- [ ] `visualize_hcp_synth_data.py` for NPZ QC
 
 ---
 
@@ -151,7 +169,8 @@ Outline only — fill in as experiments land in `docs/unigrad-synth-experiment.m
 | --- | --- |
 | `scripts/download_hcp.sh` | S3 download to `datasets/hcp/` |
 | `deploy/nautilus/scripts/hcp_subjects_test10.txt` | 10-subject smoke list |
-| `experiments/unigrad-synth/visualize_hcp_data.py` | Random-sample QC figure |
+| `experiments/unigrad-synth/create_synth_data.py` | HCP 3D synth NPZ generation |
 | `docs/registration-concepts.md` | Registration / displacement / error-map concepts |
-| `docs/unigrad-synth-experiment.md` | IXI 2D synth + fiver + U-Net track |
+| `experiments/unigrad-synth/visualize_hcp_data.py` | Random-sample QC figure |
+| `docs/unigrad-synth-experiment.md` | HCP synth pipeline detail |
 | `docs/unigrad-io-experiment.md` | IXI 3D IO + error-map U-Net track |
