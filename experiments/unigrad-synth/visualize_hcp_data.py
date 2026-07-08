@@ -158,7 +158,6 @@ def plot_hcp_samples(
     seed: int = 42,
     slice_index: int | None = None,
     show_segmentation: bool = False,
-    print_orientation: bool = True,
     show_orientation_note: bool = True,
 ) -> None:
     subjects = collect_subjects(data_dir, require_seg=show_segmentation)
@@ -203,11 +202,6 @@ def plot_hcp_samples(
             entry["seg"] = orient_axial(seg_sl)
             seg_vals.append(seg_sl[seg_sl > 0])
         rows_data.append(entry)
-        if print_orientation:
-            print(
-                f"{subj_dir.name}: axcodes={axcodes} "
-                f"(affine axis+ = {axcodes[0]}/{axcodes[1]}/{axcodes[2]})"
-            )
 
     t1_vmin, t1_vmax = -3.0, 3.0
     seg_vmax = float(np.max(np.concatenate(seg_vals))) if seg_vals else 1.0
@@ -398,11 +392,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Hide orientation convention line from figure subtitle.",
     )
     p.add_argument(
-        "--no-print-orientation",
-        action="store_true",
-        help="Disable per-subject orientation printout to stdout.",
-    )
-    p.add_argument(
         "--save-path",
         type=Path,
         default=Path("assets/images/unigrad-synth/hcp/hcp_random3.png"),
@@ -424,7 +413,6 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         slice_index=args.slice_index,
         show_segmentation=args.show_segmentation,
-        print_orientation=not args.no_print_orientation,
         show_orientation_note=not args.no_orientation_note,
     )
     return 0
