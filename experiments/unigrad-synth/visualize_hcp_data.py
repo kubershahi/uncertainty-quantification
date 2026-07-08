@@ -75,7 +75,7 @@ def axial_slice(vol: np.ndarray, slice_index: int | None) -> tuple[np.ndarray, i
 
 
 def orient_axial(sl: np.ndarray) -> np.ndarray:
-    """Radiological-style display: superior at top, right on left of figure."""
+    """Radiological-style display: superior at top, patient right on image-left."""
     return np.rot90(sl)
 
 
@@ -86,16 +86,22 @@ def _opposite_axis_label(code: str) -> str:
 
 def _display_lr_labels_from_axcodes(axcodes: tuple[str, str, str]) -> tuple[str, str]:
     """
-    For display = np.rot90(axial_slice), derive left/right patient labels.
+    Patient L/R at image edges after ``orient_axial`` (np.rot90 on vol[:, :, z]).
 
-    With sl = vol[:, :, z], axis 0 and 1 are in-plane. np.rot90 makes:
-      - display-left  -> low index of original axis 0
-      - display-right -> high index of original axis 0
-    If axcodes[0] is positive-dir label for axis 0, low index is its opposite.
+    ``aff2axcodes`` gives the anatomical direction of *increasing* voxel index per
+    axis — for the **stored 3D volume**, before any display rotation.  For axial
+    ``sl = vol[:, :, z]``, axis 0 is slice rows and axis 1 is slice columns.
+    ``np.rot90`` (counter-clockwise) turns those rows into the horizontal display
+    axis: low row index (opposite of ``axcodes[0]``) on image-left, high row
+    index (``axcodes[0]``) on image-right.
+
+    Example: LAS storage (axcodes[0]='L') -> image-left=R, image-right=L
+    (radiological convention).
     """
-    right_label = axcodes[0]
-    left_label = _opposite_axis_label(right_label)
-    return left_label, right_label
+    axis0_positive = axcodes[0]
+    image_right = axis0_positive
+    image_left = _opposite_axis_label(axis0_positive)
+    return image_left, image_right
 
 
 def select_subjects(
@@ -228,7 +234,7 @@ def plot_hcp_samples(
         constrained_layout=False,
     )
 
-    row_ylabels = ["T1w image", "Brain mask"]
+    row_ylabels = ["T1w slice and image", "Brain mask"]
     if show_segmentation:
         row_ylabels.append("Segmentation labels")
 
@@ -236,9 +242,8 @@ def plot_hcp_samples(
     im_seg_last = None
 
     for col, entry in enumerate(rows_data):
-        # Top-row panel title: subject id + slice location
         axes[0, col].set_title(
-            f"Subject {entry['id']}\naxial $z$ = {entry['z']} / {entry['nz'] - 1}",
+            f"Subject {entry['id']}",
             fontsize=_SUBTITLE_SIZE,
             fontweight="medium",
             pad=8,
@@ -269,7 +274,6 @@ def plot_hcp_samples(
             interpolation="nearest",
             origin="upper",
         )
-        axes[1, col].set_title("Brain mask", fontsize=_SUBTITLE_SIZE, pad=6)
         _style_axes(
             axes[1, col],
             show_ylabel=(col == 0),
@@ -287,7 +291,6 @@ def plot_hcp_samples(
                 interpolation="nearest",
                 origin="upper",
             )
-            axes[2, col].set_title("Segmentation labels", fontsize=_SUBTITLE_SIZE, pad=6)
             _style_axes(
                 axes[2, col],
                 show_ylabel=(col == 0),
@@ -311,14 +314,17 @@ def plot_hcp_samples(
         fontweight="bold",
         y=0.98,
     )
+    axcode_sets = sorted({e["axcodes"] for e in rows_data})
     left_right_pairs = sorted({(e["left_label"], e["right_label"]) for e in rows_data})
-    if len(left_right_pairs) == 1:
+    if len(axcode_sets) == 1 and len(left_right_pairs) == 1:
+        storage = "/".join(axcode_sets[0])
+        img_l, img_r = left_right_pairs[0]
         orient_note = (
-            f"Display convention from NIfTI affine: image-left = {left_right_pairs[0][0]}, "
-            f"image-right = {left_right_pairs[0][1]}"
+            f"Display convention = Radiological-style "
+            f"(image-left = {img_l}, image-right = {img_r}, {storage})"
         )
     else:
-        orient_note = "Display convention from NIfTI affine varies across selected subjects"
+        orient_note = "Display convention varies across selected subjects"
 
     subtitle = (
         f"Random sample of {ncols} / {len(subjects)} subjects "
