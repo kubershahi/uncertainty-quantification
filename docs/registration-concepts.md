@@ -166,6 +166,11 @@ For every integer voxel slot **x** in the target (destination) volume:
    otherwise **sample** the source with trilinear interpolation and write the result to the target
    voxel.
 
+**Display note:** `create_synth_data.py` uses `default_pad_value="minimum"` for vacated voxels after
+global affine warps, then masked z-score sets outside-brain voxels to 0. The fixed brain mask is not
+warped with the image, so QC figures can show **dark voids** in the moving panel where anatomy moved
+away — this is a padding/intensity artifact, not a change to stored **u** (geometry).
+
 This is **backward (pull) warping**: the output grid is fixed; we look up where each output voxel
 came from in the input.
 

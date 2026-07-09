@@ -7,17 +7,21 @@ Input layout (per subject):
     - brainmask_fs.nii.gz
 
 Output layout:
-  datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<deformation>.npz
+  datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<suffix>.npz  (qc_passed=True)
+  datasets/hcp_synth_qc_fail/{Train,Val,Test}/...                 (qc_passed=False)
 
 Each output npz contains:
   - source  : fixed/source image (float32, 3D, masked z-score from brain mask)
   - moving  : deformed image (float32, 3D, same normalization as source)
   - u       : displacement field (float32, shape (3, X, Y, Z), voxel units)
-  - mask    : brain mask (bool, 3D)
+  - mask           : source brain mask (bool, 3D); alias for source_mask
+  - source_mask    : fixed brain mask (bool, 3D)
+  - moving_mask    : source_mask warped with the same transform (bool, 3D)
   - source_affine, source_spacing, u_unit
-  - deformation_class : one of {none, rigid_like, affine, non_rigid, affine_rigid_plus_non_rigid}
-  - subject_id
-  - qc_passed
+  - deformation_class : one of {none, rigid, affine, elastic, affine_elastic}
+  - magnitude_range : low | mid | high | none (TorchIO sampling envelope, not realized ‖u‖)
+  - u_max_interior, u_mean_interior
+  - subject_id, qc_passed
 
 TorchIO transforms run in physical space (mm) using the NIfTI affine; ``u`` is recovered
 in voxel index space via the identity-grid trick (backward warp).
@@ -25,11 +29,13 @@ in voxel index space via the identity-grid trick (backward warp).
 Split policy:
   - deterministic 70/15/15 by subject hash (Train/Val/Test)
   - balanced deformation mix in each split:
-      5% none, 20% rigid-like, 25% affine, 25% non-rigid, 25% mixed (_ar)
+      5% none, 20% rigid, 25% affine, 25% elastic, 25% affine+elastic
 
 Example:
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --workers 8
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --max-subjects 100 --workers 8
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --qc-fail-path datasets/hcp_synth_qc_fail --workers 8
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --max-subjects 30 --workers 4
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth_dryrun --range-grid --no-qc --workers 4
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth_dryrun --range-grid 5 --no-qc
 """
 
 from __future__ import annotations
@@ -65,38 +71,68 @@ VAL_FRAC = 0.15
 # Deformation ratios (must sum to 1.0)
 DEFORMATION_RATIOS = {
     "none": 0.05,
-    "rigid_like": 0.20,
+    "rigid": 0.20,
     "affine": 0.25,
-    "non_rigid": 0.25,
-    "affine_rigid_plus_non_rigid": 0.25,
+    "elastic": 0.25,
+    "affine_elastic": 0.25,
 }
 DEFORMATION_SUFFIX = {
     "none": "none",
-    "rigid_like": "rig",
+    "rigid": "rig",
     "affine": "aff",
-    "non_rigid": "nr",
-    "affine_rigid_plus_non_rigid": "ar",
+    "elastic": "ela",
+    "affine_elastic": "aela",
 }
 
-# Rigid-like transform (rotation + translation only; TorchIO translation in mm)
-RIGID_DEGREES = 6.0
-RIGID_TRANSLATION_MM = 4.0
+DEFAULT_QC_FAIL_ROOT = "datasets/hcp_synth_qc_fail"
 
-# Affine transform (includes scale/shear; TorchIO translation in mm)
-AFFINE_SCALES = (0.97, 1.03)
-AFFINE_DEGREES = 8.0
-AFFINE_TRANSLATION_MM = 4.0
+# Magnitude ranges (within each deformation class except none).
+# Each range sets TorchIO *sampling bounds*; RandomAffine/Elastic still draw uniformly inside them.
+MAGNITUDE_RANGES = ("low", "mid", "high")
+MAGNITUDE_RANGE_FRAC = {"low": 0.30, "mid": 0.40, "high": 0.30}
 
-# Elastic transform
+# Per-range transform parameter bounds (TorchIO: degrees, translation mm, scales, elastic mm)
+RANGE_RIGID = {
+    "low": {"degrees": 3.0, "translation_mm": 2.0},
+    "mid": {"degrees": 6.0, "translation_mm": 4.0},
+    "high": {"degrees": 10.0, "translation_mm": 6.0},
+}
+RANGE_AFFINE = {
+    "low": {"scales": (0.98, 1.02), "degrees": 5.0, "translation_mm": 3.0},
+    "mid": {"scales": (0.97, 1.03), "degrees": 8.0, "translation_mm": 4.0},
+    "high": {"scales": (0.95, 1.05), "degrees": 12.0, "translation_mm": 7.0},
+}
+RANGE_ELASTIC = {
+    "low": {"max_disp_mm": 3.0},
+    "mid": {"max_disp_mm": 6.0},
+    "high": {"max_disp_mm": 9.0},
+}
+
 ELASTIC_NUM_CONTROL_POINTS = 7
-ELASTIC_MAX_DISP_MM = 6.0
 
-# QC checks
+# QC checks — max caps (all classes)
 INTERIOR_MARGIN = 10
 MAX_U_INTERIOR_VOX = 25.0
 MAX_U_GLOBAL_VOX = 60.0
 MIN_MOVING_MEAN_RATIO = 0.05
 MAX_TRANSFORM_ATTEMPTS = 20
+MAX_U_NONE_VOX = 0.5
+
+# Per-class minimum interior ‖u‖ (voxels); none uses MAX_U_NONE_VOX instead
+MIN_U_MAX_INTERIOR_BY_CLASS: dict[str, float | None] = {
+    "none": None,
+    "rigid": 1.5,
+    "affine": 2.0,
+    "elastic": 1.5,
+    "affine_elastic": 3.0,
+}
+MIN_U_MEAN_INTERIOR_BY_CLASS: dict[str, float | None] = {
+    "none": None,
+    "rigid": 0.5,
+    "affine": 0.7,
+    "elastic": 0.5,
+    "affine_elastic": 1.0,
+}
 
 
 @dataclass(frozen=True)
@@ -111,10 +147,25 @@ class Task:
     subject_id: str
     split: str
     deformation_class: str
+    magnitude_range: str
     t1_path: str
     mask_path: str
     out_path: str
+    qc_fail_out_path: str
     seed: int
+    skip_qc: bool = False
+
+
+@dataclass(frozen=True)
+class SampleStats:
+    subject_id: str
+    split: str
+    deformation_class: str
+    magnitude_range: str
+    qc_passed: bool
+    u_max_interior: float
+    u_mean_interior: float
+    rel_path: str
 
 
 def displacement_magnitude(u: np.ndarray) -> np.ndarray:
@@ -132,11 +183,27 @@ def interior_valid_mask(shape_xyz: tuple[int, int, int], margin: int) -> np.ndar
     return mask
 
 
+def u_interior_stats(
+    u: np.ndarray,
+    mask: np.ndarray,
+    shape_xyz: tuple[int, int, int],
+    interior_margin: int,
+) -> tuple[float, float]:
+    mag = displacement_magnitude(u.astype(np.float64))
+    interior = interior_valid_mask(shape_xyz, interior_margin)
+    valid = interior & (mask > 0.5)
+    if valid.any():
+        vals = mag[valid]
+        return float(np.max(vals)), float(np.mean(vals))
+    return float(np.max(mag)), float(np.mean(mag))
+
+
 def passes_checks(
     u: np.ndarray,
     source: np.ndarray,
     moving: np.ndarray,
     mask: np.ndarray,
+    deformation_class: str,
     interior_margin: int,
     max_u_interior_vox: float | None,
     max_u_global_vox: float | None,
@@ -149,8 +216,21 @@ def passes_checks(
     valid = interior & (mask > 0.5)
     if valid.any():
         region_max = float(np.max(mag[valid]))
+        region_mean = float(np.mean(mag[valid]))
     else:
         region_max = full_max
+        region_mean = full_max
+
+    if deformation_class == "none":
+        if region_max >= MAX_U_NONE_VOX:
+            return False
+    else:
+        min_max = MIN_U_MAX_INTERIOR_BY_CLASS.get(deformation_class)
+        min_mean = MIN_U_MEAN_INTERIOR_BY_CLASS.get(deformation_class)
+        if min_max is not None and region_max < min_max:
+            return False
+        if min_mean is not None and region_mean < min_mean:
+            return False
 
     if max_u_global_vox is not None and full_max > max_u_global_vox:
         return False
@@ -170,82 +250,86 @@ def passes_checks(
     return True
 
 
-def build_transform(deformation_class: str) -> tio.Transform:
+def iter_class_range_combinations() -> list[tuple[str, str]]:
+    """All (deformation_class, magnitude_range) pairs for range-grid dry runs."""
+    combos: list[tuple[str, str]] = [("none", "none")]
+    for cls in ("rigid", "affine", "elastic", "affine_elastic"):
+        for mag_range in MAGNITUDE_RANGES:
+            combos.append((cls, mag_range))
+    return combos
+
+
+def range_grid_filename(subject_id: str, deformation_class: str, mag_range: str, replicate: int) -> str:
+    """e.g. 100206_rigid_low.npz or 100206_rigid_low_02.npz when replicate > 0."""
+    base = f"{subject_id}_{deformation_class}_{mag_range}"
+    if replicate > 0:
+        return f"{base}_{replicate:02d}.npz"
+    return f"{base}.npz"
+
+
+def assign_magnitude_range(subject_id: str, deformation_class: str, seed: int) -> str:
+    if deformation_class == "none":
+        return "none"
+    h = stable_subject_hash(f"{subject_id}:{deformation_class}", seed) % 10000 / 10000.0
+    if h < MAGNITUDE_RANGE_FRAC["low"]:
+        return "low"
+    if h < MAGNITUDE_RANGE_FRAC["low"] + MAGNITUDE_RANGE_FRAC["mid"]:
+        return "mid"
+    return "high"
+
+
+def _affine_transform(
+    *,
+    scales: tuple[float, float],
+    degrees: float,
+    translation_mm: float,
+) -> tio.RandomAffine:
+    t = translation_mm
+    return tio.RandomAffine(
+        scales=scales,
+        degrees=degrees,
+        translation=(t, t, t),
+        default_pad_value="minimum",
+        p=1.0,
+    )
+
+
+def _elastic_transform(*, max_disp_mm: float) -> tio.RandomElasticDeformation:
+    d = max_disp_mm
+    return tio.RandomElasticDeformation(
+        num_control_points=ELASTIC_NUM_CONTROL_POINTS,
+        max_displacement=(d, d, d),
+        locked_borders=2,
+        p=1.0,
+    )
+
+
+def build_transform(deformation_class: str, mag_range: str = "mid") -> tio.Transform:
     if deformation_class == "none":
         return tio.Compose([])
-    if deformation_class == "rigid_like":
+    if deformation_class == "rigid":
+        p = RANGE_RIGID[mag_range]
         return tio.Compose(
             [
                 tio.RandomAffine(
                     scales=(1.0, 1.0),
-                    degrees=RIGID_DEGREES,
-                    translation=(
-                        RIGID_TRANSLATION_MM,
-                        RIGID_TRANSLATION_MM,
-                        RIGID_TRANSLATION_MM,
-                    ),
+                    degrees=p["degrees"],
+                    translation=(p["translation_mm"],) * 3,
                     default_pad_value="minimum",
                     p=1.0,
                 )
             ]
         )
     if deformation_class == "affine":
-        return tio.Compose(
-            [
-                tio.RandomAffine(
-                    scales=AFFINE_SCALES,
-                    degrees=AFFINE_DEGREES,
-                    translation=(
-                        AFFINE_TRANSLATION_MM,
-                        AFFINE_TRANSLATION_MM,
-                        AFFINE_TRANSLATION_MM,
-                    ),
-                    default_pad_value="minimum",
-                    p=1.0,
-                )
-            ]
-        )
-    if deformation_class == "non_rigid":
-        return tio.Compose(
-            [
-                tio.RandomElasticDeformation(
-                    num_control_points=ELASTIC_NUM_CONTROL_POINTS,
-                    max_displacement=(
-                        ELASTIC_MAX_DISP_MM,
-                        ELASTIC_MAX_DISP_MM,
-                        ELASTIC_MAX_DISP_MM,
-                    ),
-                    locked_borders=2,
-                    p=1.0,
-                )
-            ]
-        )
-    if deformation_class == "affine_rigid_plus_non_rigid":
-        return tio.Compose(
-            [
-                tio.RandomAffine(
-                    scales=AFFINE_SCALES,
-                    degrees=AFFINE_DEGREES,
-                    translation=(
-                        AFFINE_TRANSLATION_MM,
-                        AFFINE_TRANSLATION_MM,
-                        AFFINE_TRANSLATION_MM,
-                    ),
-                    default_pad_value="minimum",
-                    p=1.0,
-                ),
-                tio.RandomElasticDeformation(
-                    num_control_points=ELASTIC_NUM_CONTROL_POINTS,
-                    max_displacement=(
-                        ELASTIC_MAX_DISP_MM,
-                        ELASTIC_MAX_DISP_MM,
-                        ELASTIC_MAX_DISP_MM,
-                    ),
-                    locked_borders=2,
-                    p=1.0,
-                ),
-            ]
-        )
+        p = RANGE_AFFINE[mag_range]
+        return tio.Compose([_affine_transform(**p)])
+    if deformation_class == "elastic":
+        p = RANGE_ELASTIC[mag_range]
+        return tio.Compose([_elastic_transform(**p)])
+    if deformation_class == "affine_elastic":
+        ap = RANGE_AFFINE[mag_range]
+        ep = RANGE_ELASTIC[mag_range]
+        return tio.Compose([_affine_transform(**ap), _elastic_transform(**ep)])
     raise ValueError(f"Unknown deformation_class: {deformation_class}")
 
 
@@ -286,6 +370,37 @@ def _load_nifti_with_meta(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray
     affine = np.asarray(img.affine, dtype=np.float32)
     spacing = np.asarray(img.header.get_zooms()[:3], dtype=np.float32)
     return data, affine, spacing
+
+
+def zscore_brain_pair(
+    source: np.ndarray,
+    moving: np.ndarray,
+    source_mask: np.ndarray,
+    moving_mask: np.ndarray,
+    *,
+    eps: float = 1e-6,
+) -> tuple[np.ndarray, np.ndarray, float, float]:
+    """Masked z-score from source brain; fill outside each mask with 0 after scaling."""
+    src_m = source_mask > 0.5
+    mov_m = moving_mask > 0.5
+    in_vals = source[src_m]
+    in_vals = in_vals[np.isfinite(in_vals)]
+    if in_vals.size == 0:
+        return (
+            np.zeros_like(source, dtype=np.float32),
+            np.zeros_like(moving, dtype=np.float32),
+            0.0,
+            1.0,
+        )
+    mu = float(np.mean(in_vals))
+    sigma = max(float(np.std(in_vals)), eps)
+    source_z = (source.astype(np.float32) - mu) / sigma
+    moving_z = (moving.astype(np.float32) - mu) / sigma
+    source_z[~src_m] = 0.0
+    moving_z[~mov_m] = 0.0
+    source_z[~np.isfinite(source_z)] = 0.0
+    moving_z[~np.isfinite(moving_z)] = 0.0
+    return source_z.astype(np.float32), moving_z.astype(np.float32), mu, sigma
 
 
 def zscore_with_mask(
@@ -331,7 +446,7 @@ def process_one_subject(
     max_u_global_vox: float | None,
     min_moving_mean_ratio: float | None,
     pin_threads: bool,
-) -> tuple[bool, str | None]:
+) -> SampleStats:
     if pin_threads:
         _pin_worker_cpu_threads()
 
@@ -339,33 +454,40 @@ def process_one_subject(
     mask = _load_nifti(task.mask_path)
     shape_xyz = (int(source.shape[0]), int(source.shape[1]), int(source.shape[2]))
     identity_grid = _build_identity_grid(shape_xyz)
-    transform = build_transform(task.deformation_class)
+    transform = build_transform(task.deformation_class, task.magnitude_range)
 
     moving: np.ndarray | None = None
+    moving_mask_bin: np.ndarray | None = None
     u: np.ndarray | None = None
-    qc_passed = False
+    qc_passed = task.skip_qc
+    n_attempts = 1 if task.skip_qc else MAX_TRANSFORM_ATTEMPTS
+    source_mask_bin = mask > 0.5
 
-    for attempt in range(MAX_TRANSFORM_ATTEMPTS):
+    for attempt in range(n_attempts):
         torch.manual_seed((task.seed + attempt * 100003) % (2**31))
         img_tensor = torch.from_numpy(source).unsqueeze(0).float()
+        mask_tensor = torch.from_numpy(source_mask_bin.astype(np.float32)).unsqueeze(0)
         affine = source_affine.astype(np.float64)
         subject = tio.Subject(
             mri=tio.ScalarImage(tensor=img_tensor, affine=affine),
             grid=tio.ScalarImage(tensor=identity_grid.clone(), affine=affine),
+            brain_mask=tio.LabelMap(tensor=mask_tensor, affine=affine),
         )
         transformed = transform(subject)
         cand_moving = transformed.mri.data.squeeze(0).numpy()
+        cand_moving_mask = transformed.brain_mask.data.squeeze(0).numpy() > 0.5
         cand_u = (
             transformed.grid.data.squeeze(0).numpy() - identity_grid.numpy()
         ).astype(np.float32)
 
-        moving, u = cand_moving, cand_u
+        moving, moving_mask_bin, u = cand_moving, cand_moving_mask, cand_u
 
-        if passes_checks(
+        if task.skip_qc or passes_checks(
             cand_u,
             source,
             cand_moving,
             mask,
+            task.deformation_class,
             interior_margin=INTERIOR_MARGIN,
             max_u_interior_vox=max_u_interior_vox,
             max_u_global_vox=max_u_global_vox,
@@ -374,52 +496,98 @@ def process_one_subject(
             qc_passed = True
             break
 
-    assert moving is not None and u is not None
-    mask_bin = mask > 0.5
-    valid_mask = mask_bin & interior_valid_mask(shape_xyz, INTERIOR_MARGIN)
-    source_z, norm_mu, norm_sigma = zscore_with_mask(source, mask_bin)
-    moving_z, _, _ = zscore_with_mask(moving, mask_bin, mu=norm_mu, sigma=norm_sigma)
+    assert moving is not None and moving_mask_bin is not None and u is not None
+    u_max_int, u_mean_int = u_interior_stats(u, mask, shape_xyz, INTERIOR_MARGIN)
+    source_z, moving_z, _, _ = zscore_brain_pair(
+        source, moving, source_mask_bin, moving_mask_bin
+    )
+
+    save_path = task.out_path if (qc_passed or task.skip_qc) else task.qc_fail_out_path
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
-        task.out_path,
+        save_path,
         source=source_z,
         moving=moving_z,
         u=u.astype(np.float32),
-        mask=mask_bin.astype(bool),
+        mask=source_mask_bin.astype(bool),
+        source_mask=source_mask_bin.astype(bool),
+        moving_mask=moving_mask_bin.astype(bool),
         source_affine=source_affine.astype(np.float32),
         source_spacing=source_spacing.astype(np.float32),
         u_unit=np.array("vox"),
         deformation_class=np.array(task.deformation_class),
+        magnitude_range=np.array(task.magnitude_range),
+        u_max_interior=np.float32(u_max_int),
+        u_mean_interior=np.float32(u_mean_int),
         subject_id=np.array(task.subject_id),
         qc_passed=qc_passed,
     )
 
-    if qc_passed:
-        return True, None
-
-    mag = displacement_magnitude(u.astype(np.float64))
-    mx_valid = float(np.max(mag[valid_mask])) if valid_mask.any() else float("nan")
-    mx_full = float(np.max(mag))
-    lim_int = max_u_interior_vox if max_u_interior_vox is not None else "off"
-    lim_glob = max_u_global_vox if max_u_global_vox is not None else "off"
-    warn = (
-        f"QC_FAIL (saved, qc_passed=False): {task.split}/{Path(task.out_path).name} | "
-        f"max|u| valid_mask={mx_valid:.2f}  full_vol={mx_full:.2f}  "
-        f"(limits: interior≤{lim_int}, global≤{lim_glob})"
+    rel = Path(save_path).name if not task.split else f"{task.split}/{Path(save_path).name}"
+    return SampleStats(
+        subject_id=task.subject_id,
+        split=task.split,
+        deformation_class=task.deformation_class,
+        magnitude_range=task.magnitude_range,
+        qc_passed=qc_passed,
+        u_max_interior=u_max_int,
+        u_mean_interior=u_mean_int,
+        rel_path=rel,
     )
-    return False, warn
 
 
-def _worker_create_sample(task: Task) -> tuple[str, bool, str | None]:
+def _qc_fail_warning(stats: SampleStats) -> str:
+    cls = stats.deformation_class
+    mag_range = stats.magnitude_range
+    min_max = MIN_U_MAX_INTERIOR_BY_CLASS.get(cls)
+    min_mean = MIN_U_MEAN_INTERIOR_BY_CLASS.get(cls)
+    return (
+        f"QC_FAIL (saved to qc_fail): {stats.rel_path} | "
+        f"class={cls} range={mag_range} | "
+        f"u_max_int={stats.u_max_interior:.2f} u_mean_int={stats.u_mean_interior:.2f} | "
+        f"(floors: max≥{min_max}, mean≥{min_mean}; caps: interior≤{MAX_U_INTERIOR_VOX}, "
+        f"global≤{MAX_U_GLOBAL_VOX})"
+    )
+
+
+def _worker_create_sample(task: Task) -> SampleStats:
     _pin_worker_cpu_threads()
-    qc_ok, warn = process_one_subject(
+    return process_one_subject(
         task,
         max_u_interior_vox=MAX_U_INTERIOR_VOX,
         max_u_global_vox=MAX_U_GLOBAL_VOX,
         min_moving_mean_ratio=MIN_MOVING_MEAN_RATIO,
         pin_threads=False,
     )
-    rel = f"{task.split}/{Path(task.out_path).name}"
-    return rel, qc_ok, warn
+
+
+def build_deformation_stats(samples: list[SampleStats]) -> dict[str, dict[str, dict[str, float | int]]]:
+    """Per-class/range counts and u_max_interior p50 summaries."""
+    buckets: dict[str, dict[str, list[float]]] = {}
+    for s in samples:
+        if not s.qc_passed:
+            continue
+        buckets.setdefault(s.deformation_class, {}).setdefault(s.magnitude_range, []).append(
+            s.u_max_interior
+        )
+    out: dict[str, dict[str, dict[str, float | int]]] = {}
+    for cls, ranges in sorted(buckets.items()):
+        out[cls] = {}
+        for mag_range, vals in sorted(ranges.items()):
+            arr = np.asarray(vals, dtype=np.float64)
+            out[cls][mag_range] = {
+                "count": int(arr.size),
+                "u_max_p50": float(np.percentile(arr, 50)) if arr.size else 0.0,
+                "u_mean_p50": float(
+                    np.percentile(
+                        [s.u_mean_interior for s in samples if s.qc_passed and s.deformation_class == cls and s.magnitude_range == mag_range],
+                        50,
+                    )
+                )
+                if arr.size
+                else 0.0,
+            }
+    return out
 
 
 def stable_subject_hash(subject_id: str, seed: int) -> int:
@@ -463,6 +631,49 @@ def assign_deformation_classes(subject_ids: list[str], seed: int) -> dict[str, s
     return {sid: cls for sid, cls in zip(order, cls_list)}
 
 
+def build_range_grid_tasks(
+    subjects: list[SubjectEntry],
+    out_root: Path,
+    *,
+    replicates: int,
+    base_seed: int,
+    skip_qc: bool,
+) -> list[Task]:
+    """One task per (class, range) × replicate; filenames include class and range labels."""
+    combos = iter_class_range_combinations()
+    out_dir = out_root
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fail_dir = out_root / "_unused_qc_fail"
+    tasks: list[Task] = []
+    task_idx = 0
+    for cls, mag_range in combos:
+        for rep in range(replicates):
+            subj = subjects[task_idx % len(subjects)]
+            rep_suffix = rep + 1 if replicates > 1 else 0
+            out_name = range_grid_filename(subj.subject_id, cls, mag_range, rep_suffix)
+            seed = (
+                base_seed
+                + stable_subject_hash(f"{cls}:{mag_range}:{rep}:{subj.subject_id}", base_seed)
+                + task_idx * 100003
+            ) % (2**31)
+            tasks.append(
+                Task(
+                    subject_id=subj.subject_id,
+                    split="",
+                    deformation_class=cls,
+                    magnitude_range=mag_range,
+                    t1_path=subj.t1_path,
+                    mask_path=subj.mask_path,
+                    out_path=str(out_dir / out_name),
+                    qc_fail_out_path=str(fail_dir / out_name),
+                    seed=seed,
+                    skip_qc=skip_qc,
+                )
+            )
+            task_idx += 1
+    return tasks
+
+
 def collect_hcp_subjects(input_root: Path) -> list[SubjectEntry]:
     out: list[SubjectEntry] = []
     for subj_dir in sorted(input_root.iterdir()):
@@ -480,15 +691,23 @@ def create_synthetic_data(
     input_root: str,
     output_root: str,
     *,
+    qc_fail_root: str = DEFAULT_QC_FAIL_ROOT,
     workers: int | None = None,
     base_seed: int = 42,
     max_subjects: int | None = None,
+    skip_qc: bool = False,
+    range_grid: bool = False,
+    range_grid_replicates: int = 3,
 ) -> None:
     in_root = Path(input_root)
     out_root = Path(output_root)
+    fail_root = Path(qc_fail_root)
     out_root.mkdir(parents=True, exist_ok=True)
+    if not skip_qc:
+        fail_root.mkdir(parents=True, exist_ok=True)
     n_workers = max(1, workers if workers is not None else _default_parallel_workers())
     flagged_rel_paths: list[str] = []
+    all_stats: list[SampleStats] = []
 
     subjects = collect_hcp_subjects(in_root)
     if not subjects:
@@ -497,41 +716,73 @@ def create_synthetic_data(
     if max_subjects is not None and max_subjects > 0:
         subjects = subjects[:max_subjects]
 
-    split_subjects: dict[str, list[SubjectEntry]] = {"Train": [], "Val": [], "Test": []}
-    for s in subjects:
-        split_subjects[assign_split(s.subject_id, base_seed)].append(s)
-
-    tasks: list[Task] = []
-    split_summary: dict[str, dict[str, int]] = {}
-    for split, entries in split_subjects.items():
-        entries = sorted(entries, key=lambda e: e.subject_id)
-        sid_to_class = assign_deformation_classes(
-            [e.subject_id for e in entries], seed=base_seed + stable_subject_hash(split, base_seed)
+    if range_grid:
+        combos = iter_class_range_combinations()
+        n_tasks = len(combos) * range_grid_replicates
+        print(
+            f"Range-grid dry run: {len(combos)} (class, range) combinations × "
+            f"{range_grid_replicates} replicates = {n_tasks} samples"
         )
-        out_dir = out_root / split
-        out_dir.mkdir(parents=True, exist_ok=True)
-        c = Counter()
-        for idx, e in enumerate(entries):
-            cls = sid_to_class[e.subject_id]
-            suf = DEFORMATION_SUFFIX[cls]
-            out_name = f"{e.subject_id}_{suf}.npz"
-            out_path = out_dir / out_name
-            seed = (base_seed + stable_subject_hash(e.subject_id, base_seed) + idx * 100003) % (
-                2**31
+        print(f"Combinations: {', '.join(f'{c}_{r}' for c, r in combos)}")
+        if skip_qc:
+            print("QC disabled (--no-qc): single random draw per task, all saved to output-path")
+        tasks = build_range_grid_tasks(
+            subjects,
+            out_root,
+            replicates=range_grid_replicates,
+            base_seed=base_seed,
+            skip_qc=skip_qc,
+        )
+        split_summary: dict[str, dict[str, int]] = {}
+        range_summary: dict[str, dict[str, int]] = {}
+        split_subjects = {"": subjects}
+    else:
+        split_subjects: dict[str, list[SubjectEntry]] = {"Train": [], "Val": [], "Test": []}
+        for s in subjects:
+            split_subjects[assign_split(s.subject_id, base_seed)].append(s)
+
+        tasks = []
+        split_summary = {}
+        range_summary = {}
+        for split, entries in split_subjects.items():
+            entries = sorted(entries, key=lambda e: e.subject_id)
+            sid_to_class = assign_deformation_classes(
+                [e.subject_id for e in entries], seed=base_seed + stable_subject_hash(split, base_seed)
             )
-            tasks.append(
-                Task(
-                    subject_id=e.subject_id,
-                    split=split,
-                    deformation_class=cls,
-                    t1_path=e.t1_path,
-                    mask_path=e.mask_path,
-                    out_path=str(out_path),
-                    seed=seed,
+            out_dir = out_root / split
+            fail_dir = fail_root / split
+            out_dir.mkdir(parents=True, exist_ok=True)
+            fail_dir.mkdir(parents=True, exist_ok=True)
+            c = Counter()
+            tc = Counter()
+            for idx, e in enumerate(entries):
+                cls = sid_to_class[e.subject_id]
+                mag_range = assign_magnitude_range(e.subject_id, cls, base_seed)
+                suf = DEFORMATION_SUFFIX[cls]
+                out_name = f"{e.subject_id}_{suf}.npz"
+                out_path = out_dir / out_name
+                fail_path = fail_dir / out_name
+                seed = (base_seed + stable_subject_hash(e.subject_id, base_seed) + idx * 100003) % (
+                    2**31
                 )
-            )
-            c[cls] += 1
-        split_summary[split] = dict(c)
+                tasks.append(
+                    Task(
+                        subject_id=e.subject_id,
+                        split=split,
+                        deformation_class=cls,
+                        magnitude_range=mag_range,
+                        t1_path=e.t1_path,
+                        mask_path=e.mask_path,
+                        out_path=str(out_path),
+                        qc_fail_out_path=str(fail_path),
+                        seed=seed,
+                        skip_qc=skip_qc,
+                    )
+                )
+                c[cls] += 1
+                tc[f"{cls}:{mag_range}"] += 1
+            split_summary[split] = dict(c)
+            range_summary[split] = dict(tc)
 
     print(
         f"Parallel workers: {n_workers} (default = all logical CPUs; each worker uses 1 OpenMP thread)"
@@ -539,51 +790,73 @@ def create_synthetic_data(
 
     if n_workers <= 1:
         for t in tqdm(tasks, desc="Create 3D HCP synth"):
-            qc_ok, warn = process_one_subject(
+            stats = process_one_subject(
                 t,
                 max_u_interior_vox=MAX_U_INTERIOR_VOX,
                 max_u_global_vox=MAX_U_GLOBAL_VOX,
                 min_moving_mean_ratio=MIN_MOVING_MEAN_RATIO,
                 pin_threads=False,
             )
-            if not qc_ok:
-                rel_flag = f"{t.split}/{Path(t.out_path).name}"
-                flagged_rel_paths.append(rel_flag)
-                if warn:
-                    tqdm.write(warn)
+            all_stats.append(stats)
+            if not stats.qc_passed:
+                flagged_rel_paths.append(stats.rel_path)
+                tqdm.write(_qc_fail_warning(stats))
     else:
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
             futs = [ex.submit(_worker_create_sample, t) for t in tasks]
             for fut in tqdm(as_completed(futs), total=len(futs), desc="Create 3D HCP synth"):
-                rel_flag_ret, qc_ok, warn = fut.result()
-                if not qc_ok:
-                    flagged_rel_paths.append(rel_flag_ret)
-                    if warn:
-                        tqdm.write(warn)
+                stats = fut.result()
+                all_stats.append(stats)
+                if not stats.qc_passed:
+                    flagged_rel_paths.append(stats.rel_path)
+                    tqdm.write(_qc_fail_warning(stats))
 
-    # save split/deformation summary
+    passed = sum(1 for s in all_stats if s.qc_passed)
+    failed = len(all_stats) - passed
     meta = {
         "input_root": str(in_root),
         "output_root": str(out_root),
+        "qc_fail_root": str(fail_root) if not skip_qc else None,
         "seed": base_seed,
+        "skip_qc": skip_qc,
+        "range_grid": range_grid,
+        "range_grid_replicates": range_grid_replicates if range_grid else None,
+        "range_grid_combinations": (
+            [f"{c}_{r}" for c, r in iter_class_range_combinations()] if range_grid else None
+        ),
         "n_subjects": len(subjects),
+        "n_tasks": len(tasks),
+        "qc_passed_count": passed,
+        "qc_failed_count": failed,
         "split_counts": {k: len(v) for k, v in split_subjects.items()},
-        "deformation_ratios_target": DEFORMATION_RATIOS,
+        "deformation_ratios_target": DEFORMATION_RATIOS if not range_grid else None,
         "deformation_counts_actual": split_summary,
-        "field_names": ["source", "moving", "u", "mask"],
+        "magnitude_range_counts": range_summary,
+        "deformation_stats": build_deformation_stats(all_stats),
+        "field_names": [
+            "source",
+            "moving",
+            "u",
+            "mask",
+            "source_mask",
+            "moving_mask",
+            "magnitude_range",
+            "u_max_interior",
+            "u_mean_interior",
+        ],
     }
     with open(out_root / "split_manifest.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    manifest = os.path.join(output_root, "qc_flagged_paths.txt")
-    if flagged_rel_paths:
+    manifest = os.path.join(qc_fail_root, "qc_flagged_paths.txt")
+    if flagged_rel_paths and not skip_qc:
         with open(manifest, "w", encoding="utf-8") as f:
-            f.write("# Samples with qc_passed=False — delete or regenerate\n")
+            f.write("# Samples with qc_passed=False — stored under qc_fail_root\n")
             for line in sorted(flagged_rel_paths):
                 f.write(f"{line}\n")
         print(
-            f"Warning: {len(flagged_rel_paths)} sample(s) failed QC after "
-            f"{MAX_TRANSFORM_ATTEMPTS} attempts (saved with qc_passed=False). "
+            f"Warning: {failed} sample(s) failed QC after {MAX_TRANSFORM_ATTEMPTS} attempts "
+            f"({failed / max(len(all_stats), 1) * 100:.1f}%). Saved under {fail_root}. "
             f"List: {manifest}"
         )
     else:
@@ -605,7 +878,13 @@ def parse_args() -> argparse.Namespace:
         "--output-path",
         type=str,
         default="datasets/hcp_synth",
-        help="Output root for split folders with *_<suffix>.npz files",
+        help="Output root for qc_passed samples (split folders with *_<suffix>.npz)",
+    )
+    p.add_argument(
+        "--qc-fail-path",
+        type=str,
+        default=DEFAULT_QC_FAIL_ROOT,
+        help="Output root for qc_passed=False samples",
     )
     p.add_argument(
         "--workers",
@@ -627,16 +906,39 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Base seed; per-file seeds are derived for reproducible parallel runs.",
     )
+    p.add_argument(
+        "--no-qc",
+        action="store_true",
+        help="Disable QC checks and retries; save first transform draw to output-path.",
+    )
+    p.add_argument(
+        "--range-grid",
+        nargs="?",
+        const=3,
+        default=None,
+        type=int,
+        metavar="N",
+        help=(
+            "Dry run: all 13 (class, range) combos into output-path/ (flat, no split folders). "
+            "Optional N = replicates per combo (default 3 when flag is given alone → 39 samples)."
+        ),
+    )
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    range_grid = args.range_grid is not None
+    range_grid_replicates = args.range_grid if range_grid else 3
     create_synthetic_data(
         args.input_path,
         args.output_path,
+        qc_fail_root=args.qc_fail_path,
         workers=args.workers,
         base_seed=args.seed,
         max_subjects=args.max_subjects,
+        skip_qc=args.no_qc,
+        range_grid=range_grid,
+        range_grid_replicates=range_grid_replicates,
     )
     print("Finished! 3D HCP synthetic data is ready.")
