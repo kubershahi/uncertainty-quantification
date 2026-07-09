@@ -1,5 +1,5 @@
 """
-Create 3D synthetic registration samples from HCP T1w data.
+Create synthetic registration samples from HCP T1w data.
 
 Input layout (per subject):
   datasets/hcp/<subject_id>/T1w/
@@ -11,15 +11,14 @@ Output layout:
   datasets/hcp_synth_qc_fail/{Train,Val,Test}/...                 (qc_passed=False)
 
 Each output npz contains:
-  - source  : fixed/source image (float32, 3D, masked z-score from brain mask)
-  - moving  : deformed image (float32, 3D, same normalization as source)
+  - source  : fixed/source image (float32 volume, masked z-score from brain mask)
+  - moving  : deformed image (float32 volume, same normalization as source)
   - u       : displacement field (float32, shape (3, X, Y, Z), voxel units)
-  - mask           : source brain mask (bool, 3D); alias for source_mask
-  - source_mask    : fixed brain mask (bool, 3D)
-  - moving_mask    : source_mask warped with the same transform (bool, 3D)
-  - moving_grid        : transformed binary grid-lines mask for QC visualization (bool, 3D)
-  - source_grid        : undeformed binary grid-lines mask for QC visualization (bool, 3D)
-  - identity_grid_mask : binary in-bounds mask for displacement field (bool, 3D)
+  - source_mask    : fixed brain mask (bool volume)
+  - moving_mask    : source_mask warped with the same transform (bool volume)
+  - moving_grid        : transformed binary grid-lines mask for QC visualization (bool volume)
+  - source_grid        : undeformed binary grid-lines mask for QC visualization (bool volume)
+  - identity_grid_mask : binary in-bounds mask for displacement field (bool volume)
   - source_affine
   - deformation_class : one of {none, rigid, affine, elastic, affine_elastic}
   - magnitude_range : low | mid | high | none (TorchIO sampling envelope, not realized ‖u‖)
@@ -59,7 +58,7 @@ import torchio as tio
 from tqdm import tqdm
 
 # =============================================================================
-# CONFIG — 3D HCP synthetic generation
+# CONFIG — HCP synthetic generation
 # =============================================================================
 
 # Input filenames
@@ -359,20 +358,18 @@ def _load_nifti(path: str) -> np.ndarray:
     return np.asarray(nib.load(path).get_fdata(dtype=np.float32))
 
 
-def _load_nifti_with_meta(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _load_nifti_with_meta(path: str) -> tuple[np.ndarray, np.ndarray]:
     """
     Load NIfTI data plus physical-space metadata.
 
     Returns:
       data: float32 array
       affine: (4, 4) float32 voxel->world transform (typically mm)
-      spacing: (3,) float32 voxel size in mm
     """
     img = nib.load(path)
     data = np.asarray(img.get_fdata(dtype=np.float32))
     affine = np.asarray(img.affine, dtype=np.float32)
-    spacing = np.asarray(img.header.get_zooms()[:3], dtype=np.float32)
-    return data, affine, spacing
+    return data, affine
 
 
 def zscore_brain_pair(
@@ -406,31 +403,6 @@ def zscore_brain_pair(
     return source_z.astype(np.float32), moving_z.astype(np.float32), mu, sigma
 
 
-def zscore_with_mask(
-    vol: np.ndarray,
-    mask: np.ndarray,
-    *,
-    mu: float | None = None,
-    sigma: float | None = None,
-    eps: float = 1e-6,
-) -> tuple[np.ndarray, float, float]:
-    """Masked z-score; outside mask set to 0. Optional fixed mu/sigma (e.g. from source)."""
-    m = mask > 0.5
-    if mu is None or sigma is None:
-        in_vals = vol[m]
-        in_vals = in_vals[np.isfinite(in_vals)]
-        if in_vals.size == 0:
-            return np.zeros_like(vol, dtype=np.float32), 0.0, 1.0
-        mu = float(np.mean(in_vals))
-        sigma = max(float(np.std(in_vals)), eps)
-    else:
-        sigma = max(float(sigma), eps)
-    z = (vol.astype(np.float32) - float(mu)) / float(sigma)
-    z[~m] = 0.0
-    z[~np.isfinite(z)] = 0.0
-    return z.astype(np.float32), float(mu), float(sigma)
-
-
 def _build_identity_grid(shape_xyz: tuple[int, int, int]) -> torch.Tensor:
     x, y, z = shape_xyz
     cx, cy, cz = torch.meshgrid(
@@ -443,7 +415,7 @@ def _build_identity_grid(shape_xyz: tuple[int, int, int]) -> torch.Tensor:
 
 
 def _build_binary_grid_mask(shape_xyz: tuple[int, int, int], stride: int = 12) -> np.ndarray:
-    """3D grid-line volume (1 on lines, 0 elsewhere) in voxel index space."""
+    """Grid-line volume (1 on lines, 0 elsewhere) in voxel index space."""
     x, y, z = shape_xyz
     gx = (np.arange(x) % stride) == 0
     gy = (np.arange(y) % stride) == 0
@@ -467,7 +439,7 @@ def process_one_subject(
     if pin_threads:
         _pin_worker_cpu_threads()
 
-    source, source_affine, source_spacing = _load_nifti_with_meta(task.t1_path)
+    source, source_affine = _load_nifti_with_meta(task.t1_path)
     mask = _load_nifti(task.mask_path)
     shape_xyz = (int(source.shape[0]), int(source.shape[1]), int(source.shape[2]))
     identity_grid = _build_identity_grid(shape_xyz)
@@ -834,7 +806,7 @@ def create_synthetic_data(
     )
 
     if n_workers <= 1:
-        for t in tqdm(tasks, desc="Create 3D HCP synth"):
+        for t in tqdm(tasks, desc="Create HCP synth"):
             stats = process_one_subject(
                 t,
                 max_u_interior_vox=MAX_U_INTERIOR_VOX,
@@ -849,7 +821,7 @@ def create_synthetic_data(
     else:
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
             futs = [ex.submit(_worker_create_sample, t) for t in tasks]
-            for fut in tqdm(as_completed(futs), total=len(futs), desc="Create 3D HCP synth"):
+            for fut in tqdm(as_completed(futs), total=len(futs), desc="Create HCP synth"):
                 stats = fut.result()
                 all_stats.append(stats)
                 if not stats.qc_passed:
@@ -912,7 +884,7 @@ def create_synthetic_data(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Create 3D HCP synthetic registration samples with balanced deformation classes."
+        description="Create HCP synthetic registration samples with balanced deformation classes."
     )
     p.add_argument(
         "--input-path",
@@ -987,4 +959,4 @@ if __name__ == "__main__":
         range_grid=range_grid,
         range_grid_replicates=range_grid_replicates,
     )
-    print("Finished! 3D HCP synthetic data is ready.")
+    print("Finished! HCP synthetic data is ready.")
