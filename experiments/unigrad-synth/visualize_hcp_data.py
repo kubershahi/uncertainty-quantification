@@ -303,7 +303,7 @@ def plot_hcp_samples(
         z_note = "axial z shown per panel"
 
     fig.suptitle(
-        "HCP Young Adult (S1200) — Structural T1w Plot",
+        "HCP Young Adult (S1200) Dataset Plot (T1w)",
         fontsize=_TITLE_SIZE,
         fontweight="bold",
         y=0.98,
@@ -334,7 +334,7 @@ def plot_hcp_samples(
         ha="center",
         va="top",
         fontsize=_TICK_SIZE,
-        color="0.25",
+        color="black",
     )
 
     fig.subplots_adjust(

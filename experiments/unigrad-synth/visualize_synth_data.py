@@ -4,8 +4,9 @@ Visualize synthetic registration NPZ samples.
 
 Supports two formats (auto-detected or ``--format``):
 
-**HCP 3D** (``create_synth_data.py`` output): rows = random subjects; columns = source (reference
-grid), warped/moving (grid bent by ``u``), ``|u|`` magnitude map.
+**HCP 3D** (``create_synth_data.py`` output): rows = rigid / affine / non-rigid examples;
+columns = source (fixed) + reference grid, warped/moving + grid bent by ``u``, ``|u|``.
+Axial slices use radiological display (``rot90``, posterior up).
 
 **IXI 2D legacy** (``*_triplet.npz``): ``image``, ``warped``, ``phi``.
 
@@ -30,6 +31,13 @@ TRIPLET_GLOB = "*_triplet.npz"
 HCP_SYNTH_GLOB = "*.npz"
 TRIPLET_KEYS = frozenset({"image", "warped", "phi"})
 HCP3D_KEYS = frozenset({"source", "moving", "u"})
+
+# Default rows for ``--selection random`` (HCP 3D): one example per class, top to bottom.
+DEFORMATION_ROW_ORDER: tuple[tuple[str, str], ...] = (
+    ("rigid_like", "rig"),
+    ("affine", "aff"),
+    ("non_rigid", "nr"),
+)
 
 _GRID_COLOR = "cyan"
 _DPI = 150
@@ -95,6 +103,19 @@ def axial_slice(vol: np.ndarray, slice_index: int | None) -> tuple[np.ndarray, i
     z = default_slice_index(vol) if slice_index is None else int(slice_index)
     z = max(0, min(z, vol.shape[2] - 1))
     return vol[:, :, z], z
+
+
+def orient_axial(sl: np.ndarray) -> np.ndarray:
+    """Radiological axial display (CCW 90°): anterior up, posterior down."""
+    return np.rot90(sl)
+
+
+def orient_axial_u_inplane(u_inplane: np.ndarray) -> np.ndarray:
+    """Rotate in-plane displacement to match ``orient_axial`` on the slice."""
+    u0, u1 = u_inplane[0], u_inplane[1]
+    u0_r = np.rot90(u1)
+    u1_r = np.rot90(-u0)
+    return np.stack([u0_r, u1_r], axis=0)
 
 
 def axial_u_slice(u: np.ndarray, slice_index: int) -> np.ndarray:
@@ -244,6 +265,32 @@ def select_min_median_max_files(
     ]
 
 
+def select_deformation_class_examples(
+    files: list[Path],
+    seed: int,
+) -> list[tuple[Path, str, float]]:
+    """One sample per deformation class: rigid (row 1), affine (row 2), non-rigid (row 3)."""
+    pools: dict[str, list[Path]] = {cls: [] for cls, _ in DEFORMATION_ROW_ORDER}
+    for fp in files:
+        cls = load_hcp3d_sample(fp).get("deformation_class")
+        if cls in pools:
+            pools[str(cls)].append(fp)
+    for cls, suf in DEFORMATION_ROW_ORDER:
+        if not pools[cls]:
+            pools[cls] = [fp for fp in files if fp.stem.endswith(f"_{suf}")]
+
+    rng = random.Random(seed)
+    picked: list[tuple[Path, str, float]] = []
+    for cls, suf in DEFORMATION_ROW_ORDER:
+        pool = pools[cls]
+        if not pool:
+            raise FileNotFoundError(
+                f"No '{cls}' (*_{suf}.npz) sample found in split ({len(files)} files)."
+            )
+        picked.append((rng.choice(pool), cls, float("nan")))
+    return picked
+
+
 def _style_axis(ax: plt.Axes) -> None:
     ax.set_xticks([])
     ax.set_yticks([])
@@ -285,10 +332,11 @@ def visualize_hcp3d_samples(
         raise FileNotFoundError(f"No NPZ files in '{input_dir / split}'.")
 
     if selection == "random":
-        rng = random.Random(seed)
-        n = min(num_samples, len(files))
-        picked = [(p, "", float("nan")) for p in rng.sample(files, n)]
-        subtitle = f"Random sample of {n} / {len(files)} subjects (seed = {seed})"
+        picked = select_deformation_class_examples(files, seed)
+        subtitle = (
+            f"Rigid / affine / non-rigid examples (seed = {seed}) · "
+            f"{len(files)} subjects in {split}"
+        )
     elif selection == "min_median_max":
         picked = select_min_median_max_files(files, "hcp3d", score_metric)
         subtitle = f"Min / median / max of {score_metric} ‖u‖ across split ({len(picked)} subjects)"
@@ -322,7 +370,7 @@ def visualize_hcp3d_samples(
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
 
     im_u_last = None
-    for row, (file_path, _, _) in enumerate(picked):
+    for row, (file_path, rank_label, _) in enumerate(picked):
         sample = load_hcp3d_sample(file_path)
         source = sample["source"]
         moving = sample["moving"]
@@ -331,22 +379,31 @@ def visualize_hcp3d_samples(
 
         src_sl, z = axial_slice(source, slice_index)
         mov_sl, _ = axial_slice(moving, slice_index)
-        u_inplane = axial_u_slice(u, z)
-        u_mag_sl = displacement_magnitude(u[:, :, :, z].astype(np.float64))
-        h, w = src_sl.shape
+        u_inplane = orient_axial_u_inplane(axial_u_slice(u, z))
+        u_mag_sl = orient_axial(displacement_magnitude(u[:, :, :, z].astype(np.float64)))
+        src_disp = orient_axial(src_sl)
+        mov_disp = orient_axial(mov_sl)
+        h, w = src_disp.shape
 
         subject_id = extra.get("subject_id") or file_path.stem.split("_")[0]
 
         # Col 0: source + reference grid
         ax_src = axes[row, 0]
-        ax_src.imshow(src_sl, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
+        ax_src.imshow(src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
         overlay_regular_grid(ax_src, h, w, stride=grid_stride, color=_GRID_COLOR)
         _style_axis(ax_src)
-        ax_src.set_ylabel(_row_label(subject_id, extra), fontsize=_LABEL, rotation=0, labelpad=42, va="center")
+        ax_src.set_ylabel(
+            _row_label(subject_id, extra),
+            fontsize=_LABEL,
+            rotation=45,
+            ha="right",
+            va="center",
+            labelpad=4,
+        )
 
         # Col 1: moving + grid bent by u
         ax_mov = axes[row, 1]
-        ax_mov.imshow(mov_sl, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
+        ax_mov.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
         overlay_deformation_grid(ax_mov, u_inplane, stride=grid_stride, color=_GRID_COLOR)
         _style_axis(ax_mov)
 
@@ -385,7 +442,7 @@ def visualize_hcp3d_samples(
     )
 
     fig.suptitle(
-        "HCP 3D synthetic registration — source / warped / displacement",
+        "HCP Synthetic Data Plot",
         fontsize=_TITLE,
         fontweight="bold",
         y=0.98,
@@ -393,14 +450,14 @@ def visualize_hcp3d_samples(
     fig.text(
         0.5,
         0.935,
-        f"{split} split · {subtitle} · {z_note} · intensities masked z-score",
+        f"{subtitle} · {z_note} · intensities masked z-score · radiological axial (rot90)",
         ha="center",
         va="top",
         fontsize=_LABEL,
-        color="0.25",
+        color="black",
     )
 
-    fig.subplots_adjust(left=0.14, right=0.90, top=0.86, bottom=0.10, wspace=0.22, hspace=0.32)
+    fig.subplots_adjust(left=0.12, right=0.90, top=0.86, bottom=0.10, wspace=0.22, hspace=0.32)
 
     if save_path is not None:
         save_path = Path(save_path)
