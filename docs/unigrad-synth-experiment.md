@@ -57,10 +57,12 @@ datasets/hcp/<subject_id>/T1w/
 **Output:**
 
 ```text
-datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<suffix>.npz
+datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<suffix>.npz          # qc_passed=True
+datasets/hcp_synth_qc_fail/{Train,Val,Test}/<subject_id>_<suffix>.npz  # qc_passed=False
 ```
 
-Suffixes: `none`, `rig`, `aff`, `ela`, `aela` (see deformation classes below).
+Suffixes: `none`, `rig`, `aff`, `ela`, `aela` (see deformation classes below). Training reads
+only `hcp_synth/`; failed QC samples are kept under `hcp_synth_qc_fail/` for debugging.
 
 ### NPZ schema
 
@@ -74,6 +76,9 @@ Suffixes: `none`, `rig`, `aff`, `ela`, `aela` (see deformation classes below).
 | `source_spacing` | `(3,)` float32 | Voxel size in mm |
 | `u_unit` | str | `"vox"` |
 | `deformation_class` | str | See below |
+| `magnitude_range` | str | `low` / `mid` / `high` / `none` — TorchIO **sampling bounds**, not realized ‖u‖ |
+| `u_max_interior` | float | Max ‖u‖ in mask ∩ interior margin (voxels) |
+| `u_mean_interior` | float | Mean ‖u‖ in mask ∩ interior margin (voxels) |
 | `subject_id` | str | HCP ID |
 | `qc_passed` | bool | QC on raw warp (see below) |
 
@@ -86,7 +91,8 @@ Suffixes: `none`, `rig`, `aff`, `ela`, `aela` (see deformation classes below).
 - **Deformation mix** (same ratios in every split): 5% none, 20% rigid, 25% affine, 25%
   elastic, 25% affine+elastic (`affine_elastic`).
 
-Manifest: `datasets/hcp_synth/split_manifest.json`.
+Manifest: `datasets/hcp_synth/split_manifest.json` (includes per-class/tier counts and
+`deformation_stats` with ‖u‖ summaries for passed samples).
 
 ### Deformation classes and file nomenclature
 
@@ -132,7 +138,27 @@ Constants in `experiments/unigrad-synth/create_synth_data.py`: `DEFORMATION_RATI
 `DEFORMATION_SUFFIX`.
 
 **QC visualization** (`visualize_synth_data.py`, default `--selection random`): rows are one example
-each of **`rigid`**, **`affine`**, **`elastic`** (not `none` or `affine_elastic`).
+each of **`rigid`**, **`affine`**, **`elastic`** (not `none` or `affine_elastic`). Prefers
+`qc_passed=True` samples; per-row ‖u‖ color scaling is on by default (`--per-row-u-scale`). Use
+`--mask-moving` for display-only masking of warped slices (reduces black padding voids; does not
+change saved NPZ).
+
+### Magnitude ranges (low / mid / high)
+
+Within each non-`none` class, a **parameter sampling range** is assigned deterministically from
+`subject_id + deformation_class + seed`. Ranges set TorchIO bounds for `RandomAffine` /
+`RandomElasticDeformation`; each draw is still **uniformly random inside** those bounds, so
+`high` range does **not** guarantee a large realized ‖u‖.
+
+| Range | Share | Role |
+| --- | ---: | --- |
+| `low` | ~30% | Narrower parameter bounds |
+| `mid` | ~40% | Mid bounds |
+| `high` | ~30% | Wider bounds (still below global max QC) |
+
+`none` uses range `none` (identity). Per-range TorchIO bounds (degrees, translation mm, scales,
+elastic max displacement mm) are in `create_synth_data.py` (`RANGE_RIGID`, `RANGE_AFFINE`,
+`RANGE_ELASTIC`).
 
 ### TorchIO: how deformation is created
 
@@ -195,15 +221,15 @@ Pipeline order in `create_synth_data.py`:
 ### Transform defaults (physical units)
 
 See table in § Deformation classes and file nomenclature for class ↔ suffix mapping. Parameter
-defaults per class:
+ranges are **range-specific** (low / mid / high). Example **mid** range values:
 
-| Class | TorchIO | Key parameters |
+| Class | TorchIO | Key parameters (mid range) |
 | --- | --- | --- |
 | `none` | (identity) | — |
 | `rigid` | `RandomAffine` | `scales=1`, `degrees=±6°`, `translation=±4` **mm** |
 | `affine` | `RandomAffine` | `scales=0.97–1.03`, `degrees=±8°`, `translation=±4` **mm** |
 | `elastic` | `RandomElasticDeformation` | 7 control points, `max_displacement=±6` **mm** |
-| `affine_elastic` | Affine then elastic | Both of the above |
+| `affine_elastic` | Affine then elastic | Mid affine + mid elastic |
 
 ### QC
 
@@ -211,11 +237,33 @@ defaults per class:
 | --- | --- | --- |
 | `MAX_U_INTERIOR_VOX` | 25 | Max ‖u‖ in mask ∩ interior margin |
 | `MAX_U_GLOBAL_VOX` | 60 | Max ‖u‖ full volume |
+| `MIN_U_MAX_INTERIOR_BY_CLASS` | per class | **Floor** on interior max ‖u‖ (reject near-identity warps) |
+| `MIN_U_MEAN_INTERIOR_BY_CLASS` | per class | **Floor** on interior mean ‖u‖ |
+| `MAX_U_NONE_VOX` | 0.5 | `none` class: interior max ‖u‖ must stay below this |
 | `MIN_MOVING_MEAN_RATIO` | 0.05 | On **raw** intensities before z-score |
 | `INTERIOR_MARGIN` | 10 voxels | Border excluded from interior QC |
 | `MAX_TRANSFORM_ATTEMPTS` | 20 | Resample transform if QC fails |
 
-Failed samples are still saved with `qc_passed=False`; list in `qc_flagged_paths.txt`.
+Per-class interior floors (voxels):
+
+| Class | min max ‖u‖ | min mean ‖u‖ |
+| --- | ---: | ---: |
+| `none` | (max < 0.5) | — |
+| `rigid` | 1.5 | 0.5 |
+| `affine` | 2.0 | 0.7 |
+| `elastic` | 1.5 | 0.5 |
+| `affine_elastic` | 3.0 | 1.0 |
+
+Failed samples after all attempts are saved to `datasets/hcp_synth_qc_fail/{split}/` with
+`qc_passed=False` (not in the training set). List: `datasets/hcp_synth_qc_fail/qc_flagged_paths.txt`.
+
+### Padding artifact (moving display)
+
+After affine/rigid warps, vacated voxels are filled with `default_pad_value="minimum"` (dark).
+Masked z-score sets outside-brain voxels to 0. The **brain mask is not warped** with the image, so
+warped slices can show **black voids** where anatomy moved away — this is a display/padding
+artifact, not missing HCP data. Training NPZ keeps this convention; use `mask` (and optionally
+`--mask-moving` in `visualize_synth_data.py`) for QC figures.
 
 ### Orientation (storage vs display)
 
@@ -228,8 +276,9 @@ Failed samples are still saved with `qc_passed=False`; list in `qc_flagged_paths
 ### Example commands
 
 ```bash
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --workers 8
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --max-subjects 100 --workers 8
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --qc-fail-path datasets/hcp_synth_qc_fail --workers 8
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --max-subjects 30 --workers 4
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth --split Train --save-path assets/images/unigrad-synth/hcp/hcp_synth_random3.png --mask-moving --no-show
 ```
 
 ### Planned next steps (HCP branch)

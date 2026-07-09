@@ -11,7 +11,7 @@ Axial slices use radiological display (``rot90``, posterior up).
 **IXI 2D legacy** (``*_triplet.npz``): ``image``, ``warped``, ``phi``.
 
 Examples:
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth --split Train --num-samples 3 --save-path assets/images/unigrad-synth/hcp/hcp_synth_random3.png --no-show
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun --selection range_grid --save-dir assets/images/unigrad-synth/hcp/range_grid --no-show
 python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth --split Train --selection min_median_max --save-path assets/images/unigrad-synth/hcp/hcp_synth_minmedmax.png --no-show
 python experiments/unigrad-synth/visualize_synth_data.py --data-dir data/IXI_2D_synth_trip --format triplet --split Train --phi-view magnitude --save-path assets/images/synth/ixi_minmedmax.png --no-show
 """
@@ -37,6 +37,23 @@ DEFORMATION_ROW_ORDER: tuple[tuple[str, str], ...] = (
     ("rigid", "rig"),
     ("affine", "aff"),
     ("elastic", "ela"),
+)
+
+# All (class, range) pairs for ``--selection range_grid`` (matches create_synth_data.py).
+RANGE_GRID_COMBINATIONS: tuple[tuple[str, str], ...] = (
+    ("none", "none"),
+    ("rigid", "low"),
+    ("rigid", "mid"),
+    ("rigid", "high"),
+    ("affine", "low"),
+    ("affine", "mid"),
+    ("affine", "high"),
+    ("elastic", "low"),
+    ("elastic", "mid"),
+    ("elastic", "high"),
+    ("affine_elastic", "low"),
+    ("affine_elastic", "mid"),
+    ("affine_elastic", "high"),
 )
 
 _GRID_COLOR = "cyan"
@@ -88,11 +105,23 @@ def detect_format(npz_path: Path) -> str:
     )
 
 
-def collect_npz_files(input_dir: Path, split: str, pattern: str) -> list[Path]:
-    split_dir = input_dir / split
-    if not split_dir.exists():
-        raise FileNotFoundError(f"Split directory does not exist: {split_dir}")
-    return sorted(split_dir.glob(pattern))
+def resolve_npz_dir(input_dir: Path, split: str | None) -> Path:
+    """Use split subfolder when present; otherwise flat layout (e.g. range-grid dry run)."""
+    if split:
+        split_dir = input_dir / split
+        if split_dir.is_dir():
+            return split_dir
+    return input_dir
+
+
+def collect_npz_files(input_dir: Path, split: str | None, pattern: str) -> list[Path]:
+    data_dir = resolve_npz_dir(input_dir, split)
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Data directory does not exist: {data_dir}")
+    files = sorted(data_dir.glob(pattern))
+    if not files and split:
+        files = sorted(input_dir.glob(pattern))
+    return files
 
 
 def default_slice_index(vol: np.ndarray) -> int:
@@ -180,6 +209,12 @@ def load_hcp3d_sample(npz_path: Path) -> dict:
         }
         if "mask" in data.files:
             out["mask"] = np.asarray(data["mask"])
+        if "source_mask" in data.files:
+            out["source_mask"] = np.asarray(data["source_mask"])
+        elif "mask" in data.files:
+            out["source_mask"] = np.asarray(data["mask"])
+        if "moving_mask" in data.files:
+            out["moving_mask"] = np.asarray(data["moving_mask"])
         if "qc_passed" in data.files:
             qc_val, qc_err = _unpack_qc_passed(data["qc_passed"])
             if qc_err:
@@ -187,9 +222,26 @@ def load_hcp3d_sample(npz_path: Path) -> dict:
             out["qc_passed"] = qc_val
         if "deformation_class" in data.files:
             out["deformation_class"] = _unpack_scalar_str(data["deformation_class"])
+        if "magnitude_range" in data.files:
+            out["magnitude_range"] = _unpack_scalar_str(data["magnitude_range"])
+        elif "magnitude_tier" in data.files:
+            # legacy NPZ key (easy/medium/hard → low/mid/high not remapped)
+            out["magnitude_range"] = _unpack_scalar_str(data["magnitude_tier"])
         if "subject_id" in data.files:
             out["subject_id"] = _unpack_scalar_str(data["subject_id"])
     return out
+
+
+def prefer_qc_passed_files(files: list[Path]) -> tuple[list[Path], bool]:
+    """Return qc_passed=True files when available; warn via bool if falling back."""
+    passed: list[Path] = []
+    for fp in files:
+        sample = load_hcp3d_sample(fp)
+        if sample.get("qc_passed") is True:
+            passed.append(fp)
+    if passed:
+        return passed, False
+    return files, True
 
 
 def load_triplet(npz_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
@@ -270,14 +322,20 @@ def select_deformation_class_examples(
     seed: int,
 ) -> list[tuple[Path, str, float]]:
     """One sample per class: rigid (row 1), affine (row 2), elastic (row 3)."""
+    pool_files, used_fallback = prefer_qc_passed_files(files)
+    if used_fallback:
+        print(
+            "Warning: no qc_passed=True samples in split; using all files for row selection.",
+            file=sys.stderr,
+        )
     pools: dict[str, list[Path]] = {cls: [] for cls, _ in DEFORMATION_ROW_ORDER}
-    for fp in files:
+    for fp in pool_files:
         cls = load_hcp3d_sample(fp).get("deformation_class")
         if cls in pools:
             pools[str(cls)].append(fp)
     for cls, suf in DEFORMATION_ROW_ORDER:
         if not pools[cls]:
-            pools[cls] = [fp for fp in files if fp.stem.endswith(f"_{suf}")]
+            pools[cls] = [fp for fp in pool_files if fp.stem.endswith(f"_{suf}")]
 
     rng = random.Random(seed)
     picked: list[tuple[Path, str, float]] = []
@@ -291,82 +349,111 @@ def select_deformation_class_examples(
     return picked
 
 
-def _style_axis(ax: plt.Axes) -> None:
-    ax.set_xticks([])
-    ax.set_yticks([])
-    for spine in ax.spines.values():
-        spine.set_linewidth(0.8)
-        spine.set_color("0.35")
+def _pool_range_grid_files(files: list[Path]) -> dict[tuple[str, str], list[Path]]:
+    by_key: dict[tuple[str, str], list[Path]] = {}
+    for fp in files:
+        meta = load_hcp3d_sample(fp)
+        cls = meta.get("deformation_class")
+        mag_range = meta.get("magnitude_range")
+        if cls and mag_range:
+            by_key.setdefault((str(cls), str(mag_range)), []).append(fp)
+    for cls, mag_range in RANGE_GRID_COMBINATIONS:
+        key = (cls, mag_range)
+        if key in by_key:
+            continue
+        needle = f"_{cls}_{mag_range}"
+        matches = [fp for fp in files if needle in fp.stem]
+        if matches:
+            by_key[key] = matches
+    return by_key
 
 
-def _row_label(subject_id: str, extra: dict) -> str:
-    lines = [subject_id]
-    meta: list[str] = []
-    if extra.get("deformation_class"):
-        meta.append(str(extra["deformation_class"]))
-    if "qc_passed" in extra:
-        meta.append(f"qc={extra['qc_passed']}")
-    if meta:
-        lines.append(" · ".join(meta))
-    return "\n".join(lines)
+def group_range_grid_examples(
+    files: list[Path],
+    *,
+    replicates: int,
+) -> list[tuple[str, list[tuple[Path, str, float]]]]:
+    """Group replicates per (class, range) — one figure per combination."""
+    pool_files, used_fallback = prefer_qc_passed_files(files)
+    if used_fallback:
+        print(
+            "Warning: no qc_passed=True samples in split; using all files for range_grid.",
+            file=sys.stderr,
+        )
+    pools = _pool_range_grid_files(pool_files)
+    groups: list[tuple[str, list[tuple[Path, str, float]]]] = []
+    missing: list[str] = []
+    short: list[str] = []
+    for cls, mag_range in RANGE_GRID_COMBINATIONS:
+        label = f"{cls}_{mag_range}"
+        pool = sorted(pools.get((cls, mag_range), []), key=lambda p: p.name)
+        if not pool:
+            missing.append(label)
+            continue
+        if len(pool) < replicates:
+            short.append(f"{label} ({len(pool)}/{replicates})")
+        rows = [
+            (pool[i], f"rep {i + 1}", float("nan"))
+            for i in range(min(replicates, len(pool)))
+        ]
+        groups.append((label, rows))
+    if missing:
+        raise FileNotFoundError(
+            f"range_grid missing combination(s): {', '.join(missing)}. "
+            f"Run: create_synth_data.py --range-grid  # default 3 replicates per combo"
+        )
+    if short:
+        raise FileNotFoundError(
+            f"range_grid needs {replicates} replicates per combo; short: {', '.join(short)}"
+        )
+    return groups
 
 
-def visualize_hcp3d_samples(
-    input_dir: Path,
+def _render_hcp3d_figure(
+    picked: list[tuple[Path, str, float]],
+    *,
     split: str,
     save_path: Path | None,
     no_show: bool,
-    *,
-    selection: str,
-    score_metric: str,
-    num_samples: int,
-    seed: int,
+    title: str,
+    subtitle: str,
     slice_index: int | None,
     grid_stride: int,
     u_percentile: float,
+    per_row_u_scale: bool,
+    mask_moving: bool,
+    row_h: float = 3.2,
 ) -> None:
     from matplotlib.lines import Line2D
-
-    files = collect_npz_files(input_dir, split, HCP_SYNTH_GLOB)
-    if not files:
-        raise FileNotFoundError(f"No NPZ files in '{input_dir / split}'.")
-
-    if selection == "random":
-        picked = select_deformation_class_examples(files, seed)
-        examples_note = f"Rigid / affine / elastic examples (seed = {seed})"
-    elif selection == "min_median_max":
-        picked = select_min_median_max_files(files, "hcp3d", score_metric)
-        examples_note = f"Min / median / max of {score_metric} " + r"$\|u\|$"
-    else:
-        raise ValueError(f"Unknown selection: {selection!r}")
 
     nrows = len(picked)
     ncols = 3
     col_titles = ["Source (fixed)", "Warped (moving)", r"$\|u\|$"]
 
     z_values: list[int] = []
-    u_mags: list[np.ndarray] = []
+    row_u_vmax: list[float] = []
+    global_u_mags: list[np.ndarray] = []
     for fp, _, _ in picked:
         sample = load_hcp3d_sample(fp)
         z = axial_slice(sample["source"], slice_index)[1]
         z_values.append(z)
         u_sl = sample["u"][:, :, :, z]
-        u_mags.append(displacement_magnitude(u_sl.astype(np.float64)).ravel())
-    u_vmax = float(np.percentile(np.concatenate(u_mags), u_percentile))
-    u_vmax = max(u_vmax, 1e-6)
+        mag = displacement_magnitude(u_sl.astype(np.float64)).ravel()
+        global_u_mags.append(mag)
+        row_u_vmax.append(max(float(np.percentile(mag, u_percentile)), 1e-6))
+    u_vmax_global = float(np.percentile(np.concatenate(global_u_mags), u_percentile))
+    u_vmax_global = max(u_vmax_global, 1e-6)
 
     ref_shape = load_hcp3d_sample(picked[0][0])["source"].shape
     if len(set(z_values)) == 1:
         z_note = f"axial z = {z_values[0]} / {ref_shape[2] - 1}"
     else:
         z_note = "axial z varies by row"
-    subtitle = (
-        f"{examples_note} · {split} split · Radiological-style display · {z_note}"
-    )
+    full_subtitle = f"{subtitle} · {z_note}"
 
     plt.rcParams.update({"font.family": _FONT, "figure.dpi": _DPI, "savefig.dpi": _DPI})
     fig_w = 3.5 * ncols + 1.4
-    fig_h = 3.2 * nrows + 1.6
+    fig_h = row_h * nrows + 1.6
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
 
     im_u_last = None
@@ -375,25 +462,34 @@ def visualize_hcp3d_samples(
         source = sample["source"]
         moving = sample["moving"]
         u = sample["u"]
-        extra = {k: sample[k] for k in ("qc_passed", "deformation_class", "subject_id") if k in sample}
+        extra = {
+            k: sample[k]
+            for k in ("qc_passed", "deformation_class", "magnitude_range", "subject_id")
+            if k in sample
+        }
 
         src_sl, z = axial_slice(source, slice_index)
         mov_sl, _ = axial_slice(moving, slice_index)
+        if mask_moving and "moving_mask" not in sample and "mask" in sample:
+            mov_sl = mov_sl * sample["mask"][:, :, z]
         u_inplane = orient_axial_u_inplane(axial_u_slice(u, z))
         u_mag_sl = orient_axial(displacement_magnitude(u[:, :, :, z].astype(np.float64)))
         src_disp = orient_axial(src_sl)
         mov_disp = orient_axial(mov_sl)
         h, w = src_disp.shape
+        u_vmax = row_u_vmax[row] if per_row_u_scale else u_vmax_global
 
         subject_id = extra.get("subject_id") or file_path.stem.split("_")[0]
+        row_title = rank_label if rank_label else subject_id
+        if rank_label and subject_id:
+            row_title = f"{rank_label}\n{subject_id}"
 
-        # Col 0: source + reference grid
         ax_src = axes[row, 0]
         ax_src.imshow(src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
         overlay_regular_grid(ax_src, h, w, stride=grid_stride, color=_GRID_COLOR)
         _style_axis(ax_src)
         ax_src.set_ylabel(
-            _row_label(subject_id, extra),
+            _row_label(row_title, extra),
             fontsize=_LABEL,
             rotation=90,
             ha="center",
@@ -401,13 +497,11 @@ def visualize_hcp3d_samples(
             labelpad=8,
         )
 
-        # Col 1: moving + grid bent by u
         ax_mov = axes[row, 1]
         ax_mov.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
         overlay_deformation_grid(ax_mov, u_inplane, stride=grid_stride, color=_GRID_COLOR)
         _style_axis(ax_mov)
 
-        # Col 2: ‖u‖ magnitude
         ax_u = axes[row, 2]
         im_u_last = ax_u.imshow(
             u_mag_sl, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
@@ -415,17 +509,15 @@ def visualize_hcp3d_samples(
         _style_axis(ax_u)
 
         if row == 0:
-            for col, title in enumerate(col_titles):
-                axes[0, col].set_title(title, fontsize=_SUBTITLE, fontweight="medium", pad=10)
+            for col, t in enumerate(col_titles):
+                axes[0, col].set_title(t, fontsize=_SUBTITLE, fontweight="medium", pad=10)
 
-    # Colorbar for ‖u‖
     if im_u_last is not None:
         cbar_ax = fig.add_axes([0.92, 0.22, 0.018, 0.56])
         cbar = fig.colorbar(im_u_last, cax=cbar_ax)
         cbar.set_label(r"Displacement norm $\|u\|$ (voxels)", fontsize=_LABEL)
         cbar.ax.tick_params(labelsize=_LABEL - 1)
 
-    # Legend for grid types
     legend_handles = [
         Line2D([0], [0], color=_GRID_COLOR, linewidth=1.2, label="Reference grid (source, fixed)"),
         Line2D([0], [0], color=_GRID_COLOR, linewidth=1.2, linestyle="--", label=r"Grid displaced by $u$ (moving)"),
@@ -441,22 +533,8 @@ def visualize_hcp3d_samples(
         bbox_to_anchor=(0.5, 0.01),
     )
 
-    fig.suptitle(
-        "HCP Synthetic Data Plot",
-        fontsize=_TITLE,
-        fontweight="bold",
-        y=0.98,
-    )
-    fig.text(
-        0.5,
-        0.935,
-        subtitle,
-        ha="center",
-        va="top",
-        fontsize=_LABEL,
-        color="black",
-    )
-
+    fig.suptitle(title, fontsize=_TITLE, fontweight="bold", y=0.98)
+    fig.text(0.5, 0.935, full_subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
     fig.subplots_adjust(left=0.14, right=0.90, top=0.86, bottom=0.10, wspace=0.22, hspace=0.32)
 
     if save_path is not None:
@@ -469,6 +547,139 @@ def visualize_hcp3d_samples(
         plt.close(fig)
     else:
         plt.show()
+
+
+def visualize_range_grid_combinations(
+    input_dir: Path,
+    split: str | None,
+    save_dir: Path,
+    no_show: bool,
+    *,
+    replicates: int,
+    slice_index: int | None,
+    grid_stride: int,
+    u_percentile: float,
+    per_row_u_scale: bool,
+    mask_moving: bool,
+) -> None:
+    files = collect_npz_files(input_dir, split, HCP_SYNTH_GLOB)
+    if not files:
+        raise FileNotFoundError(f"No NPZ files in '{input_dir / split}'.")
+    groups = group_range_grid_examples(files, replicates=replicates)
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    for label, picked in groups:
+        _render_hcp3d_figure(
+            picked,
+            split=split,
+            save_path=save_dir / f"{label}.png",
+            no_show=True,
+            title=f"HCP Synthetic Data Plot — {label}",
+            subtitle=f"{len(picked)} replicates · Radiological-style display",
+            slice_index=slice_index,
+            grid_stride=grid_stride,
+            u_percentile=u_percentile,
+            per_row_u_scale=per_row_u_scale,
+            mask_moving=mask_moving,
+            row_h=3.0,
+        )
+    if no_show:
+        plt.close("all")
+    print(f"Saved {len(groups)} figures under {save_dir}")
+
+
+def _style_axis(ax: plt.Axes) -> None:
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.8)
+        spine.set_color("0.35")
+
+
+def _row_label(subject_id: str, extra: dict) -> str:
+    lines = [subject_id]
+    meta: list[str] = []
+    if extra.get("deformation_class"):
+        meta.append(str(extra["deformation_class"]))
+    if extra.get("magnitude_range"):
+        meta.append(str(extra["magnitude_range"]))
+    if "qc_passed" in extra:
+        meta.append(f"qc={extra['qc_passed']}")
+    if meta:
+        lines.append(" · ".join(meta))
+    return "\n".join(lines)
+
+
+def visualize_hcp3d_samples(
+    input_dir: Path,
+    split: str | None,
+    save_path: Path | None,
+    no_show: bool,
+    *,
+    selection: str,
+    score_metric: str,
+    num_samples: int,
+    seed: int,
+    slice_index: int | None,
+    grid_stride: int,
+    u_percentile: float,
+    per_row_u_scale: bool,
+    mask_moving: bool,
+    save_dir: Path | None = None,
+    range_grid_replicates: int = 3,
+) -> None:
+    if selection == "range_grid":
+        if save_dir is None:
+            if save_path is not None:
+                save_dir = Path(save_path).parent / Path(save_path).stem
+            else:
+                save_dir = Path("assets/images/unigrad-synth/hcp/range_grid")
+        visualize_range_grid_combinations(
+            input_dir,
+            None,
+            save_dir,
+            no_show,
+            replicates=range_grid_replicates,
+            slice_index=slice_index,
+            grid_stride=grid_stride,
+            u_percentile=u_percentile,
+            per_row_u_scale=per_row_u_scale,
+            mask_moving=mask_moving,
+        )
+        return
+
+    files = collect_npz_files(input_dir, split, HCP_SYNTH_GLOB)
+    if not files:
+        raise FileNotFoundError(f"No NPZ files in '{input_dir / split}'.")
+
+    if selection == "random":
+        picked = select_deformation_class_examples(files, seed)
+        examples_note = f"Rigid / affine / elastic examples (seed = {seed})"
+    elif selection == "min_median_max":
+        pool_files, used_fallback = prefer_qc_passed_files(files)
+        if used_fallback:
+            print(
+                "Warning: no qc_passed=True samples in split; using all files for min/median/max.",
+                file=sys.stderr,
+            )
+        picked = select_min_median_max_files(pool_files, "hcp3d", score_metric)
+        examples_note = f"Min / median / max of {score_metric} " + r"$\|u\|$"
+    else:
+        raise ValueError(f"Unknown selection: {selection!r}")
+
+    _render_hcp3d_figure(
+        picked,
+        split=split,
+        save_path=save_path,
+        no_show=no_show,
+        title="HCP Synthetic Data Plot",
+        subtitle=f"{examples_note} · {split} split · Radiological-style display",
+        slice_index=slice_index,
+        grid_stride=grid_stride,
+        u_percentile=u_percentile,
+        per_row_u_scale=per_row_u_scale,
+        mask_moving=mask_moving,
+    )
 
 
 def render_phi(phi: np.ndarray, phi_view: str) -> tuple[np.ndarray, str]:
@@ -622,7 +833,7 @@ def visualize_triplets(
         plt.show()
 
 
-def resolve_format(data_dir: Path, split: str, fmt: str) -> str:
+def resolve_format(data_dir: Path, split: str | None, fmt: str) -> str:
     if fmt != "auto":
         return fmt
     for pattern in (HCP_SYNTH_GLOB, TRIPLET_GLOB):
@@ -633,9 +844,9 @@ def resolve_format(data_dir: Path, split: str, fmt: str) -> str:
             return detect_format(files[0])
         except ValueError:
             continue
+    loc = resolve_npz_dir(data_dir, split)
     raise FileNotFoundError(
-        f"No recognizable synth NPZ in '{data_dir / split}' "
-        f"(expected HCP3D or triplet keys)."
+        f"No recognizable synth NPZ in '{loc}' (expected HCP3D or triplet keys)."
     )
 
 
@@ -653,7 +864,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="data_dir",
         help="Root with Train/Val/Test subfolders.",
     )
-    p.add_argument("--split", type=str, default="Train", choices=list(SPLITS))
+    p.add_argument(
+        "--split",
+        type=str,
+        default=None,
+        help="Train/Val/Test subfolder (optional; flat data-dir used for range_grid dry runs).",
+    )
     p.add_argument(
         "--format",
         type=str,
@@ -665,8 +881,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--selection",
         type=str,
         default="random",
-        choices=["min_median_max", "random"],
-        help="Sample pick: random or min/median/max deformation score.",
+        choices=["min_median_max", "random", "range_grid"],
+        help="Sample pick: random, min/median/max, or 13 PNGs (one per class×range combo).",
     )
     p.add_argument(
         "--score-metric",
@@ -695,7 +911,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--u-percentile",
         type=float,
         default=99.0,
-        help="Color scale cap for ‖u‖ (percentile across selected samples).",
+        help="Color scale cap for ‖u‖ (percentile; per-row unless --global-u-scale).",
+    )
+    p.add_argument(
+        "--global-u-scale",
+        action="store_true",
+        help="Use one shared ‖u‖ color scale across rows (default: per-row scaling).",
+    )
+    p.add_argument(
+        "--mask-moving",
+        action="store_true",
+        help="Legacy NPZ only: multiply moving by fixed mask (new NPZ uses moving_mask in data).",
     )
     p.add_argument(
         "--phi-view",
@@ -708,6 +934,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--mag-vmin", type=float, default=0.0)
     p.add_argument("--mag-vmax", type=float, default=None)
     p.add_argument("--mag-percentile", type=float, default=99.0)
+    p.add_argument(
+        "--save-dir",
+        type=Path,
+        default=None,
+        help="Output directory for --selection range_grid (one PNG per combination).",
+    )
+    p.add_argument(
+        "--range-grid-replicates",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Replicates per combination for range_grid (default: 3 rows per figure).",
+    )
     p.add_argument(
         "--save-path",
         type=Path,
@@ -725,7 +964,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        fmt = resolve_format(data_dir, args.split, args.format)
+        split = args.split if args.selection != "range_grid" else (args.split or None)
+        if split is None and args.selection != "range_grid":
+            split = "Train"
+        fmt = resolve_format(data_dir, split, args.format)
     except FileNotFoundError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
@@ -733,7 +975,7 @@ def main(argv: list[str] | None = None) -> int:
     if fmt == "hcp3d":
         visualize_hcp3d_samples(
             data_dir,
-            args.split,
+            split,
             args.save_path,
             args.no_show,
             selection=args.selection,
@@ -743,6 +985,10 @@ def main(argv: list[str] | None = None) -> int:
             slice_index=args.slice_index,
             grid_stride=args.grid_stride,
             u_percentile=args.u_percentile,
+            per_row_u_scale=not args.global_u_scale,
+            mask_moving=args.mask_moving,
+            save_dir=args.save_dir,
+            range_grid_replicates=args.range_grid_replicates,
         )
     else:
         if args.phi_view is None:
