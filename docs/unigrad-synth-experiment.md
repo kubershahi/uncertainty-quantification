@@ -60,7 +60,7 @@ datasets/hcp/<subject_id>/T1w/
 datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<suffix>.npz
 ```
 
-Suffixes: `none`, `rig`, `aff`, `nr`, `ar` (see deformation classes below).
+Suffixes: `none`, `rig`, `aff`, `ela`, `aela` (see deformation classes below).
 
 ### NPZ schema
 
@@ -83,10 +83,56 @@ Suffixes: `none`, `rig`, `aff`, `nr`, `ar` (see deformation classes below).
 
 - **Split:** deterministic 70 / 15 / 15 by subject hash (`Train` / `Val` / `Test`). One sample per
   subject (no multi-warp reuse).
-- **Deformation mix** (same ratios in every split): 5% none, 20% rigid-like, 25% affine, 25%
-  non-rigid, 25% affine + non-rigid (`affine_rigid_plus_non_rigid`).
+- **Deformation mix** (same ratios in every split): 5% none, 20% rigid, 25% affine, 25%
+  elastic, 25% affine+elastic (`affine_elastic`).
 
 Manifest: `datasets/hcp_synth/split_manifest.json`.
+
+### Deformation classes and file nomenclature
+
+Each HCP subject gets **one** synthetic sample. The warp type is stored in NPZ as `deformation_class`
+and encoded in the filename suffix: `<subject_id>_<suffix>.npz`.
+
+There are **five** classes (not four): four are actual warps plus an identity baseline.
+
+| `deformation_class` | Suffix | Example filename | TorchIO | Description |
+| --- | --- | --- | --- | --- |
+| `none` | `none` | `100206_none.npz` | (identity) | No warp; `moving ≈ source`, `u ≈ 0`. Baseline (~5%). |
+| `rigid` | `rig` | `100206_rig.npz` | `RandomAffine` | Rotation + translation only (`scales=1`). (~20%). |
+| `affine` | `aff` | `100206_aff.npz` | `RandomAffine` | Full affine: scale, shear, rotate, translate. (~25%). |
+| `elastic` | `ela` | `100206_ela.npz` | `RandomElasticDeformation` | B-spline elastic / non-rigid only. (~25%). |
+| `affine_elastic` | `aela` | `100206_aela.npz` | Affine → elastic | Global affine **then** local elastic (combined). (~25%). |
+
+**Naming rationale**
+
+- **`elastic`** — matches TorchIO `RandomElasticDeformation` (clearer than `non_rigid`).
+- **`affine_elastic`** — reads as “affine then elastic” (clearer than `affine_rigid_plus_non_rigid`).
+- **`rigid`** — rotation + translation without scale (was `rigid_like` in early versions).
+- Short **suffixes** keep filenames readable; full class name is always in `deformation_class`.
+
+**Registration taxonomy mapping**
+
+```text
+none          →  identity (not a deformation; QC / baseline)
+rigid         →  rigid motion
+affine        →  affine motion
+elastic       →  non-rigid / deformable (elastic only)
+affine_elastic →  composite (global + local), common in real registration
+```
+
+**Legacy names** (regenerate data if NPZ still uses these):
+
+| Legacy `deformation_class` | Legacy suffix | Current |
+| --- | --- | --- |
+| `rigid_like` | `_rig` | `rigid` / `_rig` |
+| `non_rigid` | `_nr` | `elastic` / `_ela` |
+| `affine_rigid_plus_non_rigid` | `_ar` | `affine_elastic` / `_aela` |
+
+Constants in `experiments/unigrad-synth/create_synth_data.py`: `DEFORMATION_RATIOS`,
+`DEFORMATION_SUFFIX`.
+
+**QC visualization** (`visualize_synth_data.py`, default `--selection random`): rows are one example
+each of **`rigid`**, **`affine`**, **`elastic`** (not `none` or `affine_elastic`).
 
 ### TorchIO: how deformation is created
 
@@ -148,13 +194,16 @@ Pipeline order in `create_synth_data.py`:
 
 ### Transform defaults (physical units)
 
+See table in § Deformation classes and file nomenclature for class ↔ suffix mapping. Parameter
+defaults per class:
+
 | Class | TorchIO | Key parameters |
 | --- | --- | --- |
 | `none` | (identity) | — |
-| `rigid_like` | `RandomAffine` | `scales=1`, `degrees=±6°`, `translation=±4` **mm** |
+| `rigid` | `RandomAffine` | `scales=1`, `degrees=±6°`, `translation=±4` **mm** |
 | `affine` | `RandomAffine` | `scales=0.97–1.03`, `degrees=±8°`, `translation=±4` **mm** |
-| `non_rigid` | `RandomElasticDeformation` | 7 control points, `max_displacement=±6` **mm** |
-| `affine_rigid_plus_non_rigid` | Affine then elastic | Both of the above |
+| `elastic` | `RandomElasticDeformation` | 7 control points, `max_displacement=±6` **mm** |
+| `affine_elastic` | Affine then elastic | Both of the above |
 
 ### QC
 
