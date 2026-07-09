@@ -197,6 +197,23 @@ def overlay_deformation_grid(
     ax.contour(pos_row, levels=levels_row, colors=color, linewidths=linewidth, alpha=alpha)
 
 
+def overlay_binary_grid(
+    ax: plt.Axes,
+    grid_mask_2d: np.ndarray,
+    *,
+    color: str = _GRID_COLOR,
+    alpha: float = 0.75,
+) -> None:
+    """Overlay transformed binary grid with transparent background."""
+    mask = grid_mask_2d > 0.5
+    if not np.any(mask):
+        return
+    rgba = np.zeros((*mask.shape, 4), dtype=np.float32)
+    rgba[..., :3] = np.array(plt.matplotlib.colors.to_rgb(color), dtype=np.float32)
+    rgba[..., 3] = mask.astype(np.float32) * alpha
+    ax.imshow(rgba, origin="upper", interpolation="nearest")
+
+
 def load_hcp3d_sample(npz_path: Path) -> dict:
     with np.load(npz_path) as data:
         missing = HCP3D_KEYS - set(data.files)
@@ -215,6 +232,12 @@ def load_hcp3d_sample(npz_path: Path) -> dict:
             out["source_mask"] = np.asarray(data["mask"])
         if "moving_mask" in data.files:
             out["moving_mask"] = np.asarray(data["moving_mask"])
+        if "moving_grid" in data.files:
+            out["moving_grid"] = np.asarray(data["moving_grid"])
+        if "source_grid" in data.files:
+            out["source_grid"] = np.asarray(data["source_grid"])
+        if "identity_grid_mask" in data.files:
+            out["identity_grid_mask"] = np.asarray(data["identity_grid_mask"])
         if "qc_passed" in data.files:
             qc_val, qc_err = _unpack_qc_passed(data["qc_passed"])
             if qc_err:
@@ -392,10 +415,7 @@ def group_range_grid_examples(
             continue
         if len(pool) < replicates:
             short.append(f"{label} ({len(pool)}/{replicates})")
-        rows = [
-            (pool[i], f"rep {i + 1}", float("nan"))
-            for i in range(min(replicates, len(pool)))
-        ]
+        rows = [(pool[i], "", float("nan")) for i in range(min(replicates, len(pool)))]
         groups.append((label, rows))
     if missing:
         raise FileNotFoundError(
@@ -424,11 +444,9 @@ def _render_hcp3d_figure(
     mask_moving: bool,
     row_h: float = 3.2,
 ) -> None:
-    from matplotlib.lines import Line2D
-
     nrows = len(picked)
-    ncols = 3
-    col_titles = ["Source (fixed)", "Warped (moving)", r"$\|u\|$"]
+    ncols = 4
+    col_titles = ["Source (fixed)", "Warped (moving)", r"$\|u\|$", "u vectors"]
 
     z_values: list[int] = []
     row_u_vmax: list[float] = []
@@ -452,7 +470,7 @@ def _render_hcp3d_figure(
     full_subtitle = f"{subtitle} · {z_note}"
 
     plt.rcParams.update({"font.family": _FONT, "figure.dpi": _DPI, "savefig.dpi": _DPI})
-    fig_w = 3.5 * ncols + 1.4
+    fig_w = 3.2 * ncols + 1.4
     fig_h = row_h * nrows + 1.6
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
 
@@ -472,6 +490,7 @@ def _render_hcp3d_figure(
         mov_sl, _ = axial_slice(moving, slice_index)
         if mask_moving and "moving_mask" not in sample and "mask" in sample:
             mov_sl = mov_sl * sample["mask"][:, :, z]
+        mov_grid_sl = orient_axial(sample["moving_grid"][:, :, z]) if "moving_grid" in sample else None
         u_inplane = orient_axial_u_inplane(axial_u_slice(u, z))
         u_mag_sl = orient_axial(displacement_magnitude(u[:, :, :, z].astype(np.float64)))
         src_disp = orient_axial(src_sl)
@@ -480,9 +499,7 @@ def _render_hcp3d_figure(
         u_vmax = row_u_vmax[row] if per_row_u_scale else u_vmax_global
 
         subject_id = extra.get("subject_id") or file_path.stem.split("_")[0]
-        row_title = rank_label if rank_label else subject_id
-        if rank_label and subject_id:
-            row_title = f"{rank_label}\n{subject_id}"
+        row_title = subject_id
 
         ax_src = axes[row, 0]
         ax_src.imshow(src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
@@ -499,7 +516,10 @@ def _render_hcp3d_figure(
 
         ax_mov = axes[row, 1]
         ax_mov.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
-        overlay_deformation_grid(ax_mov, u_inplane, stride=grid_stride, color=_GRID_COLOR)
+        if mov_grid_sl is not None:
+            overlay_binary_grid(ax_mov, mov_grid_sl, color=_GRID_COLOR)
+        else:
+            overlay_deformation_grid(ax_mov, u_inplane, stride=grid_stride, color=_GRID_COLOR)
         _style_axis(ax_mov)
 
         ax_u = axes[row, 2]
@@ -507,6 +527,28 @@ def _render_hcp3d_figure(
             u_mag_sl, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
         )
         _style_axis(ax_u)
+
+        ax_q = axes[row, 3]
+        ax_q.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
+        step = max(8, grid_stride)
+        uu = u_inplane[0, ::step, ::step]
+        vv = u_inplane[1, ::step, ::step]
+        xs, ys = np.meshgrid(
+            np.arange(0, u_inplane.shape[2], step),
+            np.arange(0, u_inplane.shape[1], step),
+        )
+        ax_q.quiver(
+            xs,
+            ys,
+            uu,
+            vv,
+            color="deepskyblue",
+            angles="xy",
+            scale_units="xy",
+            scale=1.0,
+            width=0.003,
+        )
+        _style_axis(ax_q)
 
         if row == 0:
             for col, t in enumerate(col_titles):
@@ -518,24 +560,9 @@ def _render_hcp3d_figure(
         cbar.set_label(r"Displacement norm $\|u\|$ (voxels)", fontsize=_LABEL)
         cbar.ax.tick_params(labelsize=_LABEL - 1)
 
-    legend_handles = [
-        Line2D([0], [0], color=_GRID_COLOR, linewidth=1.2, label="Reference grid (source, fixed)"),
-        Line2D([0], [0], color=_GRID_COLOR, linewidth=1.2, linestyle="--", label=r"Grid displaced by $u$ (moving)"),
-    ]
-    fig.legend(
-        handles=legend_handles,
-        loc="lower center",
-        ncol=2,
-        fontsize=_LABEL,
-        frameon=True,
-        fancybox=False,
-        edgecolor="0.75",
-        bbox_to_anchor=(0.5, 0.01),
-    )
-
     fig.suptitle(title, fontsize=_TITLE, fontweight="bold", y=0.98)
     fig.text(0.5, 0.935, full_subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
-    fig.subplots_adjust(left=0.14, right=0.90, top=0.86, bottom=0.10, wspace=0.22, hspace=0.32)
+    fig.subplots_adjust(left=0.14, right=0.90, top=0.86, bottom=0.08, wspace=0.22, hspace=0.32)
 
     if save_path is not None:
         save_path = Path(save_path)
@@ -904,7 +931,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--grid-stride",
         type=int,
-        default=12,
+        default=20,
         help="Grid line spacing in voxels (HCP 3D overlay).",
     )
     p.add_argument(
