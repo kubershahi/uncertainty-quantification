@@ -228,7 +228,7 @@ def plot_hcp_samples(
         constrained_layout=False,
     )
 
-    row_ylabels = ["T1w slice and image", "Brain mask"]
+    row_ylabels = ["Brain T1w Slice", "Brain Mask"]
     if show_segmentation:
         row_ylabels.append("Segmentation labels")
 
