@@ -4,7 +4,7 @@ Visualize synthetic registration NPZ samples.
 
 Supports two formats (auto-detected or ``--format``):
 
-**HCP 3D** (``create_synth_data.py`` output): rows = rigid / affine / elastic examples;
+**HCP volume** (``create_synth_data.py`` output): rows = rigid / affine / elastic examples;
 columns = source (fixed) + reference grid, warped/moving + grid bent by ``u``, ``‖u‖``.
 Axial slices use radiological display (``rot90``, posterior up).
 
@@ -31,8 +31,24 @@ TRIPLET_GLOB = "*_triplet.npz"
 HCP_SYNTH_GLOB = "*.npz"
 TRIPLET_KEYS = frozenset({"image", "warped", "phi"})
 HCP3D_KEYS = frozenset({"source", "moving", "u"})
+HCP3D_REQUIRED_KEYS = frozenset(
+    {
+        "source",
+        "moving",
+        "u",
+        "source_mask",
+        "moving_mask",
+        "source_grid",
+        "moving_grid",
+        "identity_grid_mask",
+        "deformation_class",
+        "magnitude_range",
+        "subject_id",
+        "qc_passed",
+    }
+)
 
-# Default rows for ``--selection random`` (HCP 3D): one example per class, top to bottom.
+# Default rows for ``--selection random`` (HCP volume): one example per class, top to bottom.
 DEFORMATION_ROW_ORDER: tuple[tuple[str, str], ...] = (
     ("rigid", "rig"),
     ("affine", "aff"),
@@ -101,7 +117,7 @@ def detect_format(npz_path: Path) -> str:
         return "triplet"
     raise ValueError(
         f"{npz_path.name}: unrecognized NPZ keys {sorted(keys)} "
-        f"(expected HCP3D {sorted(HCP3D_KEYS)} or triplet {sorted(TRIPLET_KEYS)})"
+        f"(expected HCP volume {sorted(HCP3D_KEYS)} or triplet {sorted(TRIPLET_KEYS)})"
     )
 
 
@@ -216,7 +232,7 @@ def overlay_binary_grid(
 
 def load_hcp3d_sample(npz_path: Path) -> dict:
     with np.load(npz_path) as data:
-        missing = HCP3D_KEYS - set(data.files)
+        missing = HCP3D_REQUIRED_KEYS - set(data.files)
         if missing:
             raise KeyError(f"{npz_path.name} missing {sorted(missing)}")
         out = {
@@ -224,34 +240,18 @@ def load_hcp3d_sample(npz_path: Path) -> dict:
             "moving": np.asarray(data["moving"]),
             "u": np.asarray(data["u"]),
         }
-        if "mask" in data.files:
-            out["mask"] = np.asarray(data["mask"])
-        if "source_mask" in data.files:
-            out["source_mask"] = np.asarray(data["source_mask"])
-        elif "mask" in data.files:
-            out["source_mask"] = np.asarray(data["mask"])
-        if "moving_mask" in data.files:
-            out["moving_mask"] = np.asarray(data["moving_mask"])
-        if "moving_grid" in data.files:
-            out["moving_grid"] = np.asarray(data["moving_grid"])
-        if "source_grid" in data.files:
-            out["source_grid"] = np.asarray(data["source_grid"])
-        if "identity_grid_mask" in data.files:
-            out["identity_grid_mask"] = np.asarray(data["identity_grid_mask"])
-        if "qc_passed" in data.files:
-            qc_val, qc_err = _unpack_qc_passed(data["qc_passed"])
-            if qc_err:
-                raise ValueError(f"{npz_path.name}: {qc_err}")
-            out["qc_passed"] = qc_val
-        if "deformation_class" in data.files:
-            out["deformation_class"] = _unpack_scalar_str(data["deformation_class"])
-        if "magnitude_range" in data.files:
-            out["magnitude_range"] = _unpack_scalar_str(data["magnitude_range"])
-        elif "magnitude_tier" in data.files:
-            # legacy NPZ key (easy/medium/hard → low/mid/high not remapped)
-            out["magnitude_range"] = _unpack_scalar_str(data["magnitude_tier"])
-        if "subject_id" in data.files:
-            out["subject_id"] = _unpack_scalar_str(data["subject_id"])
+        out["source_mask"] = np.asarray(data["source_mask"])
+        out["moving_mask"] = np.asarray(data["moving_mask"])
+        out["source_grid"] = np.asarray(data["source_grid"])
+        out["moving_grid"] = np.asarray(data["moving_grid"])
+        out["identity_grid_mask"] = np.asarray(data["identity_grid_mask"])
+        qc_val, qc_err = _unpack_qc_passed(data["qc_passed"])
+        if qc_err:
+            raise ValueError(f"{npz_path.name}: {qc_err}")
+        out["qc_passed"] = qc_val
+        out["deformation_class"] = _unpack_scalar_str(data["deformation_class"])
+        out["magnitude_range"] = _unpack_scalar_str(data["magnitude_range"])
+        out["subject_id"] = _unpack_scalar_str(data["subject_id"])
     return out
 
 
@@ -441,7 +441,6 @@ def _render_hcp3d_figure(
     grid_stride: int,
     u_percentile: float,
     per_row_u_scale: bool,
-    mask_moving: bool,
     row_h: float = 3.2,
 ) -> None:
     nrows = len(picked)
@@ -488,8 +487,7 @@ def _render_hcp3d_figure(
 
         src_sl, z = axial_slice(source, slice_index)
         mov_sl, _ = axial_slice(moving, slice_index)
-        if mask_moving and "moving_mask" not in sample and "mask" in sample:
-            mov_sl = mov_sl * sample["mask"][:, :, z]
+        src_grid_sl = orient_axial(sample["source_grid"][:, :, z]) if "source_grid" in sample else None
         mov_grid_sl = orient_axial(sample["moving_grid"][:, :, z]) if "moving_grid" in sample else None
         u_inplane = orient_axial_u_inplane(axial_u_slice(u, z))
         u_mag_sl = orient_axial(displacement_magnitude(u[:, :, :, z].astype(np.float64)))
@@ -503,7 +501,8 @@ def _render_hcp3d_figure(
 
         ax_src = axes[row, 0]
         ax_src.imshow(src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
-        overlay_regular_grid(ax_src, h, w, stride=grid_stride, color=_GRID_COLOR)
+        if src_grid_sl is not None:
+            overlay_binary_grid(ax_src, src_grid_sl, color=_GRID_COLOR)
         _style_axis(ax_src)
         ax_src.set_ylabel(
             _row_label(row_title, extra),
@@ -518,8 +517,6 @@ def _render_hcp3d_figure(
         ax_mov.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
         if mov_grid_sl is not None:
             overlay_binary_grid(ax_mov, mov_grid_sl, color=_GRID_COLOR)
-        else:
-            overlay_deformation_grid(ax_mov, u_inplane, stride=grid_stride, color=_GRID_COLOR)
         _style_axis(ax_mov)
 
         ax_u = axes[row, 2]
@@ -587,7 +584,6 @@ def visualize_range_grid_combinations(
     grid_stride: int,
     u_percentile: float,
     per_row_u_scale: bool,
-    mask_moving: bool,
 ) -> None:
     files = collect_npz_files(input_dir, split, HCP_SYNTH_GLOB)
     if not files:
@@ -607,7 +603,6 @@ def visualize_range_grid_combinations(
             grid_stride=grid_stride,
             u_percentile=u_percentile,
             per_row_u_scale=per_row_u_scale,
-            mask_moving=mask_moving,
             row_h=3.0,
         )
     if no_show:
@@ -651,7 +646,6 @@ def visualize_hcp3d_samples(
     grid_stride: int,
     u_percentile: float,
     per_row_u_scale: bool,
-    mask_moving: bool,
     save_dir: Path | None = None,
     range_grid_replicates: int = 3,
 ) -> None:
@@ -671,7 +665,6 @@ def visualize_hcp3d_samples(
             grid_stride=grid_stride,
             u_percentile=u_percentile,
             per_row_u_scale=per_row_u_scale,
-            mask_moving=mask_moving,
         )
         return
 
@@ -705,7 +698,6 @@ def visualize_hcp3d_samples(
         grid_stride=grid_stride,
         u_percentile=u_percentile,
         per_row_u_scale=per_row_u_scale,
-        mask_moving=mask_moving,
     )
 
 
@@ -873,13 +865,13 @@ def resolve_format(data_dir: Path, split: str | None, fmt: str) -> str:
             continue
     loc = resolve_npz_dir(data_dir, split)
     raise FileNotFoundError(
-        f"No recognizable synth NPZ in '{loc}' (expected HCP3D or triplet keys)."
+        f"No recognizable synth NPZ in '{loc}' (expected HCP volume or triplet keys)."
     )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Visualize synthetic NPZ (HCP 3D source/moving/u or IXI 2D triplets).",
+        description="Visualize synthetic NPZ (HCP source/moving/u or IXI 2D triplets).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -926,13 +918,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--slice-index",
         type=int,
         default=None,
-        help="Axial slice for HCP 3D (default: mid z).",
+        help="Axial slice for HCP volumes (default: mid z).",
     )
     p.add_argument(
         "--grid-stride",
         type=int,
         default=20,
-        help="Grid line spacing in voxels (HCP 3D overlay).",
+        help="Grid line spacing in voxels (HCP overlay).",
     )
     p.add_argument(
         "--u-percentile",
@@ -944,11 +936,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--global-u-scale",
         action="store_true",
         help="Use one shared ‖u‖ color scale across rows (default: per-row scaling).",
-    )
-    p.add_argument(
-        "--mask-moving",
-        action="store_true",
-        help="Legacy NPZ only: multiply moving by fixed mask (new NPZ uses moving_mask in data).",
     )
     p.add_argument(
         "--phi-view",
@@ -1013,7 +1000,6 @@ def main(argv: list[str] | None = None) -> int:
             grid_stride=args.grid_stride,
             u_percentile=args.u_percentile,
             per_row_u_scale=not args.global_u_scale,
-            mask_moving=args.mask_moving,
             save_dir=args.save_dir,
             range_grid_replicates=args.range_grid_replicates,
         )
