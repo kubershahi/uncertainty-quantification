@@ -4,7 +4,7 @@ Visualize synthetic registration NPZ samples.
 
 Supports two formats (auto-detected or ``--format``):
 
-**HCP 3D** (``create_synth_data.py`` output): rows = rigid / affine / non-rigid examples;
+**HCP 3D** (``create_synth_data.py`` output): rows = rigid / affine / elastic examples;
 columns = source (fixed) + reference grid, warped/moving + grid bent by ``u``, ``|u|``.
 Axial slices use radiological display (``rot90``, posterior up).
 
@@ -34,9 +34,9 @@ HCP3D_KEYS = frozenset({"source", "moving", "u"})
 
 # Default rows for ``--selection random`` (HCP 3D): one example per class, top to bottom.
 DEFORMATION_ROW_ORDER: tuple[tuple[str, str], ...] = (
-    ("rigid_like", "rig"),
+    ("rigid", "rig"),
     ("affine", "aff"),
-    ("non_rigid", "nr"),
+    ("elastic", "ela"),
 )
 
 _GRID_COLOR = "cyan"
@@ -269,7 +269,7 @@ def select_deformation_class_examples(
     files: list[Path],
     seed: int,
 ) -> list[tuple[Path, str, float]]:
-    """One sample per deformation class: rigid (row 1), affine (row 2), non-rigid (row 3)."""
+    """One sample per class: rigid (row 1), affine (row 2), elastic (row 3)."""
     pools: dict[str, list[Path]] = {cls: [] for cls, _ in DEFORMATION_ROW_ORDER}
     for fp in files:
         cls = load_hcp3d_sample(fp).get("deformation_class")
@@ -334,7 +334,7 @@ def visualize_hcp3d_samples(
     if selection == "random":
         picked = select_deformation_class_examples(files, seed)
         subtitle = (
-            f"Rigid / affine / non-rigid examples (seed = {seed}) · "
+            f"Rigid / affine / elastic examples (seed = {seed}) · "
             f"{len(files)} subjects in {split}"
         )
     elif selection == "min_median_max":

@@ -143,8 +143,10 @@ python experiments/unigrad-synth/visualize_hcp_data.py --data-dir datasets/hcp -
 **Script:** `experiments/unigrad-synth/create_synth_data.py`  
 **Output:** `datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<suffix>.npz`
 
-One warp per subject; balanced deformation classes; masked z-score intensities; ground-truth `u` in
-voxels. Pipeline detail (implicit backward warp, identity-grid trick, z-score vs φ):
+One warp per subject; balanced deformation classes (`none`, `rigid`, `affine`, `elastic`,
+`affine_elastic`); filenames `<subject_id>_<suffix>.npz` with suffixes `none`, `rig`, `aff`, `ela`,
+`aela`. Masked z-score intensities; ground-truth `u` in voxels. Class table:
+`docs/unigrad-synth-experiment.md` § *Deformation classes and file nomenclature*; pipeline detail:
 `docs/registration-concepts.md` § *3D synthetic deformation and displacement extraction*;
 experiment config: `docs/unigrad-synth-experiment.md`.
 

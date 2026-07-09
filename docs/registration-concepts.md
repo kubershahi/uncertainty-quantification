@@ -323,7 +323,10 @@ IO iteration count is chosen via `sweep_io_iterations.py` before building `datas
 **`*_triplet.npz` (IXI 2D):** `image`, `warped`, `phi` (2, H, W), optional `valid_mask`, `qc_passed`
 
 **`hcp_synth/*.npz` (HCP 3D):** `source`, `moving`, `u` (3, X, Y, Z), `mask`, `source_affine`,
-`source_spacing`, `u_unit`, `deformation_class`, `subject_id`, `qc_passed`
+`source_spacing`, `u_unit`, `deformation_class` (`none` | `rigid` | `affine` | `elastic` |
+`affine_elastic`), `subject_id`, `qc_passed`. Filenames: `<subject_id>_<suffix>.npz` where suffix
+is `none`, `rig`, `aff`, `ela`, or `aela`. See `docs/unigrad-synth-experiment.md` § Deformation
+classes and file nomenclature.
 
 **`*_fiver.npz` (Phase II synth):** `image`, `warped`, `phi_true`, `phi_pred`, `phi_diff`, `error_map`, `valid_mask`, `qc_passed`
 
