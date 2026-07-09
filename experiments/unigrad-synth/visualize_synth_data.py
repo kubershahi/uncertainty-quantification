@@ -5,7 +5,7 @@ Visualize synthetic registration NPZ samples.
 Supports two formats (auto-detected or ``--format``):
 
 **HCP 3D** (``create_synth_data.py`` output): rows = rigid / affine / elastic examples;
-columns = source (fixed) + reference grid, warped/moving + grid bent by ``u``, ``|u|``.
+columns = source (fixed) + reference grid, warped/moving + grid bent by ``u``, ``‖u‖``.
 Axial slices use radiological display (``rot90``, posterior up).
 
 **IXI 2D legacy** (``*_triplet.npz``): ``image``, ``warped``, ``phi``.
@@ -333,19 +333,16 @@ def visualize_hcp3d_samples(
 
     if selection == "random":
         picked = select_deformation_class_examples(files, seed)
-        subtitle = (
-            f"Rigid / affine / elastic examples (seed = {seed}) · "
-            f"{len(files)} subjects in {split}"
-        )
+        examples_note = f"Rigid / affine / elastic examples (seed = {seed})"
     elif selection == "min_median_max":
         picked = select_min_median_max_files(files, "hcp3d", score_metric)
-        subtitle = f"Min / median / max of {score_metric} ‖u‖ across split ({len(picked)} subjects)"
+        examples_note = f"Min / median / max of {score_metric} " + r"$\|u\|$"
     else:
         raise ValueError(f"Unknown selection: {selection!r}")
 
     nrows = len(picked)
     ncols = 3
-    col_titles = ["Source (fixed)", "Warped (moving)", r"$|u|$"]
+    col_titles = ["Source (fixed)", "Warped (moving)", r"$\|u\|$"]
 
     z_values: list[int] = []
     u_mags: list[np.ndarray] = []
@@ -363,6 +360,9 @@ def visualize_hcp3d_samples(
         z_note = f"axial z = {z_values[0]} / {ref_shape[2] - 1}"
     else:
         z_note = "axial z varies by row"
+    subtitle = (
+        f"{examples_note} · {split} split · Radiological-style display · {z_note}"
+    )
 
     plt.rcParams.update({"font.family": _FONT, "figure.dpi": _DPI, "savefig.dpi": _DPI})
     fig_w = 3.5 * ncols + 1.4
@@ -395,10 +395,10 @@ def visualize_hcp3d_samples(
         ax_src.set_ylabel(
             _row_label(subject_id, extra),
             fontsize=_LABEL,
-            rotation=45,
-            ha="right",
+            rotation=90,
+            ha="center",
             va="center",
-            labelpad=4,
+            labelpad=8,
         )
 
         # Col 1: moving + grid bent by u
@@ -407,7 +407,7 @@ def visualize_hcp3d_samples(
         overlay_deformation_grid(ax_mov, u_inplane, stride=grid_stride, color=_GRID_COLOR)
         _style_axis(ax_mov)
 
-        # Col 2: |u| magnitude
+        # Col 2: ‖u‖ magnitude
         ax_u = axes[row, 2]
         im_u_last = ax_u.imshow(
             u_mag_sl, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
@@ -418,11 +418,11 @@ def visualize_hcp3d_samples(
             for col, title in enumerate(col_titles):
                 axes[0, col].set_title(title, fontsize=_SUBTITLE, fontweight="medium", pad=10)
 
-    # Colorbar for |u|
+    # Colorbar for ‖u‖
     if im_u_last is not None:
         cbar_ax = fig.add_axes([0.92, 0.22, 0.018, 0.56])
         cbar = fig.colorbar(im_u_last, cax=cbar_ax)
-        cbar.set_label(r"Displacement magnitude $|u|$ (voxels)", fontsize=_LABEL)
+        cbar.set_label(r"Displacement norm $\|u\|$ (voxels)", fontsize=_LABEL)
         cbar.ax.tick_params(labelsize=_LABEL - 1)
 
     # Legend for grid types
@@ -450,14 +450,14 @@ def visualize_hcp3d_samples(
     fig.text(
         0.5,
         0.935,
-        f"{subtitle} · {z_note} · intensities masked z-score · radiological axial (rot90)",
+        subtitle,
         ha="center",
         va="top",
         fontsize=_LABEL,
         color="black",
     )
 
-    fig.subplots_adjust(left=0.12, right=0.90, top=0.86, bottom=0.10, wspace=0.22, hspace=0.32)
+    fig.subplots_adjust(left=0.14, right=0.90, top=0.86, bottom=0.10, wspace=0.22, hspace=0.32)
 
     if save_path is not None:
         save_path = Path(save_path)
