@@ -78,6 +78,7 @@ _FONT = "DejaVu Sans"
 _TITLE = 12
 _SUBTITLE = 10
 _LABEL = 9
+_QUIVER_COLOR = "lime"
 
 
 def displacement_magnitude(u: np.ndarray) -> np.ndarray:
@@ -169,6 +170,37 @@ def axial_u_slice(u: np.ndarray, slice_index: int) -> np.ndarray:
     return np.stack([u[0, :, :, z], u[1, :, :, z]], axis=0)
 
 
+def plane_slice(vol: np.ndarray, plane: str, index: int | None) -> tuple[np.ndarray, int]:
+    """Return 2D slice for plane in {axial, coronal, sagittal}."""
+    if plane == "axial":
+        z = default_slice_index(vol) if index is None else int(index)
+        z = max(0, min(z, vol.shape[2] - 1))
+        return vol[:, :, z], z
+    if plane == "coronal":
+        y = int(vol.shape[1] // 2) if index is None else int(index)
+        y = max(0, min(y, vol.shape[1] - 1))
+        return vol[:, y, :], y
+    if plane == "sagittal":
+        x = int(vol.shape[0] // 2) if index is None else int(index)
+        x = max(0, min(x, vol.shape[0] - 1))
+        return vol[x, :, :], x
+    raise ValueError(f"Unknown plane: {plane}")
+
+
+def plane_u_inplane_slice(u: np.ndarray, plane: str, index: int) -> np.ndarray:
+    """In-plane displacement (2,H,W) for requested plane."""
+    if plane == "axial":
+        z = max(0, min(int(index), u.shape[3] - 1))
+        return np.stack([u[0, :, :, z], u[1, :, :, z]], axis=0)
+    if plane == "coronal":
+        y = max(0, min(int(index), u.shape[2] - 1))
+        return np.stack([u[0, :, y, :], u[2, :, y, :]], axis=0)
+    if plane == "sagittal":
+        x = max(0, min(int(index), u.shape[1] - 1))
+        return np.stack([u[1, x, :, :], u[2, x, :, :]], axis=0)
+    raise ValueError(f"Unknown plane: {plane}")
+
+
 def overlay_regular_grid(
     ax: plt.Axes,
     height: int,
@@ -228,6 +260,14 @@ def overlay_binary_grid(
     rgba[..., :3] = np.array(plt.matplotlib.colors.to_rgb(color), dtype=np.float32)
     rgba[..., 3] = mask.astype(np.float32) * alpha
     ax.imshow(rgba, origin="upper", interpolation="nearest")
+
+
+def checkerboard_mix(a: np.ndarray, b: np.ndarray, tile: int = 16) -> np.ndarray:
+    """Alternating-tile mix of two same-shape 2D arrays."""
+    h, w = a.shape
+    yy, xx = np.indices((h, w))
+    use_a = ((yy // tile) + (xx // tile)) % 2 == 0
+    return np.where(use_a, a, b)
 
 
 def load_hcp3d_sample(npz_path: Path) -> dict:
@@ -391,12 +431,8 @@ def _pool_range_grid_files(files: list[Path]) -> dict[tuple[str, str], list[Path
     return by_key
 
 
-def group_range_grid_examples(
-    files: list[Path],
-    *,
-    replicates: int,
-) -> list[tuple[str, list[tuple[Path, str, float]]]]:
-    """Group replicates per (class, range) — one figure per combination."""
+def group_range_grid_examples(files: list[Path]) -> list[tuple[str, Path]]:
+    """One subject/sample per (class, range) combination."""
     pool_files, used_fallback = prefer_qc_passed_files(files)
     if used_fallback:
         print(
@@ -404,27 +440,19 @@ def group_range_grid_examples(
             file=sys.stderr,
         )
     pools = _pool_range_grid_files(pool_files)
-    groups: list[tuple[str, list[tuple[Path, str, float]]]] = []
+    groups: list[tuple[str, Path]] = []
     missing: list[str] = []
-    short: list[str] = []
     for cls, mag_range in RANGE_GRID_COMBINATIONS:
         label = f"{cls}_{mag_range}"
         pool = sorted(pools.get((cls, mag_range), []), key=lambda p: p.name)
         if not pool:
             missing.append(label)
             continue
-        if len(pool) < replicates:
-            short.append(f"{label} ({len(pool)}/{replicates})")
-        rows = [(pool[i], "", float("nan")) for i in range(min(replicates, len(pool)))]
-        groups.append((label, rows))
+        groups.append((label, pool[0]))
     if missing:
         raise FileNotFoundError(
             f"range_grid missing combination(s): {', '.join(missing)}. "
             f"Run: create_synth_data.py --range-grid  # default 3 replicates per combo"
-        )
-    if short:
-        raise FileNotFoundError(
-            f"range_grid needs {replicates} replicates per combo; short: {', '.join(short)}"
         )
     return groups
 
@@ -441,35 +469,46 @@ def _render_hcp3d_figure(
     grid_stride: int,
     u_percentile: float,
     per_row_u_scale: bool,
+    row_planes: list[str] | None = None,
+    row_slice_indices: list[int] | None = None,
+    use_u_contours: bool = False,
+    use_checkerboard: bool = False,
+    checker_tile: int = 16,
     row_h: float = 3.2,
 ) -> None:
     nrows = len(picked)
-    ncols = 4
+    ncols = 5 if use_checkerboard else 4
     col_titles = ["Source (fixed)", "Warped (moving)", r"$\|u\|$", "u vectors"]
+    if use_checkerboard:
+        col_titles.append("checkerboard")
 
-    z_values: list[int] = []
+    plane_idx_notes: list[str] = []
     row_u_vmax: list[float] = []
     global_u_mags: list[np.ndarray] = []
-    for fp, _, _ in picked:
+    for row, (fp, _, _) in enumerate(picked):
         sample = load_hcp3d_sample(fp)
-        z = axial_slice(sample["source"], slice_index)[1]
-        z_values.append(z)
-        u_sl = sample["u"][:, :, :, z]
+        plane = row_planes[row] if row_planes is not None else "axial"
+        if row_slice_indices is not None:
+            idx = int(row_slice_indices[row])
+        else:
+            idx = plane_slice(sample["source"], plane, slice_index)[1]
+        plane_idx_notes.append(f"{plane[0]}={idx}")
+        if plane == "axial":
+            u_sl = sample["u"][:, :, :, idx]
+        elif plane == "coronal":
+            u_sl = sample["u"][:, :, idx, :]
+        else:
+            u_sl = sample["u"][:, idx, :, :]
         mag = displacement_magnitude(u_sl.astype(np.float64)).ravel()
         global_u_mags.append(mag)
         row_u_vmax.append(max(float(np.percentile(mag, u_percentile)), 1e-6))
     u_vmax_global = float(np.percentile(np.concatenate(global_u_mags), u_percentile))
     u_vmax_global = max(u_vmax_global, 1e-6)
 
-    ref_shape = load_hcp3d_sample(picked[0][0])["source"].shape
-    if len(set(z_values)) == 1:
-        z_note = f"axial z = {z_values[0]} / {ref_shape[2] - 1}"
-    else:
-        z_note = "axial z varies by row"
-    full_subtitle = f"{subtitle} · {z_note}"
+    full_subtitle = f"{subtitle} · {', '.join(plane_idx_notes)}"
 
     plt.rcParams.update({"font.family": _FONT, "figure.dpi": _DPI, "savefig.dpi": _DPI})
-    fig_w = 3.2 * ncols + 1.4
+    fig_w = 3.0 * ncols + 1.6
     fig_h = row_h * nrows + 1.6
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
 
@@ -485,23 +524,45 @@ def _render_hcp3d_figure(
             if k in sample
         }
 
-        src_sl, z = axial_slice(source, slice_index)
-        mov_sl, _ = axial_slice(moving, slice_index)
-        src_grid_sl = orient_axial(sample["source_grid"][:, :, z]) if "source_grid" in sample else None
-        mov_grid_sl = orient_axial(sample["moving_grid"][:, :, z]) if "moving_grid" in sample else None
-        u_inplane = orient_axial_u_inplane(axial_u_slice(u, z))
-        u_mag_sl = orient_axial(displacement_magnitude(u[:, :, :, z].astype(np.float64)))
+        plane = row_planes[row] if row_planes is not None else "axial"
+        if row_slice_indices is not None:
+            idx = int(row_slice_indices[row])
+        else:
+            idx = plane_slice(source, plane, slice_index)[1]
+        src_sl, _ = plane_slice(source, plane, idx)
+        mov_sl, _ = plane_slice(moving, plane, idx)
+        if plane == "axial":
+            src_grid_raw = sample["source_grid"][:, :, idx]
+            mov_grid_raw = sample["moving_grid"][:, :, idx]
+            u_mag_raw = displacement_magnitude(u[:, :, :, idx].astype(np.float64))
+        elif plane == "coronal":
+            src_grid_raw = sample["source_grid"][:, idx, :]
+            mov_grid_raw = sample["moving_grid"][:, idx, :]
+            u_mag_raw = displacement_magnitude(u[:, :, idx, :].astype(np.float64))
+        else:
+            src_grid_raw = sample["source_grid"][idx, :, :]
+            mov_grid_raw = sample["moving_grid"][idx, :, :]
+            u_mag_raw = displacement_magnitude(u[:, idx, :, :].astype(np.float64))
+        src_grid_sl = orient_axial(src_grid_raw) if "source_grid" in sample else None
+        mov_grid_sl = orient_axial(mov_grid_raw) if "moving_grid" in sample else None
+        u_inplane = orient_axial_u_inplane(plane_u_inplane_slice(u, plane, idx))
+        u_mag_sl = orient_axial(u_mag_raw)
         src_disp = orient_axial(src_sl)
         mov_disp = orient_axial(mov_sl)
         h, w = src_disp.shape
         u_vmax = row_u_vmax[row] if per_row_u_scale else u_vmax_global
 
         subject_id = extra.get("subject_id") or file_path.stem.split("_")[0]
-        row_title = subject_id
+        plane_tag = rank_label if rank_label else plane
+        row_title = f"{subject_id} · {plane_tag}"
+        deformation_class = str(extra.get("deformation_class") or "")
+        use_2d_grid_overlay = deformation_class in {"rigid", "affine", "affine_elastic"}
 
         ax_src = axes[row, 0]
         ax_src.imshow(src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
-        if src_grid_sl is not None:
+        if use_2d_grid_overlay:
+            overlay_regular_grid(ax_src, h, w, stride=grid_stride, color=_GRID_COLOR, alpha=0.75)
+        elif src_grid_sl is not None:
             overlay_binary_grid(ax_src, src_grid_sl, color=_GRID_COLOR)
         _style_axis(ax_src)
         ax_src.set_ylabel(
@@ -510,12 +571,16 @@ def _render_hcp3d_figure(
             rotation=90,
             ha="center",
             va="center",
-            labelpad=8,
+            labelpad=18,
         )
 
         ax_mov = axes[row, 1]
         ax_mov.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
-        if mov_grid_sl is not None:
+        if use_2d_grid_overlay:
+            overlay_deformation_grid(
+                ax_mov, u_inplane, stride=grid_stride, color=_GRID_COLOR, linewidth=0.6, alpha=0.72
+            )
+        elif mov_grid_sl is not None:
             overlay_binary_grid(ax_mov, mov_grid_sl, color=_GRID_COLOR)
         _style_axis(ax_mov)
 
@@ -523,11 +588,14 @@ def _render_hcp3d_figure(
         im_u_last = ax_u.imshow(
             u_mag_sl, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
         )
+        if use_u_contours:
+            levels = np.linspace(0.15 * u_vmax, 0.95 * u_vmax, 6)
+            ax_u.contour(u_mag_sl, levels=levels, colors="white", linewidths=0.5, alpha=0.7)
         _style_axis(ax_u)
 
         ax_q = axes[row, 3]
         ax_q.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
-        step = max(8, grid_stride)
+        step = max(14, grid_stride + 6)
         uu = u_inplane[0, ::step, ::step]
         vv = u_inplane[1, ::step, ::step]
         xs, ys = np.meshgrid(
@@ -539,13 +607,21 @@ def _render_hcp3d_figure(
             ys,
             uu,
             vv,
-            color="deepskyblue",
+            color=_QUIVER_COLOR,
             angles="xy",
             scale_units="xy",
             scale=1.0,
-            width=0.003,
+            width=0.006,
+            headwidth=4.2,
+            headlength=5.2,
         )
         _style_axis(ax_q)
+
+        if use_checkerboard:
+            ax_c = axes[row, 4]
+            cb = checkerboard_mix(src_disp, mov_disp, tile=checker_tile)
+            ax_c.imshow(cb, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
+            _style_axis(ax_c)
 
         if row == 0:
             for col, t in enumerate(col_titles):
@@ -559,7 +635,7 @@ def _render_hcp3d_figure(
 
     fig.suptitle(title, fontsize=_TITLE, fontweight="bold", y=0.98)
     fig.text(0.5, 0.935, full_subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
-    fig.subplots_adjust(left=0.14, right=0.90, top=0.86, bottom=0.08, wspace=0.22, hspace=0.32)
+    fig.subplots_adjust(left=0.24, right=0.90, top=0.86, bottom=0.08, wspace=0.26, hspace=0.34)
 
     if save_path is not None:
         save_path = Path(save_path)
@@ -579,30 +655,56 @@ def visualize_range_grid_combinations(
     save_dir: Path,
     no_show: bool,
     *,
-    replicates: int,
     slice_index: int | None,
     grid_stride: int,
     u_percentile: float,
     per_row_u_scale: bool,
+    use_u_contours: bool,
+    use_checkerboard: bool,
+    checker_tile: int,
+    montage_z_step: int,
+    range_grid_view: str,
 ) -> None:
     files = collect_npz_files(input_dir, split, HCP_SYNTH_GLOB)
     if not files:
         raise FileNotFoundError(f"No NPZ files in '{input_dir / split}'.")
-    groups = group_range_grid_examples(files, replicates=replicates)
+    groups = group_range_grid_examples(files)
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    for label, picked in groups:
+    for label, fp in groups:
+        sample = load_hcp3d_sample(fp)
+        if range_grid_view == "orthogonal":
+            x0 = sample["source"].shape[0] // 2
+            y0 = sample["source"].shape[1] // 2
+            z0 = axial_slice(sample["source"], slice_index)[1]
+            plane_rows = ["axial", "coronal", "sagittal"]
+            idx_rows = [z0, y0, x0]
+            rank_rows = ["axial", "coronal", "sagittal"]
+            subtitle = "Orthogonal sanity check · Radiological-style display"
+        else:
+            z0 = axial_slice(sample["source"], slice_index)[1]
+            z_offsets = [-int(montage_z_step), 0, int(montage_z_step)]
+            plane_rows = ["axial", "axial", "axial"]
+            idx_rows = [max(0, min(sample["source"].shape[2] - 1, z0 + dz)) for dz in z_offsets]
+            rank_rows = [f"z{dz:+d}" for dz in z_offsets]
+            subtitle = "3-slice montage sanity check · Radiological-style display"
+        picked = [(fp, r, float("nan")) for r in rank_rows]
         _render_hcp3d_figure(
             picked,
             split=split,
             save_path=save_dir / f"{label}.png",
             no_show=True,
             title=f"HCP Synthetic Data Plot — {label}",
-            subtitle=f"{len(picked)} replicates · Radiological-style display",
+            subtitle=subtitle,
             slice_index=slice_index,
             grid_stride=grid_stride,
             u_percentile=u_percentile,
             per_row_u_scale=per_row_u_scale,
+            row_planes=plane_rows,
+            row_slice_indices=idx_rows,
+            use_u_contours=use_u_contours,
+            use_checkerboard=use_checkerboard,
+            checker_tile=checker_tile,
             row_h=3.0,
         )
     if no_show:
@@ -647,7 +749,11 @@ def visualize_hcp3d_samples(
     u_percentile: float,
     per_row_u_scale: bool,
     save_dir: Path | None = None,
-    range_grid_replicates: int = 3,
+    use_u_contours: bool = False,
+    use_checkerboard: bool = False,
+    checker_tile: int = 16,
+    montage_z_step: int = 10,
+    range_grid_view: str = "orthogonal",
 ) -> None:
     if selection == "range_grid":
         if save_dir is None:
@@ -660,11 +766,15 @@ def visualize_hcp3d_samples(
             None,
             save_dir,
             no_show,
-            replicates=range_grid_replicates,
             slice_index=slice_index,
             grid_stride=grid_stride,
             u_percentile=u_percentile,
             per_row_u_scale=per_row_u_scale,
+            use_u_contours=use_u_contours,
+            use_checkerboard=use_checkerboard,
+            checker_tile=checker_tile,
+            montage_z_step=montage_z_step,
+            range_grid_view=range_grid_view,
         )
         return
 
@@ -698,6 +808,9 @@ def visualize_hcp3d_samples(
         grid_stride=grid_stride,
         u_percentile=u_percentile,
         per_row_u_scale=per_row_u_scale,
+        use_u_contours=use_u_contours,
+        use_checkerboard=use_checkerboard,
+        checker_tile=checker_tile,
     )
 
 
@@ -933,6 +1046,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Color scale cap for ‖u‖ (percentile; per-row unless --global-u-scale).",
     )
     p.add_argument(
+        "--u-contours",
+        action="store_true",
+        help="Overlay contour lines on top of ||u|| magnitude map.",
+    )
+    p.add_argument(
+        "--checkerboard",
+        action="store_true",
+        help="Add checkerboard source/moving comparison column.",
+    )
+    p.add_argument(
+        "--checker-tile",
+        type=int,
+        default=16,
+        help="Checkerboard tile size in pixels (when --checkerboard).",
+    )
+    p.add_argument(
         "--global-u-scale",
         action="store_true",
         help="Use one shared ‖u‖ color scale across rows (default: per-row scaling).",
@@ -955,11 +1084,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Output directory for --selection range_grid (one PNG per combination).",
     )
     p.add_argument(
-        "--range-grid-replicates",
+        "--range-grid-z-step",
         type=int,
-        default=3,
-        metavar="N",
-        help="Replicates per combination for range_grid (default: 3 rows per figure).",
+        default=10,
+        metavar="VOX",
+        help="Slice offset for 3-slice range_grid montage: z-step around center slice.",
+    )
+    p.add_argument(
+        "--range-grid-view",
+        type=str,
+        default="orthogonal",
+        choices=["orthogonal", "montage"],
+        help="Dry-run figure rows: orthogonal planes or 3-slice axial montage.",
     )
     p.add_argument(
         "--save-path",
@@ -1001,7 +1137,11 @@ def main(argv: list[str] | None = None) -> int:
             u_percentile=args.u_percentile,
             per_row_u_scale=not args.global_u_scale,
             save_dir=args.save_dir,
-            range_grid_replicates=args.range_grid_replicates,
+            use_u_contours=args.u_contours,
+            use_checkerboard=args.checkerboard,
+            checker_tile=args.checker_tile,
+            montage_z_step=args.range_grid_z_step,
+            range_grid_view=args.range_grid_view,
         )
     else:
         if args.phi_view is None:

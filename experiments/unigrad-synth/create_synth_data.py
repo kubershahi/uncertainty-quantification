@@ -119,6 +119,8 @@ MAX_U_GLOBAL_VOX = 60.0
 MIN_MOVING_MEAN_RATIO = 0.05
 MAX_TRANSFORM_ATTEMPTS = 20
 MAX_U_NONE_VOX = 0.5
+# Smooth valid-boundary vectors to reduce sharp seams in u_true vs u_pred comparisons.
+U_BOUNDARY_SMOOTH_BAND = 2
 
 # Per-class minimum interior ‖u‖ (voxels); none uses MAX_U_NONE_VOX instead
 MIN_U_MAX_INTERIOR_BY_CLASS: dict[str, float | None] = {
@@ -428,6 +430,44 @@ def _build_binary_grid_mask(shape_xyz: tuple[int, int, int], stride: int = 12) -
     return line.astype(np.float32)
 
 
+def smooth_u_near_boundary(
+    u: np.ndarray, valid_mask: np.ndarray, *, band_vox: int = U_BOUNDARY_SMOOTH_BAND
+) -> np.ndarray:
+    """
+    Smooth displacement magnitude in a narrow valid-band near OOB boundary.
+
+    Steps:
+    - keep invalid vectors exactly 0
+    - keep far-interior vectors unchanged
+    - only in boundary band, smooth |u| then rescale vectors to match smoothed magnitude
+    """
+    if band_vox <= 0:
+        return u
+    try:
+        from scipy.ndimage import distance_transform_edt, gaussian_filter
+    except Exception:
+        return u
+
+    valid = valid_mask.astype(bool)
+    if not np.any(valid):
+        return u
+    dist_to_invalid = distance_transform_edt(valid)
+    boundary_band = valid & (dist_to_invalid <= float(band_vox))
+    if not np.any(boundary_band):
+        return u
+
+    out = u.copy()
+    mag = displacement_magnitude(out.astype(np.float64))
+    mag_smooth = gaussian_filter(mag, sigma=1.0, mode="nearest")
+    scale = np.ones_like(mag, dtype=np.float32)
+    denom = np.maximum(mag, 1e-6)
+    scale[boundary_band] = (mag_smooth[boundary_band] / denom[boundary_band]).astype(np.float32)
+
+    out = out * scale[None, ...]
+    out[:, ~valid] = 0.0
+    return out.astype(np.float32)
+
+
 def process_one_subject(
     task: Task,
     *,
@@ -482,6 +522,7 @@ def process_one_subject(
         identity_grid_mask_bin = cand_valid_mask > 0.99
         invalid = ~identity_grid_mask_bin
         cand_u[:, invalid] = 0.0
+        cand_u = smooth_u_near_boundary(cand_u, identity_grid_mask_bin, band_vox=U_BOUNDARY_SMOOTH_BAND)
         cand_moving_grid[invalid] = False
 
         moving, moving_mask_bin, moving_grid_bin, u = (
