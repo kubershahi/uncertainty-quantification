@@ -17,7 +17,10 @@ Each output npz contains:
   - mask           : source brain mask (bool, 3D); alias for source_mask
   - source_mask    : fixed brain mask (bool, 3D)
   - moving_mask    : source_mask warped with the same transform (bool, 3D)
-  - source_affine, source_spacing, u_unit
+  - moving_grid        : transformed binary grid-lines mask for QC visualization (bool, 3D)
+  - source_grid        : undeformed binary grid-lines mask for QC visualization (bool, 3D)
+  - identity_grid_mask : binary in-bounds mask for displacement field (bool, 3D)
+  - source_affine
   - deformation_class : one of {none, rigid, affine, elastic, affine_elastic}
   - magnitude_range : low | mid | high | none (TorchIO sampling envelope, not realized ‖u‖)
   - u_max_interior, u_mean_interior
@@ -439,6 +442,20 @@ def _build_identity_grid(shape_xyz: tuple[int, int, int]) -> torch.Tensor:
     return torch.stack([cx, cy, cz], dim=0).float()
 
 
+def _build_binary_grid_mask(shape_xyz: tuple[int, int, int], stride: int = 12) -> np.ndarray:
+    """3D grid-line volume (1 on lines, 0 elsewhere) in voxel index space."""
+    x, y, z = shape_xyz
+    gx = (np.arange(x) % stride) == 0
+    gy = (np.arange(y) % stride) == 0
+    gz = (np.arange(z) % stride) == 0
+    line = (
+        gx[:, None, None]
+        | gy[None, :, None]
+        | gz[None, None, :]
+    )
+    return line.astype(np.float32)
+
+
 def process_one_subject(
     task: Task,
     *,
@@ -458,29 +475,49 @@ def process_one_subject(
 
     moving: np.ndarray | None = None
     moving_mask_bin: np.ndarray | None = None
+    moving_grid_bin: np.ndarray | None = None
     u: np.ndarray | None = None
     qc_passed = task.skip_qc
     n_attempts = 1 if task.skip_qc else MAX_TRANSFORM_ATTEMPTS
     source_mask_bin = mask > 0.5
+    # Must match visualize_synth_data's default grid stride for consistent overlays.
+    binary_grid = _build_binary_grid_mask(shape_xyz, stride=20)
+
+    identity_grid_mask_bin: np.ndarray | None = None
 
     for attempt in range(n_attempts):
         torch.manual_seed((task.seed + attempt * 100003) % (2**31))
         img_tensor = torch.from_numpy(source).unsqueeze(0).float()
         mask_tensor = torch.from_numpy(source_mask_bin.astype(np.float32)).unsqueeze(0)
+        ones_tensor = torch.ones_like(img_tensor, dtype=torch.float32)
+        gridline_tensor = torch.from_numpy(binary_grid).unsqueeze(0).float()
         affine = source_affine.astype(np.float64)
         subject = tio.Subject(
             mri=tio.ScalarImage(tensor=img_tensor, affine=affine),
             grid=tio.ScalarImage(tensor=identity_grid.clone(), affine=affine),
             brain_mask=tio.LabelMap(tensor=mask_tensor, affine=affine),
+            valid_mask=tio.LabelMap(tensor=ones_tensor, affine=affine),
+            grid_lines=tio.LabelMap(tensor=gridline_tensor, affine=affine),
         )
         transformed = transform(subject)
         cand_moving = transformed.mri.data.squeeze(0).numpy()
         cand_moving_mask = transformed.brain_mask.data.squeeze(0).numpy() > 0.5
+        cand_valid_mask = transformed.valid_mask.data.squeeze(0).numpy()
+        cand_moving_grid = transformed.grid_lines.data.squeeze(0).numpy() > 0.5
         cand_u = (
             transformed.grid.data.squeeze(0).numpy() - identity_grid.numpy()
         ).astype(np.float32)
+        identity_grid_mask_bin = cand_valid_mask > 0.99
+        invalid = ~identity_grid_mask_bin
+        cand_u[:, invalid] = 0.0
+        cand_moving_grid[invalid] = False
 
-        moving, moving_mask_bin, u = cand_moving, cand_moving_mask, cand_u
+        moving, moving_mask_bin, moving_grid_bin, u = (
+            cand_moving,
+            cand_moving_mask,
+            cand_moving_grid,
+            cand_u,
+        )
 
         if task.skip_qc or passes_checks(
             cand_u,
@@ -496,7 +533,13 @@ def process_one_subject(
             qc_passed = True
             break
 
-    assert moving is not None and moving_mask_bin is not None and u is not None
+    assert (
+        moving is not None
+        and moving_mask_bin is not None
+        and moving_grid_bin is not None
+        and identity_grid_mask_bin is not None
+        and u is not None
+    )
     u_max_int, u_mean_int = u_interior_stats(u, mask, shape_xyz, INTERIOR_MARGIN)
     source_z, moving_z, _, _ = zscore_brain_pair(
         source, moving, source_mask_bin, moving_mask_bin
@@ -509,12 +552,12 @@ def process_one_subject(
         source=source_z,
         moving=moving_z,
         u=u.astype(np.float32),
-        mask=source_mask_bin.astype(bool),
         source_mask=source_mask_bin.astype(bool),
         moving_mask=moving_mask_bin.astype(bool),
+        moving_grid=moving_grid_bin.astype(bool),
+        source_grid=binary_grid.astype(bool),
+        identity_grid_mask=identity_grid_mask_bin.astype(bool),
         source_affine=source_affine.astype(np.float32),
-        source_spacing=source_spacing.astype(np.float32),
-        u_unit=np.array("vox"),
         deformation_class=np.array(task.deformation_class),
         magnitude_range=np.array(task.magnitude_range),
         u_max_interior=np.float32(u_max_int),
@@ -647,8 +690,10 @@ def build_range_grid_tasks(
     tasks: list[Task] = []
     task_idx = 0
     for cls, mag_range in combos:
+        # Keep source subject fixed within a (class, range) group so replicate rows are comparable.
+        subj_idx = stable_subject_hash(f"{cls}:{mag_range}", base_seed) % len(subjects)
+        subj = subjects[subj_idx]
         for rep in range(replicates):
-            subj = subjects[task_idx % len(subjects)]
             rep_suffix = rep + 1 if replicates > 1 else 0
             out_name = range_grid_filename(subj.subject_id, cls, mag_range, rep_suffix)
             seed = (
@@ -840,6 +885,7 @@ def create_synthetic_data(
             "mask",
             "source_mask",
             "moving_mask",
+            "moving_grid",
             "magnitude_range",
             "u_max_interior",
             "u_mean_interior",
