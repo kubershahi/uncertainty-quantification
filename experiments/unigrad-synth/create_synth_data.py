@@ -16,28 +16,30 @@ Each output npz contains:
   - u       : displacement field (float32, shape (3, X, Y, Z), voxel units)
   - source_mask    : fixed brain mask (bool volume)
   - moving_mask    : source_mask warped with the same transform (bool volume)
-  - moving_grid        : transformed binary grid-lines mask for QC visualization (bool volume)
-  - source_grid        : undeformed binary grid-lines mask for QC visualization (bool volume)
   - identity_grid_mask : binary in-bounds mask for displacement field (bool volume)
   - source_affine
   - deformation_class : one of {none, rigid, affine, elastic, affine_elastic}
-  - magnitude_range : low | mid | high | none (TorchIO sampling envelope, not realized ‖u‖)
   - u_max_interior, u_mean_interior
   - subject_id, qc_passed
 
 TorchIO transforms run in physical space (mm) using the NIfTI affine; ``u`` is recovered
 in voxel index space via the identity-grid trick (backward warp).
 
-Split policy:
+Split policy (full run):
   - deterministic 70/15/15 by subject hash (Train/Val/Test)
   - balanced deformation mix in each split:
       5% none, 20% rigid, 25% affine, 25% elastic, 25% affine+elastic
 
-Example:
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --qc-fail-path datasets/hcp_synth_qc_fail --workers 8
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --max-subjects 30 --workers 4
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth_dryrun --range-grid --no-qc --workers 4
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth_dryrun --range-grid 5 --no-qc
+Modes:
+  - Full cohort: omit ``--dry-run`` → Train/Val/Test under ``--output-path``
+  - Dry run: ``--dry-run [N]`` → flat folder, 5 classes × N samples (default N=5)
+
+Examples:
+# Full cohort
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --qc-fail-path datasets/hcp_synth_qc_fail --workers 16
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --max-subjects 30 --workers 16
+# Dry run (25 samples)
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth_dryrun2 --dry-run 5 --no-qc --workers 16
 """
 
 from __future__ import annotations
@@ -88,27 +90,16 @@ DEFORMATION_SUFFIX = {
 
 DEFAULT_QC_FAIL_ROOT = "datasets/hcp_synth_qc_fail"
 
-# Magnitude ranges (within each deformation class except none).
-# Each range sets TorchIO *sampling bounds*; RandomAffine/Elastic still draw uniformly inside them.
-MAGNITUDE_RANGES = ("low", "mid", "high")
-MAGNITUDE_RANGE_FRAC = {"low": 0.30, "mid": 0.40, "high": 0.30}
+DRY_RUN_CLASSES = ("none", "rigid", "affine", "elastic", "affine_elastic")
 
-# Per-range transform parameter bounds (TorchIO: degrees, translation mm, scales, elastic mm)
-RANGE_RIGID = {
-    "low": {"degrees": 3.0, "translation_mm": 2.0},
-    "mid": {"degrees": 6.0, "translation_mm": 4.0},
-    "high": {"degrees": 10.0, "translation_mm": 6.0},
-}
-RANGE_AFFINE = {
-    "low": {"scales": (0.98, 1.02), "degrees": 5.0, "translation_mm": 3.0},
-    "mid": {"scales": (0.97, 1.03), "degrees": 8.0, "translation_mm": 4.0},
-    "high": {"scales": (0.95, 1.05), "degrees": 12.0, "translation_mm": 7.0},
-}
-RANGE_ELASTIC = {
-    "low": {"max_disp_mm": 3.0},
-    "mid": {"max_disp_mm": 6.0},
-    "high": {"max_disp_mm": 9.0},
-}
+# Single TorchIO sampling envelope per class (no low/mid/high tiers).
+# Rigid / affine / affine_elastic: between previous mid and high.
+# Pure elastic: above previous high (9 mm) for clearer deformation.
+PARAM_RIGID = {"degrees": 8.0, "translation_mm": 5.0}
+PARAM_AFFINE = {"scales": (0.96, 1.04), "degrees": 10.0, "translation_mm": 5.5}
+PARAM_ELASTIC = {"max_disp_mm": 12.0}
+# Milder elastic when composed with affine so the combo stays mid–high overall.
+PARAM_ELASTIC_IN_AFFINE = {"max_disp_mm": 8.0}
 
 ELASTIC_NUM_CONTROL_POINTS = 7
 
@@ -119,8 +110,6 @@ MAX_U_GLOBAL_VOX = 60.0
 MIN_MOVING_MEAN_RATIO = 0.05
 MAX_TRANSFORM_ATTEMPTS = 20
 MAX_U_NONE_VOX = 0.5
-# Smooth valid-boundary vectors to reduce sharp seams in u_true vs u_pred comparisons.
-U_BOUNDARY_SMOOTH_BAND = 2
 
 # Per-class minimum interior ‖u‖ (voxels); none uses MAX_U_NONE_VOX instead
 MIN_U_MAX_INTERIOR_BY_CLASS: dict[str, float | None] = {
@@ -151,7 +140,6 @@ class Task:
     subject_id: str
     split: str
     deformation_class: str
-    magnitude_range: str
     t1_path: str
     mask_path: str
     out_path: str
@@ -165,7 +153,6 @@ class SampleStats:
     subject_id: str
     split: str
     deformation_class: str
-    magnitude_range: str
     qc_passed: bool
     u_max_interior: float
     u_mean_interior: float
@@ -254,32 +241,12 @@ def passes_checks(
     return True
 
 
-def iter_class_range_combinations() -> list[tuple[str, str]]:
-    """All (deformation_class, magnitude_range) pairs for range-grid dry runs."""
-    combos: list[tuple[str, str]] = [("none", "none")]
-    for cls in ("rigid", "affine", "elastic", "affine_elastic"):
-        for mag_range in MAGNITUDE_RANGES:
-            combos.append((cls, mag_range))
-    return combos
-
-
-def range_grid_filename(subject_id: str, deformation_class: str, mag_range: str, replicate: int) -> str:
-    """e.g. 100206_rigid_low.npz or 100206_rigid_low_02.npz when replicate > 0."""
-    base = f"{subject_id}_{deformation_class}_{mag_range}"
+def dry_run_filename(subject_id: str, deformation_class: str, replicate: int) -> str:
+    """e.g. 100206_rigid.npz or 100206_rigid_02.npz when replicate > 0."""
+    base = f"{subject_id}_{deformation_class}"
     if replicate > 0:
         return f"{base}_{replicate:02d}.npz"
     return f"{base}.npz"
-
-
-def assign_magnitude_range(subject_id: str, deformation_class: str, seed: int) -> str:
-    if deformation_class == "none":
-        return "none"
-    h = stable_subject_hash(f"{subject_id}:{deformation_class}", seed) % 10000 / 10000.0
-    if h < MAGNITUDE_RANGE_FRAC["low"]:
-        return "low"
-    if h < MAGNITUDE_RANGE_FRAC["low"] + MAGNITUDE_RANGE_FRAC["mid"]:
-        return "mid"
-    return "high"
 
 
 def _affine_transform(
@@ -308,11 +275,11 @@ def _elastic_transform(*, max_disp_mm: float) -> tio.RandomElasticDeformation:
     )
 
 
-def build_transform(deformation_class: str, mag_range: str = "mid") -> tio.Transform:
+def build_transform(deformation_class: str) -> tio.Transform:
     if deformation_class == "none":
         return tio.Compose([])
     if deformation_class == "rigid":
-        p = RANGE_RIGID[mag_range]
+        p = PARAM_RIGID
         return tio.Compose(
             [
                 tio.RandomAffine(
@@ -325,15 +292,13 @@ def build_transform(deformation_class: str, mag_range: str = "mid") -> tio.Trans
             ]
         )
     if deformation_class == "affine":
-        p = RANGE_AFFINE[mag_range]
-        return tio.Compose([_affine_transform(**p)])
+        return tio.Compose([_affine_transform(**PARAM_AFFINE)])
     if deformation_class == "elastic":
-        p = RANGE_ELASTIC[mag_range]
-        return tio.Compose([_elastic_transform(**p)])
+        return tio.Compose([_elastic_transform(**PARAM_ELASTIC)])
     if deformation_class == "affine_elastic":
-        ap = RANGE_AFFINE[mag_range]
-        ep = RANGE_ELASTIC[mag_range]
-        return tio.Compose([_affine_transform(**ap), _elastic_transform(**ep)])
+        return tio.Compose(
+            [_affine_transform(**PARAM_AFFINE), _elastic_transform(**PARAM_ELASTIC_IN_AFFINE)]
+        )
     raise ValueError(f"Unknown deformation_class: {deformation_class}")
 
 
@@ -416,58 +381,6 @@ def _build_identity_grid(shape_xyz: tuple[int, int, int]) -> torch.Tensor:
     return torch.stack([cx, cy, cz], dim=0).float()
 
 
-def _build_binary_grid_mask(shape_xyz: tuple[int, int, int], stride: int = 12) -> np.ndarray:
-    """Grid-line volume (1 on lines, 0 elsewhere) in voxel index space."""
-    x, y, z = shape_xyz
-    gx = (np.arange(x) % stride) == 0
-    gy = (np.arange(y) % stride) == 0
-    gz = (np.arange(z) % stride) == 0
-    line = (
-        gx[:, None, None]
-        | gy[None, :, None]
-        | gz[None, None, :]
-    )
-    return line.astype(np.float32)
-
-
-def smooth_u_near_boundary(
-    u: np.ndarray, valid_mask: np.ndarray, *, band_vox: int = U_BOUNDARY_SMOOTH_BAND
-) -> np.ndarray:
-    """
-    Smooth displacement magnitude in a narrow valid-band near OOB boundary.
-
-    Steps:
-    - keep invalid vectors exactly 0
-    - keep far-interior vectors unchanged
-    - only in boundary band, smooth |u| then rescale vectors to match smoothed magnitude
-    """
-    if band_vox <= 0:
-        return u
-    try:
-        from scipy.ndimage import distance_transform_edt, gaussian_filter
-    except Exception:
-        return u
-
-    valid = valid_mask.astype(bool)
-    if not np.any(valid):
-        return u
-    dist_to_invalid = distance_transform_edt(valid)
-    boundary_band = valid & (dist_to_invalid <= float(band_vox))
-    if not np.any(boundary_band):
-        return u
-
-    out = u.copy()
-    mag = displacement_magnitude(out.astype(np.float64))
-    mag_smooth = gaussian_filter(mag, sigma=1.0, mode="nearest")
-    scale = np.ones_like(mag, dtype=np.float32)
-    denom = np.maximum(mag, 1e-6)
-    scale[boundary_band] = (mag_smooth[boundary_band] / denom[boundary_band]).astype(np.float32)
-
-    out = out * scale[None, ...]
-    out[:, ~valid] = 0.0
-    return out.astype(np.float32)
-
-
 def process_one_subject(
     task: Task,
     *,
@@ -483,17 +396,14 @@ def process_one_subject(
     mask = _load_nifti(task.mask_path)
     shape_xyz = (int(source.shape[0]), int(source.shape[1]), int(source.shape[2]))
     identity_grid = _build_identity_grid(shape_xyz)
-    transform = build_transform(task.deformation_class, task.magnitude_range)
+    transform = build_transform(task.deformation_class)
 
     moving: np.ndarray | None = None
     moving_mask_bin: np.ndarray | None = None
-    moving_grid_bin: np.ndarray | None = None
     u: np.ndarray | None = None
     qc_passed = task.skip_qc
     n_attempts = 1 if task.skip_qc else MAX_TRANSFORM_ATTEMPTS
     source_mask_bin = mask > 0.5
-    # Must match visualize_synth_data's default grid stride for consistent overlays.
-    binary_grid = _build_binary_grid_mask(shape_xyz, stride=20)
 
     identity_grid_mask_bin: np.ndarray | None = None
 
@@ -502,35 +412,25 @@ def process_one_subject(
         img_tensor = torch.from_numpy(source).unsqueeze(0).float()
         mask_tensor = torch.from_numpy(source_mask_bin.astype(np.float32)).unsqueeze(0)
         ones_tensor = torch.ones_like(img_tensor, dtype=torch.float32)
-        gridline_tensor = torch.from_numpy(binary_grid).unsqueeze(0).float()
         affine = source_affine.astype(np.float64)
         subject = tio.Subject(
             mri=tio.ScalarImage(tensor=img_tensor, affine=affine),
             grid=tio.ScalarImage(tensor=identity_grid.clone(), affine=affine),
             brain_mask=tio.LabelMap(tensor=mask_tensor, affine=affine),
             valid_mask=tio.LabelMap(tensor=ones_tensor, affine=affine),
-            grid_lines=tio.LabelMap(tensor=gridline_tensor, affine=affine),
         )
         transformed = transform(subject)
         cand_moving = transformed.mri.data.squeeze(0).numpy()
         cand_moving_mask = transformed.brain_mask.data.squeeze(0).numpy() > 0.5
         cand_valid_mask = transformed.valid_mask.data.squeeze(0).numpy()
-        cand_moving_grid = transformed.grid_lines.data.squeeze(0).numpy() > 0.5
         cand_u = (
             transformed.grid.data.squeeze(0).numpy() - identity_grid.numpy()
         ).astype(np.float32)
         identity_grid_mask_bin = cand_valid_mask > 0.99
         invalid = ~identity_grid_mask_bin
         cand_u[:, invalid] = 0.0
-        cand_u = smooth_u_near_boundary(cand_u, identity_grid_mask_bin, band_vox=U_BOUNDARY_SMOOTH_BAND)
-        cand_moving_grid[invalid] = False
 
-        moving, moving_mask_bin, moving_grid_bin, u = (
-            cand_moving,
-            cand_moving_mask,
-            cand_moving_grid,
-            cand_u,
-        )
+        moving, moving_mask_bin, u = cand_moving, cand_moving_mask, cand_u
 
         if task.skip_qc or passes_checks(
             cand_u,
@@ -549,7 +449,6 @@ def process_one_subject(
     assert (
         moving is not None
         and moving_mask_bin is not None
-        and moving_grid_bin is not None
         and identity_grid_mask_bin is not None
         and u is not None
     )
@@ -567,12 +466,9 @@ def process_one_subject(
         u=u.astype(np.float32),
         source_mask=source_mask_bin.astype(bool),
         moving_mask=moving_mask_bin.astype(bool),
-        moving_grid=moving_grid_bin.astype(bool),
-        source_grid=binary_grid.astype(bool),
         identity_grid_mask=identity_grid_mask_bin.astype(bool),
         source_affine=source_affine.astype(np.float32),
         deformation_class=np.array(task.deformation_class),
-        magnitude_range=np.array(task.magnitude_range),
         u_max_interior=np.float32(u_max_int),
         u_mean_interior=np.float32(u_mean_int),
         subject_id=np.array(task.subject_id),
@@ -584,7 +480,6 @@ def process_one_subject(
         subject_id=task.subject_id,
         split=task.split,
         deformation_class=task.deformation_class,
-        magnitude_range=task.magnitude_range,
         qc_passed=qc_passed,
         u_max_interior=u_max_int,
         u_mean_interior=u_mean_int,
@@ -594,12 +489,11 @@ def process_one_subject(
 
 def _qc_fail_warning(stats: SampleStats) -> str:
     cls = stats.deformation_class
-    mag_range = stats.magnitude_range
     min_max = MIN_U_MAX_INTERIOR_BY_CLASS.get(cls)
     min_mean = MIN_U_MEAN_INTERIOR_BY_CLASS.get(cls)
     return (
         f"QC_FAIL (saved to qc_fail): {stats.rel_path} | "
-        f"class={cls} range={mag_range} | "
+        f"class={cls} | "
         f"u_max_int={stats.u_max_interior:.2f} u_mean_int={stats.u_mean_interior:.2f} | "
         f"(floors: max≥{min_max}, mean≥{min_mean}; caps: interior≤{MAX_U_INTERIOR_VOX}, "
         f"global≤{MAX_U_GLOBAL_VOX})"
@@ -617,32 +511,22 @@ def _worker_create_sample(task: Task) -> SampleStats:
     )
 
 
-def build_deformation_stats(samples: list[SampleStats]) -> dict[str, dict[str, dict[str, float | int]]]:
-    """Per-class/range counts and u_max_interior p50 summaries."""
-    buckets: dict[str, dict[str, list[float]]] = {}
+def build_deformation_stats(samples: list[SampleStats]) -> dict[str, dict[str, float | int]]:
+    """Per-class counts and u_max_interior / u_mean_interior p50 summaries."""
+    buckets: dict[str, list[SampleStats]] = {}
     for s in samples:
         if not s.qc_passed:
             continue
-        buckets.setdefault(s.deformation_class, {}).setdefault(s.magnitude_range, []).append(
-            s.u_max_interior
-        )
-    out: dict[str, dict[str, dict[str, float | int]]] = {}
-    for cls, ranges in sorted(buckets.items()):
-        out[cls] = {}
-        for mag_range, vals in sorted(ranges.items()):
-            arr = np.asarray(vals, dtype=np.float64)
-            out[cls][mag_range] = {
-                "count": int(arr.size),
-                "u_max_p50": float(np.percentile(arr, 50)) if arr.size else 0.0,
-                "u_mean_p50": float(
-                    np.percentile(
-                        [s.u_mean_interior for s in samples if s.qc_passed and s.deformation_class == cls and s.magnitude_range == mag_range],
-                        50,
-                    )
-                )
-                if arr.size
-                else 0.0,
-            }
+        buckets.setdefault(s.deformation_class, []).append(s)
+    out: dict[str, dict[str, float | int]] = {}
+    for cls, items in sorted(buckets.items()):
+        max_vals = np.asarray([s.u_max_interior for s in items], dtype=np.float64)
+        mean_vals = np.asarray([s.u_mean_interior for s in items], dtype=np.float64)
+        out[cls] = {
+            "count": int(len(items)),
+            "u_max_p50": float(np.percentile(max_vals, 50)) if max_vals.size else 0.0,
+            "u_mean_p50": float(np.percentile(mean_vals, 50)) if mean_vals.size else 0.0,
+        }
     return out
 
 
@@ -687,7 +571,7 @@ def assign_deformation_classes(subject_ids: list[str], seed: int) -> dict[str, s
     return {sid: cls for sid, cls in zip(order, cls_list)}
 
 
-def build_range_grid_tasks(
+def build_dry_run_tasks(
     subjects: list[SubjectEntry],
     out_root: Path,
     *,
@@ -695,23 +579,22 @@ def build_range_grid_tasks(
     base_seed: int,
     skip_qc: bool,
 ) -> list[Task]:
-    """One task per (class, range) × replicate; filenames include class and range labels."""
-    combos = iter_class_range_combinations()
+    """Dry run: N samples per deformation class (5 classes × N), flat output folder."""
     out_dir = out_root
     out_dir.mkdir(parents=True, exist_ok=True)
     fail_dir = out_root / "_unused_qc_fail"
     tasks: list[Task] = []
     task_idx = 0
-    for cls, mag_range in combos:
-        # Keep source subject fixed within a (class, range) group so replicate rows are comparable.
-        subj_idx = stable_subject_hash(f"{cls}:{mag_range}", base_seed) % len(subjects)
+    for cls in DRY_RUN_CLASSES:
+        # Keep source subject fixed within a class so replicates are comparable.
+        subj_idx = stable_subject_hash(f"dryrun:{cls}", base_seed) % len(subjects)
         subj = subjects[subj_idx]
         for rep in range(replicates):
             rep_suffix = rep + 1 if replicates > 1 else 0
-            out_name = range_grid_filename(subj.subject_id, cls, mag_range, rep_suffix)
+            out_name = dry_run_filename(subj.subject_id, cls, rep_suffix)
             seed = (
                 base_seed
-                + stable_subject_hash(f"{cls}:{mag_range}:{rep}:{subj.subject_id}", base_seed)
+                + stable_subject_hash(f"{cls}:{rep}:{subj.subject_id}", base_seed)
                 + task_idx * 100003
             ) % (2**31)
             tasks.append(
@@ -719,7 +602,6 @@ def build_range_grid_tasks(
                     subject_id=subj.subject_id,
                     split="",
                     deformation_class=cls,
-                    magnitude_range=mag_range,
                     t1_path=subj.t1_path,
                     mask_path=subj.mask_path,
                     out_path=str(out_dir / out_name),
@@ -730,6 +612,87 @@ def build_range_grid_tasks(
             )
             task_idx += 1
     return tasks
+
+
+def compute_class_u_stats_table(
+    out_root: Path,
+    samples: list[SampleStats],
+) -> list[dict[str, float | int | str]]:
+    """
+    Per-class ‖u‖ summary over valid interior voxels pooled across dry-run samples.
+
+    Returns rows with min / Q1 / mean / Q3 / max, plus sample count.
+    """
+    by_class: dict[str, list[Path]] = {cls: [] for cls in DRY_RUN_CLASSES}
+    for s in samples:
+        fp = out_root / Path(s.rel_path).name if not s.split else out_root / s.rel_path
+        if not fp.is_file():
+            fp = out_root / Path(s.rel_path).name
+        if fp.is_file() and s.deformation_class in by_class:
+            by_class[s.deformation_class].append(fp)
+
+    rows: list[dict[str, float | int | str]] = []
+    for cls in DRY_RUN_CLASSES:
+        mags: list[np.ndarray] = []
+        for fp in by_class[cls]:
+            with np.load(fp) as z:
+                u = np.asarray(z["u"], dtype=np.float64)
+                mask = np.asarray(z["identity_grid_mask"], dtype=bool)
+                if "source_mask" in z.files:
+                    mask = mask & np.asarray(z["source_mask"], dtype=bool)
+                mag = displacement_magnitude(u)
+                shape = mag.shape
+                interior = interior_valid_mask(shape, INTERIOR_MARGIN)
+                valid = interior & mask
+                if np.any(valid):
+                    mags.append(mag[valid].ravel())
+        if not mags:
+            rows.append(
+                {
+                    "deformation_class": cls,
+                    "n_samples": 0,
+                    "n_voxels": 0,
+                    "min": float("nan"),
+                    "q1": float("nan"),
+                    "mean": float("nan"),
+                    "q3": float("nan"),
+                    "max": float("nan"),
+                }
+            )
+            continue
+        vals = np.concatenate(mags)
+        rows.append(
+            {
+                "deformation_class": cls,
+                "n_samples": len(by_class[cls]),
+                "n_voxels": int(vals.size),
+                "min": float(np.min(vals)),
+                "q1": float(np.percentile(vals, 25)),
+                "mean": float(np.mean(vals)),
+                "q3": float(np.percentile(vals, 75)),
+                "max": float(np.max(vals)),
+            }
+        )
+    return rows
+
+
+def print_and_save_class_u_stats(out_root: Path, samples: list[SampleStats]) -> Path:
+    rows = compute_class_u_stats_table(out_root, samples)
+    print("\nPer-class ‖u‖ stats (interior ∩ valid mask, voxels):")
+    print(
+        f"{'class':<16} {'n':>3} {'min':>8} {'Q1':>8} {'mean':>8} {'Q3':>8} {'max':>8}"
+    )
+    for r in rows:
+        print(
+            f"{r['deformation_class']:<16} {r['n_samples']:>3} "
+            f"{r['min']:8.3f} {r['q1']:8.3f} {r['mean']:8.3f} "
+            f"{r['q3']:8.3f} {r['max']:8.3f}"
+        )
+    json_path = out_root / "dryrun_class_u_stats.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2)
+    print(f"Wrote {json_path}")
+    return json_path
 
 
 def collect_hcp_subjects(input_root: Path) -> list[SubjectEntry]:
@@ -754,8 +717,8 @@ def create_synthetic_data(
     base_seed: int = 42,
     max_subjects: int | None = None,
     skip_qc: bool = False,
-    range_grid: bool = False,
-    range_grid_replicates: int = 3,
+    dry_run: bool = False,
+    dry_run_replicates: int = 5,
 ) -> None:
     in_root = Path(input_root)
     out_root = Path(output_root)
@@ -774,49 +737,49 @@ def create_synthetic_data(
     if max_subjects is not None and max_subjects > 0:
         subjects = subjects[:max_subjects]
 
-    if range_grid:
-        combos = iter_class_range_combinations()
-        n_tasks = len(combos) * range_grid_replicates
+    if dry_run:
+        n_tasks = len(DRY_RUN_CLASSES) * dry_run_replicates
         print(
-            f"Range-grid dry run: {len(combos)} (class, range) combinations × "
-            f"{range_grid_replicates} replicates = {n_tasks} samples"
+            f"Dry run: {len(DRY_RUN_CLASSES)} classes × "
+            f"{dry_run_replicates} samples = {n_tasks} NPZs"
         )
-        print(f"Combinations: {', '.join(f'{c}_{r}' for c, r in combos)}")
+        print(f"Classes: {', '.join(DRY_RUN_CLASSES)}")
+        print(
+            f"Params: rigid={PARAM_RIGID}, affine={PARAM_AFFINE}, "
+            f"elastic={PARAM_ELASTIC}, affine_elastic_elastic={PARAM_ELASTIC_IN_AFFINE}"
+        )
         if skip_qc:
             print("QC disabled (--no-qc): single random draw per task, all saved to output-path")
-        tasks = build_range_grid_tasks(
+        tasks = build_dry_run_tasks(
             subjects,
             out_root,
-            replicates=range_grid_replicates,
+            replicates=dry_run_replicates,
             base_seed=base_seed,
             skip_qc=skip_qc,
         )
         split_summary: dict[str, dict[str, int]] = {}
-        range_summary: dict[str, dict[str, int]] = {}
         split_subjects = {"": subjects}
     else:
-        split_subjects: dict[str, list[SubjectEntry]] = {"Train": [], "Val": [], "Test": []}
+        split_subjects = {"Train": [], "Val": [], "Test": []}
         for s in subjects:
             split_subjects[assign_split(s.subject_id, base_seed)].append(s)
 
         tasks = []
         split_summary = {}
-        range_summary = {}
         for split, entries in split_subjects.items():
             entries = sorted(entries, key=lambda e: e.subject_id)
             sid_to_class = assign_deformation_classes(
-                [e.subject_id for e in entries], seed=base_seed + stable_subject_hash(split, base_seed)
+                [e.subject_id for e in entries],
+                seed=base_seed + stable_subject_hash(split, base_seed),
             )
             out_dir = out_root / split
             fail_dir = fail_root / split
             out_dir.mkdir(parents=True, exist_ok=True)
             fail_dir.mkdir(parents=True, exist_ok=True)
             c = Counter()
-            tc = Counter()
             for idx, e in enumerate(entries):
                 cls = sid_to_class[e.subject_id]
-                mag_range = assign_magnitude_range(e.subject_id, cls, base_seed)
-                suf = DEFORMATION_SUFFIX[cls]
+                suf = DEFORM_SUFFIX[cls]
                 out_name = f"{e.subject_id}_{suf}.npz"
                 out_path = out_dir / out_name
                 fail_path = fail_dir / out_name
@@ -828,7 +791,6 @@ def create_synthetic_data(
                         subject_id=e.subject_id,
                         split=split,
                         deformation_class=cls,
-                        magnitude_range=mag_range,
                         t1_path=e.t1_path,
                         mask_path=e.mask_path,
                         out_path=str(out_path),
@@ -838,9 +800,7 @@ def create_synthetic_data(
                     )
                 )
                 c[cls] += 1
-                tc[f"{cls}:{mag_range}"] += 1
             split_summary[split] = dict(c)
-            range_summary[split] = dict(tc)
 
     print(
         f"Parallel workers: {n_workers} (default = all logical CPUs; each worker uses 1 OpenMP thread)"
@@ -877,35 +837,39 @@ def create_synthetic_data(
         "qc_fail_root": str(fail_root) if not skip_qc else None,
         "seed": base_seed,
         "skip_qc": skip_qc,
-        "range_grid": range_grid,
-        "range_grid_replicates": range_grid_replicates if range_grid else None,
-        "range_grid_combinations": (
-            [f"{c}_{r}" for c, r in iter_class_range_combinations()] if range_grid else None
-        ),
+        "dry_run": dry_run,
+        "dry_run_replicates": dry_run_replicates if dry_run else None,
+        "dry_run_classes": list(DRY_RUN_CLASSES) if dry_run else None,
+        "transform_params": {
+            "rigid": PARAM_RIGID,
+            "affine": PARAM_AFFINE,
+            "elastic": PARAM_ELASTIC,
+            "affine_elastic": {"affine": PARAM_AFFINE, "elastic": PARAM_ELASTIC_IN_AFFINE},
+        },
         "n_subjects": len(subjects),
         "n_tasks": len(tasks),
         "qc_passed_count": passed,
         "qc_failed_count": failed,
         "split_counts": {k: len(v) for k, v in split_subjects.items()},
-        "deformation_ratios_target": DEFORMATION_RATIOS if not range_grid else None,
+        "deformation_ratios_target": DEFORM_RATIOS if not dry_run else None,
         "deformation_counts_actual": split_summary,
-        "magnitude_range_counts": range_summary,
         "deformation_stats": build_deformation_stats(all_stats),
         "field_names": [
             "source",
             "moving",
             "u",
-            "mask",
             "source_mask",
             "moving_mask",
-            "moving_grid",
-            "magnitude_range",
+            "identity_grid_mask",
             "u_max_interior",
             "u_mean_interior",
         ],
     }
     with open(out_root / "split_manifest.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
+
+    if dry_run:
+        print_and_save_class_u_stats(out_root, all_stats)
 
     manifest = os.path.join(qc_fail_root, "qc_flagged_paths.txt")
     if flagged_rel_paths and not skip_qc:
@@ -971,15 +935,15 @@ def parse_args() -> argparse.Namespace:
         help="Disable QC checks and retries; save first transform draw to output-path.",
     )
     p.add_argument(
-        "--range-grid",
+        "--dry-run",
         nargs="?",
-        const=3,
+        const=5,
         default=None,
         type=int,
         metavar="N",
         help=(
-            "Dry run: all 13 (class, range) combos into output-path/ (flat, no split folders). "
-            "Optional N = replicates per combo (default 3 when flag is given alone → 39 samples)."
+            "Dry run: 5 deformation classes × N samples into output-path/ (flat). "
+            "Default N=5 when flag is given alone → 25 samples."
         ),
     )
     return p.parse_args()
@@ -987,8 +951,8 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    range_grid = args.range_grid is not None
-    range_grid_replicates = args.range_grid if range_grid else 3
+    dry_run = args.dry_run is not None
+    dry_run_replicates = args.dry_run if dry_run else 5
     create_synthetic_data(
         args.input_path,
         args.output_path,
@@ -997,7 +961,7 @@ if __name__ == "__main__":
         base_seed=args.seed,
         max_subjects=args.max_subjects,
         skip_qc=args.no_qc,
-        range_grid=range_grid,
-        range_grid_replicates=range_grid_replicates,
+        dry_run=dry_run,
+        dry_run_replicates=dry_run_replicates,
     )
     print("Finished! HCP synthetic data is ready.")

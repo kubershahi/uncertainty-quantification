@@ -2,18 +2,28 @@
 """
 Visualize HCP synthetic registration NPZ samples (``create_synth_data.py`` output).
 
-Columns: source (fixed) + grid, warped/moving + grid, ``‖u‖``, sparse quiver;
-optional checkerboard column (``--checkerboard``). Axial display is radiological
-(``rot90``, posterior up).
+Columns: source, moving, u vectors, ``‖u‖``; optional checkerboard (``--checkerboard``).
+Axial display is radiological (``rot90``, posterior up).
+
+Modes:
+  - Dry-run folder (flat ``*.npz``): ``--selection per_class``
+  - Full cohort (Train/Val/Test): ``--split Train`` with ``random`` or ``min_median_max``
+
+``--selection per_class``: one random sample per deformation class.
+``--run-view orthogonal|montage`` controls row layout (``--montage-z-step`` for montage).
 
 Examples:
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun --selection range_grid --save-dir assets/images/unigrad-synth/hcp/range_grid_report --no-show --range-grid-view orthogonal --u-contours --checkerboard
+# Dry-run QC figures
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun2 --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun_report2 --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun2 --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun_montage2 --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
+# Full cohort preview
 python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth --split Train --selection min_median_max --u-metric mean --save-path assets/images/unigrad-synth/hcp/hcp_synth_minmedmax.png --no-show
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import sys
 from pathlib import Path
@@ -29,39 +39,21 @@ HCP_REQUIRED_KEYS = frozenset(
         "u",
         "source_mask",
         "moving_mask",
-        "source_grid",
-        "moving_grid",
         "identity_grid_mask",
         "deformation_class",
-        "magnitude_range",
         "subject_id",
         "qc_passed",
     }
 )
 
-DEFORMATION_ROW_ORDER: tuple[tuple[str, str], ...] = (
+DEFORM_CLASSES = ("none", "rigid", "affine", "elastic", "affine_elastic")
+
+DEFORM_ROW_ORDER: tuple[tuple[str, str], ...] = (
     ("rigid", "rig"),
     ("affine", "aff"),
     ("elastic", "ela"),
 )
 
-RANGE_GRID_COMBINATIONS: tuple[tuple[str, str], ...] = (
-    ("none", "none"),
-    ("rigid", "low"),
-    ("rigid", "mid"),
-    ("rigid", "high"),
-    ("affine", "low"),
-    ("affine", "mid"),
-    ("affine", "high"),
-    ("elastic", "low"),
-    ("elastic", "mid"),
-    ("elastic", "high"),
-    ("affine_elastic", "low"),
-    ("affine_elastic", "mid"),
-    ("affine_elastic", "high"),
-)
-
-_GRID_COLOR = "cyan"
 _CHECKER_TILE = 16
 _DPI = 150
 _FONT = "DejaVu Sans"
@@ -69,6 +61,8 @@ _TITLE = 12
 _SUBTITLE = 10
 _LABEL = 9
 _QUIVER_COLOR = "lime"
+INTERIOR_MARGIN = 10
+_U_COLOR_PERCENTILE = 99.0  # per-row ‖u‖ color scale cap
 
 
 def displacement_magnitude(u: np.ndarray) -> np.ndarray:
@@ -96,7 +90,7 @@ def _unpack_qc_passed(raw) -> tuple[bool | None, str | None]:
 
 
 def resolve_npz_dir(input_dir: Path, split: str | None) -> Path:
-    """Use split subfolder when present; otherwise flat layout (e.g. range-grid dry run)."""
+    """Use split subfolder when present; otherwise flat layout (e.g. dry-run output)."""
     if split:
         split_dir = input_dir / split
         if split_dir.is_dir():
@@ -168,65 +162,14 @@ def plane_u_inplane_slice(u: np.ndarray, plane: str, index: int) -> np.ndarray:
     raise ValueError(f"Unknown plane: {plane}")
 
 
-def overlay_regular_grid(
-    ax: plt.Axes,
-    height: int,
-    width: int,
-    *,
-    stride: int = 12,
-    color: str = _GRID_COLOR,
-    linewidth: float = 0.55,
-    alpha: float = 0.9,
-) -> None:
-    rows = np.arange(height, dtype=np.float64)
-    cols = np.arange(width, dtype=np.float64)
-    grid_row, grid_col = np.meshgrid(rows, cols, indexing="ij")
-    levels_col = np.arange(0, width + stride, stride)
-    levels_row = np.arange(0, height + stride, stride)
-    ax.contour(grid_col, levels=levels_col, colors=color, linewidths=linewidth, alpha=alpha)
-    ax.contour(grid_row, levels=levels_row, colors=color, linewidths=linewidth, alpha=alpha)
-
-
-def overlay_deformation_grid(
-    ax: plt.Axes,
-    u_inplane: np.ndarray,
-    *,
-    stride: int = 12,
-    color: str = _GRID_COLOR,
-    linewidth: float = 0.55,
-    alpha: float = 0.85,
-) -> None:
-    if u_inplane.ndim != 3 or u_inplane.shape[0] != 2:
-        raise ValueError(f"Expected u_inplane (2, H, W), got {u_inplane.shape}")
-    _, h, w = u_inplane.shape
-    rows = np.arange(h, dtype=np.float64)
-    cols = np.arange(w, dtype=np.float64)
-    grid_row, grid_col = np.meshgrid(rows, cols, indexing="ij")
-    pos_col = grid_col + u_inplane[0]
-    pos_row = grid_row + u_inplane[1]
-    levels_col = np.arange(0, w + stride, stride)
-    levels_row = np.arange(0, h + stride, stride)
-    ax.contour(pos_col, levels=levels_col, colors=color, linewidths=linewidth, alpha=alpha)
-    ax.contour(pos_row, levels=levels_row, colors=color, linewidths=linewidth, alpha=alpha)
-
-
-def overlay_binary_grid(
-    ax: plt.Axes,
-    grid_mask_2d: np.ndarray,
-    *,
-    color: str = _GRID_COLOR,
-    alpha: float = 0.75,
-) -> None:
-    mask = grid_mask_2d > 0.5
-    if not np.any(mask):
-        return
-    rgba = np.zeros((*mask.shape, 4), dtype=np.float32)
-    rgba[..., :3] = np.array(plt.matplotlib.colors.to_rgb(color), dtype=np.float32)
-    rgba[..., 3] = mask.astype(np.float32) * alpha
-    ax.imshow(rgba, origin="upper", interpolation="nearest")
-
-
 def checkerboard_mix(a: np.ndarray, b: np.ndarray, tile: int = _CHECKER_TILE) -> np.ndarray:
+    """
+    Interleave tiles from ``a`` and ``b`` like a chessboard.
+
+    Odd tiles show source intensity; even tiles show moving. Where anatomy lines
+    up across tile edges, deformation/mismatch is small; jagged edges highlight
+    local differences.
+    """
     h, w = a.shape
     yy, xx = np.indices((h, w))
     use_a = ((yy // tile) + (xx // tile)) % 2 == 0
@@ -247,13 +190,16 @@ def load_sample(npz_path: Path) -> dict:
             "u": np.asarray(data["u"]),
             "source_mask": np.asarray(data["source_mask"]),
             "moving_mask": np.asarray(data["moving_mask"]),
-            "source_grid": np.asarray(data["source_grid"]),
-            "moving_grid": np.asarray(data["moving_grid"]),
             "identity_grid_mask": np.asarray(data["identity_grid_mask"]),
             "qc_passed": qc_val,
             "deformation_class": _unpack_scalar_str(data["deformation_class"]),
-            "magnitude_range": _unpack_scalar_str(data["magnitude_range"]),
             "subject_id": _unpack_scalar_str(data["subject_id"]),
+            "u_max_interior": float(np.asarray(data["u_max_interior"]).reshape(-1)[0])
+            if "u_max_interior" in data.files
+            else float("nan"),
+            "u_mean_interior": float(np.asarray(data["u_mean_interior"]).reshape(-1)[0])
+            if "u_mean_interior" in data.files
+            else float("nan"),
         }
 
 
@@ -262,6 +208,34 @@ def prefer_qc_passed_files(files: list[Path]) -> tuple[list[Path], bool]:
     if passed:
         return passed, False
     return files, True
+
+
+def interior_valid_mask(shape_xyz: tuple[int, int, int], margin: int) -> np.ndarray:
+    x, y, z = shape_xyz
+    mask = np.zeros((x, y, z), dtype=bool)
+    if x > 2 * margin and y > 2 * margin and z > 2 * margin:
+        mask[margin : x - margin, margin : y - margin, margin : z - margin] = True
+    else:
+        mask[:] = True
+    return mask
+
+
+def sample_u_stats(sample: dict) -> dict[str, float]:
+    """‖u‖ min/Q1/mean/Q3/max over interior ∩ valid voxels for one sample."""
+    u = sample["u"].astype(np.float64)
+    mask = sample["identity_grid_mask"].astype(bool) & sample["source_mask"].astype(bool)
+    mag = displacement_magnitude(u)
+    valid = interior_valid_mask(mag.shape, INTERIOR_MARGIN) & mask
+    if not np.any(valid):
+        return {"min": float("nan"), "q1": float("nan"), "mean": float("nan"), "q3": float("nan"), "max": float("nan")}
+    vals = mag[valid]
+    return {
+        "min": float(np.min(vals)),
+        "q1": float(np.percentile(vals, 25)),
+        "mean": float(np.mean(vals)),
+        "q3": float(np.percentile(vals, 75)),
+        "max": float(np.max(vals)),
+    }
 
 
 def scalar_u_score(u: np.ndarray, mask: np.ndarray | None, metric: str) -> float:
@@ -316,18 +290,18 @@ def select_deformation_class_examples(
             "Warning: no qc_passed=True samples in split; using all files for row selection.",
             file=sys.stderr,
         )
-    pools: dict[str, list[Path]] = {cls: [] for cls, _ in DEFORMATION_ROW_ORDER}
+    pools: dict[str, list[Path]] = {cls: [] for cls, _ in DEFORM_ROW_ORDER}
     for fp in pool_files:
         cls = load_sample(fp).get("deformation_class")
         if cls in pools:
             pools[str(cls)].append(fp)
-    for cls, suf in DEFORMATION_ROW_ORDER:
+    for cls, suf in DEFORM_ROW_ORDER:
         if not pools[cls]:
             pools[cls] = [fp for fp in pool_files if fp.stem.endswith(f"_{suf}")]
 
     rng = random.Random(seed)
     picked: list[tuple[Path, str, float]] = []
-    for cls, suf in DEFORMATION_ROW_ORDER:
+    for cls, suf in DEFORM_ROW_ORDER:
         pool = pools[cls]
         if not pool:
             raise FileNotFoundError(
@@ -337,46 +311,33 @@ def select_deformation_class_examples(
     return picked
 
 
-def _pool_range_grid_files(files: list[Path]) -> dict[tuple[str, str], list[Path]]:
-    by_key: dict[tuple[str, str], list[Path]] = {}
-    for fp in files:
-        meta = load_sample(fp)
-        cls = meta.get("deformation_class")
-        mag_range = meta.get("magnitude_range")
-        if cls and mag_range:
-            by_key.setdefault((str(cls), str(mag_range)), []).append(fp)
-    for cls, mag_range in RANGE_GRID_COMBINATIONS:
-        key = (cls, mag_range)
-        if key in by_key:
-            continue
-        needle = f"_{cls}_{mag_range}"
-        matches = [fp for fp in files if needle in fp.stem]
-        if matches:
-            by_key[key] = matches
-    return by_key
-
-
-def group_range_grid_examples(files: list[Path]) -> list[tuple[str, Path]]:
+def group_class_examples(files: list[Path], seed: int) -> list[tuple[str, Path]]:
+    """One random sample per deformation class."""
     pool_files, used_fallback = prefer_qc_passed_files(files)
     if used_fallback:
         print(
-            "Warning: no qc_passed=True samples in split; using all files for range_grid.",
+            "Warning: no qc_passed=True samples; using all files for per_class.",
             file=sys.stderr,
         )
-    pools = _pool_range_grid_files(pool_files)
+    pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
+    for fp in pool_files:
+        cls = load_sample(fp).get("deformation_class")
+        if cls in pools:
+            pools[str(cls)].append(fp)
+
+    rng = random.Random(seed)
     groups: list[tuple[str, Path]] = []
     missing: list[str] = []
-    for cls, mag_range in RANGE_GRID_COMBINATIONS:
-        label = f"{cls}_{mag_range}"
-        pool = sorted(pools.get((cls, mag_range), []), key=lambda p: p.name)
+    for cls in DEFORM_CLASSES:
+        pool = pools[cls]
         if not pool:
-            missing.append(label)
+            missing.append(cls)
             continue
-        groups.append((label, pool[0]))
+        groups.append((cls, rng.choice(pool)))
     if missing:
         raise FileNotFoundError(
-            f"range_grid missing combination(s): {', '.join(missing)}. "
-            f"Run: create_synth_data.py --range-grid"
+            f"per_class missing class(es): {', '.join(missing)}. "
+            f"Run: create_synth_data.py --dry-run 5"
         )
     return groups
 
@@ -394,8 +355,6 @@ def _row_label(subject_id: str, extra: dict) -> str:
     meta: list[str] = []
     if extra.get("deformation_class"):
         meta.append(str(extra["deformation_class"]))
-    if extra.get("magnitude_range"):
-        meta.append(str(extra["magnitude_range"]))
     if "qc_passed" in extra:
         meta.append(f"qc={extra['qc_passed']}")
     if meta:
@@ -410,32 +369,31 @@ def _render_figure(
     no_show: bool,
     title: str,
     subtitle: str,
-    slice_index: int | None,
-    grid_stride: int,
-    u_percentile: float,
-    per_row_u_scale: bool,
+    z_slice_index: int | None,
+    quiver_stride: int,
     row_planes: list[str] | None = None,
     row_slice_indices: list[int] | None = None,
     use_u_contours: bool = False,
     use_checkerboard: bool = False,
+    sample_stats_note: str | None = None,
     row_h: float = 3.2,
 ) -> None:
     nrows = len(picked)
     ncols = 5 if use_checkerboard else 4
-    col_titles = ["Source (fixed)", "Warped (moving)", r"$\|u\|$", "u vectors"]
+    # source, moving, u vectors, |u|, optional checkerboard
+    col_titles = ["Source (fixed)", "Warped (moving)", "u vectors", r"$\|u\|$"]
     if use_checkerboard:
         col_titles.append("checkerboard")
 
     plane_idx_notes: list[str] = []
     row_u_vmax: list[float] = []
-    global_u_mags: list[np.ndarray] = []
     for row, (fp, _, _) in enumerate(picked):
         sample = load_sample(fp)
         plane = row_planes[row] if row_planes is not None else "axial"
         if row_slice_indices is not None:
             idx = int(row_slice_indices[row])
         else:
-            idx = plane_slice(sample["source"], plane, slice_index)[1]
+            idx = plane_slice(sample["source"], plane, z_slice_index)[1]
         plane_idx_notes.append(f"{plane[0]}={idx}")
         if plane == "axial":
             u_sl = sample["u"][:, :, :, idx]
@@ -444,10 +402,7 @@ def _render_figure(
         else:
             u_sl = sample["u"][:, idx, :, :]
         mag = displacement_magnitude(u_sl.astype(np.float64)).ravel()
-        global_u_mags.append(mag)
-        row_u_vmax.append(max(float(np.percentile(mag, u_percentile)), 1e-6))
-    u_vmax_global = float(np.percentile(np.concatenate(global_u_mags), u_percentile))
-    u_vmax_global = max(u_vmax_global, 1e-6)
+        row_u_vmax.append(max(float(np.percentile(mag, _U_COLOR_PERCENTILE)), 1e-6))
 
     full_subtitle = f"{subtitle} · {', '.join(plane_idx_notes)}"
 
@@ -464,7 +419,7 @@ def _render_figure(
         u = sample["u"]
         extra = {
             k: sample[k]
-            for k in ("qc_passed", "deformation_class", "magnitude_range", "subject_id")
+            for k in ("qc_passed", "deformation_class", "subject_id")
             if k in sample
         }
 
@@ -472,42 +427,27 @@ def _render_figure(
         if row_slice_indices is not None:
             idx = int(row_slice_indices[row])
         else:
-            idx = plane_slice(source, plane, slice_index)[1]
+            idx = plane_slice(source, plane, z_slice_index)[1]
         src_sl, _ = plane_slice(source, plane, idx)
         mov_sl, _ = plane_slice(moving, plane, idx)
         if plane == "axial":
-            src_grid_raw = sample["source_grid"][:, :, idx]
-            mov_grid_raw = sample["moving_grid"][:, :, idx]
             u_mag_raw = displacement_magnitude(u[:, :, :, idx].astype(np.float64))
         elif plane == "coronal":
-            src_grid_raw = sample["source_grid"][:, idx, :]
-            mov_grid_raw = sample["moving_grid"][:, idx, :]
             u_mag_raw = displacement_magnitude(u[:, :, idx, :].astype(np.float64))
         else:
-            src_grid_raw = sample["source_grid"][idx, :, :]
-            mov_grid_raw = sample["moving_grid"][idx, :, :]
             u_mag_raw = displacement_magnitude(u[:, idx, :, :].astype(np.float64))
-        src_grid_sl = orient_axial(src_grid_raw)
-        mov_grid_sl = orient_axial(mov_grid_raw)
         u_inplane = orient_axial_u_inplane(plane_u_inplane_slice(u, plane, idx))
         u_mag_sl = orient_axial(u_mag_raw)
         src_disp = orient_axial(src_sl)
         mov_disp = orient_axial(mov_sl)
-        h, w = src_disp.shape
-        u_vmax = row_u_vmax[row] if per_row_u_scale else u_vmax_global
+        u_vmax = row_u_vmax[row]
 
         subject_id = extra.get("subject_id") or file_path.stem.split("_")[0]
         plane_tag = rank_label if rank_label else plane
         row_title = f"{subject_id} · {plane_tag}"
-        deformation_class = str(extra.get("deformation_class") or "")
-        use_2d_grid_overlay = deformation_class in {"rigid", "affine", "affine_elastic"}
 
         ax_src = axes[row, 0]
         ax_src.imshow(src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
-        if use_2d_grid_overlay:
-            overlay_regular_grid(ax_src, h, w, stride=grid_stride, color=_GRID_COLOR, alpha=0.75)
-        else:
-            overlay_binary_grid(ax_src, src_grid_sl, color=_GRID_COLOR)
         _style_axis(ax_src)
         ax_src.set_ylabel(
             _row_label(row_title, extra),
@@ -520,26 +460,11 @@ def _render_figure(
 
         ax_mov = axes[row, 1]
         ax_mov.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
-        if use_2d_grid_overlay:
-            overlay_deformation_grid(
-                ax_mov, u_inplane, stride=grid_stride, color=_GRID_COLOR, linewidth=0.6, alpha=0.72
-            )
-        else:
-            overlay_binary_grid(ax_mov, mov_grid_sl, color=_GRID_COLOR)
         _style_axis(ax_mov)
 
-        ax_u = axes[row, 2]
-        im_u_last = ax_u.imshow(
-            u_mag_sl, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
-        )
-        if use_u_contours:
-            levels = np.linspace(0.15 * u_vmax, 0.95 * u_vmax, 6)
-            ax_u.contour(u_mag_sl, levels=levels, colors="white", linewidths=0.5, alpha=0.7)
-        _style_axis(ax_u)
-
-        ax_q = axes[row, 3]
+        ax_q = axes[row, 2]
         ax_q.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
-        step = max(14, grid_stride + 6)
+        step = max(14, quiver_stride + 6)
         uu = u_inplane[0, ::step, ::step]
         vv = u_inplane[1, ::step, ::step]
         xs, ys = np.meshgrid(
@@ -561,6 +486,15 @@ def _render_figure(
         )
         _style_axis(ax_q)
 
+        ax_u = axes[row, 3]
+        im_u_last = ax_u.imshow(
+            u_mag_sl, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
+        )
+        if use_u_contours:
+            levels = np.linspace(0.15 * u_vmax, 0.95 * u_vmax, 6)
+            ax_u.contour(u_mag_sl, levels=levels, colors="white", linewidths=0.5, alpha=0.7)
+        _style_axis(ax_u)
+
         if use_checkerboard:
             ax_c = axes[row, 4]
             cb = checkerboard_mix(src_disp, mov_disp)
@@ -579,7 +513,19 @@ def _render_figure(
 
     fig.suptitle(title, fontsize=_TITLE, fontweight="bold", y=0.98)
     fig.text(0.5, 0.935, full_subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
-    fig.subplots_adjust(left=0.24, right=0.90, top=0.86, bottom=0.08, wspace=0.26, hspace=0.34)
+    bottom = 0.10 if sample_stats_note else 0.08
+    if sample_stats_note:
+        fig.text(
+            0.5,
+            0.02,
+            sample_stats_note,
+            ha="center",
+            va="bottom",
+            fontsize=_LABEL - 1,
+            color="0.25",
+            family="monospace",
+        )
+    fig.subplots_adjust(left=0.24, right=0.90, top=0.86, bottom=bottom, wspace=0.26, hspace=0.34)
 
     if save_path is not None:
         save_path = Path(save_path)
@@ -593,39 +539,54 @@ def _render_figure(
         plt.show()
 
 
-def visualize_range_grid_combinations(
+def visualize_per_class_combinations(
     input_dir: Path,
     split: str | None,
     save_dir: Path,
     no_show: bool,
     *,
-    slice_index: int | None,
-    grid_stride: int,
-    u_percentile: float,
-    per_row_u_scale: bool,
+    seed: int,
+    z_slice_index: int | None,
+    quiver_stride: int,
     use_u_contours: bool,
     use_checkerboard: bool,
     montage_z_step: int,
-    range_grid_view: str,
+    run_view: str,
 ) -> None:
     files = collect_npz_files(input_dir, split)
     if not files:
         raise FileNotFoundError(f"No NPZ files in '{resolve_npz_dir(input_dir, split)}'.")
-    groups = group_range_grid_examples(files)
+    groups = group_class_examples(files, seed=seed)
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    chosen_stats: list[dict] = []
     for label, fp in groups:
         sample = load_sample(fp)
-        if range_grid_view == "orthogonal":
+        u_stats = sample_u_stats(sample)
+        chosen_stats.append(
+            {
+                "class": label,
+                "file": fp.name,
+                "subject_id": sample.get("subject_id"),
+                "u_max_interior": sample.get("u_max_interior"),
+                "u_mean_interior": sample.get("u_mean_interior"),
+                **u_stats,
+            }
+        )
+        stats_note = (
+            f"|u| voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
+            f"mean={u_stats['mean']:.2f}  Q3={u_stats['q3']:.2f}  max={u_stats['max']:.2f}"
+        )
+        if run_view == "orthogonal":
             x0 = sample["source"].shape[0] // 2
             y0 = sample["source"].shape[1] // 2
-            z0 = axial_slice(sample["source"], slice_index)[1]
+            z0 = axial_slice(sample["source"], z_slice_index)[1]
             plane_rows = ["axial", "coronal", "sagittal"]
             idx_rows = [z0, y0, x0]
             rank_rows = ["axial", "coronal", "sagittal"]
             subtitle = "Orthogonal sanity check · Radiological-style display"
         else:
-            z0 = axial_slice(sample["source"], slice_index)[1]
+            z0 = axial_slice(sample["source"], z_slice_index)[1]
             z_offsets = [-int(montage_z_step), 0, int(montage_z_step)]
             plane_rows = ["axial", "axial", "axial"]
             idx_rows = [max(0, min(sample["source"].shape[2] - 1, z0 + dz)) for dz in z_offsets]
@@ -638,16 +599,19 @@ def visualize_range_grid_combinations(
             no_show=True,
             title=f"HCP Synthetic Data Plot — {label}",
             subtitle=subtitle,
-            slice_index=slice_index,
-            grid_stride=grid_stride,
-            u_percentile=u_percentile,
-            per_row_u_scale=per_row_u_scale,
+            z_slice_index=z_slice_index,
+            quiver_stride=quiver_stride,
             row_planes=plane_rows,
             row_slice_indices=idx_rows,
             use_u_contours=use_u_contours,
             use_checkerboard=use_checkerboard,
+            sample_stats_note=stats_note,
             row_h=3.0,
         )
+    stats_path = save_dir / "chosen_sample_u_stats.json"
+    with open(stats_path, "w", encoding="utf-8") as f:
+        json.dump(chosen_stats, f, indent=2)
+    print(f"Wrote {stats_path}")
     if no_show:
         plt.close("all")
     print(f"Saved {len(groups)} figures under {save_dir}")
@@ -662,35 +626,32 @@ def visualize_samples(
     selection: str,
     u_metric: str,
     seed: int,
-    slice_index: int | None,
-    grid_stride: int,
-    u_percentile: float,
-    per_row_u_scale: bool,
+    z_slice_index: int | None,
+    quiver_stride: int,
     save_dir: Path | None = None,
     use_u_contours: bool = False,
     use_checkerboard: bool = False,
     montage_z_step: int = 10,
-    range_grid_view: str = "orthogonal",
+    run_view: str = "orthogonal",
 ) -> None:
-    if selection == "range_grid":
+    if selection == "per_class":
         if save_dir is None:
             if save_path is not None:
                 save_dir = Path(save_path).parent / Path(save_path).stem
             else:
-                save_dir = Path("assets/images/unigrad-synth/hcp/range_grid")
-        visualize_range_grid_combinations(
+                save_dir = Path("assets/images/unigrad-synth/hcp/per_class")
+        visualize_per_class_combinations(
             input_dir,
             None,
             save_dir,
             no_show,
-            slice_index=slice_index,
-            grid_stride=grid_stride,
-            u_percentile=u_percentile,
-            per_row_u_scale=per_row_u_scale,
+            seed=seed,
+            z_slice_index=z_slice_index,
+            quiver_stride=quiver_stride,
             use_u_contours=use_u_contours,
             use_checkerboard=use_checkerboard,
             montage_z_step=montage_z_step,
-            range_grid_view=range_grid_view,
+            run_view=run_view,
         )
         return
 
@@ -720,10 +681,8 @@ def visualize_samples(
         no_show=no_show,
         title="HCP Synthetic Data Plot",
         subtitle=f"{examples_note} · {split_label} split · Radiological-style display",
-        slice_index=slice_index,
-        grid_stride=grid_stride,
-        u_percentile=u_percentile,
-        per_row_u_scale=per_row_u_scale,
+        z_slice_index=z_slice_index,
+        quiver_stride=quiver_stride,
         use_u_contours=use_u_contours,
         use_checkerboard=use_checkerboard,
     )
@@ -739,20 +698,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-dir",
         type=Path,
         default=Path("datasets/hcp_synth"),
-        help="Root with Train/Val/Test subfolders, or flat dry-run output.",
+        help="Dry-run flat folder, or full-cohort root with Train/Val/Test.",
     )
     p.add_argument(
         "--split",
         type=str,
         default=None,
-        help="Train/Val/Test subfolder (default Train; ignored for range_grid dry runs).",
+        help="Full cohort: Train/Val/Test (default Train). Ignored for per_class on flat dry-run dirs.",
     )
     p.add_argument(
         "--selection",
         type=str,
         default="random",
-        choices=["min_median_max", "random", "range_grid"],
-        help="Sample pick: random, min/median/max, or 13 PNGs (one per class×range combo).",
+        choices=["min_median_max", "random", "per_class"],
+        help=(
+            "Sample pick. Dry-run: use per_class. Full cohort: random or min_median_max "
+            "(or per_class across the chosen split/dir)."
+        ),
     )
     p.add_argument(
         "--u-metric",
@@ -763,22 +725,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
-        "--slice-index",
+        "--z-slice-index",
         type=int,
         default=None,
-        help="Axial slice index (default: mid z).",
+        help="Axial z slice index (default: mid z).",
     )
     p.add_argument(
-        "--grid-stride",
+        "--quiver-stride",
         type=int,
         default=20,
-        help="Grid line spacing in voxels.",
-    )
-    p.add_argument(
-        "--u-percentile",
-        type=float,
-        default=99.0,
-        help="Color scale cap for ‖u‖ (percentile; per-row unless --global-u-scale).",
+        help="Base spacing for sparse quiver arrows (voxels).",
     )
     p.add_argument(
         "--u-contours",
@@ -788,32 +744,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--checkerboard",
         action="store_true",
-        help="Add checkerboard source/moving comparison column (16 px tiles).",
-    )
-    p.add_argument(
-        "--global-u-scale",
-        action="store_true",
-        help="Use one shared ‖u‖ color scale across rows (default: per-row scaling).",
+        help=(
+            "Add checkerboard column: alternating tiles of source and moving "
+            "(highlights local mismatch at tile edges)."
+        ),
     )
     p.add_argument(
         "--save-dir",
         type=Path,
         default=None,
-        help="Output directory for --selection range_grid (one PNG per combination).",
+        help="Output directory for --selection per_class (one PNG per class).",
     )
     p.add_argument(
-        "--range-grid-z-step",
+        "--montage-z-step",
         type=int,
         default=10,
         metavar="VOX",
-        help="Axial offset for montage view (range_grid only).",
+        help="Axial offset for --run-view montage (default 10).",
     )
     p.add_argument(
-        "--range-grid-view",
+        "--run-view",
         type=str,
         default="orthogonal",
         choices=["orthogonal", "montage"],
-        help="range_grid rows: orthogonal planes or 3-slice axial montage.",
+        help="per_class rows: orthogonal planes (default) or 3-slice axial montage.",
     )
     p.add_argument(
         "--save-path",
@@ -831,8 +785,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: data dir not found: {data_dir}", file=sys.stderr)
         return 2
 
-    split = args.split if args.selection != "range_grid" else (args.split or None)
-    if split is None and args.selection != "range_grid":
+    split = args.split if args.selection != "per_class" else (args.split or None)
+    if split is None and args.selection != "per_class":
         split = "Train"
 
     visualize_samples(
@@ -843,15 +797,13 @@ def main(argv: list[str] | None = None) -> int:
         selection=args.selection,
         u_metric=args.u_metric,
         seed=args.seed,
-        slice_index=args.slice_index,
-        grid_stride=args.grid_stride,
-        u_percentile=args.u_percentile,
-        per_row_u_scale=not args.global_u_scale,
+        z_slice_index=args.z_slice_index,
+        quiver_stride=args.quiver_stride,
         save_dir=args.save_dir,
         use_u_contours=args.u_contours,
         use_checkerboard=args.checkerboard,
-        montage_z_step=args.range_grid_z_step,
-        range_grid_view=args.range_grid_view,
+        montage_z_step=args.montage_z_step,
+        run_view=args.run_view,
     )
     return 0
 
