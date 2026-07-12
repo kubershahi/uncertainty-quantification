@@ -61,7 +61,6 @@ _TITLE = 12
 _SUBTITLE = 10
 _LABEL = 9
 _QUIVER_COLOR = "lime"
-INTERIOR_MARGIN = 10
 _U_COLOR_PERCENTILE = 99.0  # per-row ‖u‖ color scale cap
 
 
@@ -210,25 +209,10 @@ def prefer_qc_passed_files(files: list[Path]) -> tuple[list[Path], bool]:
     return files, True
 
 
-def interior_valid_mask(shape_xyz: tuple[int, int, int], margin: int) -> np.ndarray:
-    x, y, z = shape_xyz
-    mask = np.zeros((x, y, z), dtype=bool)
-    if x > 2 * margin and y > 2 * margin and z > 2 * margin:
-        mask[margin : x - margin, margin : y - margin, margin : z - margin] = True
-    else:
-        mask[:] = True
-    return mask
-
-
 def sample_u_stats(sample: dict) -> dict[str, float]:
-    """‖u‖ min/Q1/mean/Q3/max over interior ∩ valid voxels for one sample."""
-    u = sample["u"].astype(np.float64)
-    mask = sample["identity_grid_mask"].astype(bool) & sample["source_mask"].astype(bool)
-    mag = displacement_magnitude(u)
-    valid = interior_valid_mask(mag.shape, INTERIOR_MARGIN) & mask
-    if not np.any(valid):
-        return {"min": float("nan"), "q1": float("nan"), "mean": float("nan"), "q3": float("nan"), "max": float("nan")}
-    vals = mag[valid]
+    """‖u‖ min/Q1/mean/Q3/max over the full volume (all voxels)."""
+    mag = displacement_magnitude(sample["u"].astype(np.float64))
+    vals = mag.ravel()
     return {
         "min": float(np.min(vals)),
         "q1": float(np.percentile(vals, 25)),
@@ -238,16 +222,13 @@ def sample_u_stats(sample: dict) -> dict[str, float]:
     }
 
 
-def scalar_u_score(u: np.ndarray, mask: np.ndarray | None, metric: str) -> float:
-    mag = displacement_magnitude(u.astype(np.float64))
-    if mask is not None and np.any(mask > 0.5):
-        vals = mag[mask > 0.5]
-    else:
-        vals = mag.ravel()
+def scalar_u_score(u: np.ndarray, metric: str) -> float:
+    """Scalar ‖u‖ score over the full volume (for min/median/max selection)."""
+    mag = displacement_magnitude(u.astype(np.float64)).ravel()
     if metric == "mean":
-        return float(np.mean(vals))
+        return float(np.mean(mag))
     if metric == "max":
-        return float(np.max(vals))
+        return float(np.max(mag))
     raise ValueError(f"metric must be 'mean' or 'max', got {metric!r}")
 
 
@@ -261,7 +242,7 @@ def select_min_median_max_files(
     for fp in files:
         sample = load_sample(fp)
         scored.append(
-            (fp, scalar_u_score(sample["u"], sample.get("source_mask"), u_metric))
+            (fp, scalar_u_score(sample["u"], u_metric))
         )
     scored.sort(key=lambda x: x[1])
     n = len(scored)

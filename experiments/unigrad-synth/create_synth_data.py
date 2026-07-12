@@ -14,13 +14,16 @@ Each output npz contains:
   - source  : fixed/source image (float32 volume, masked z-score from brain mask)
   - moving  : deformed image (float32 volume, same normalization as source)
   - u       : displacement field (float32, shape (3, X, Y, Z), voxel units)
-  - source_mask    : fixed brain mask (bool volume)
-  - moving_mask    : source_mask warped with the same transform (bool volume)
-  - identity_grid_mask : binary in-bounds mask for displacement field (bool volume)
+  - source_mask    : fixed brain mask (bool; for visualization only)
+  - moving_mask    : source_mask warped with the same transform (bool; viz only)
+  - identity_grid_mask : in-bounds mask for the displacement field (bool; viz only)
   - source_affine
   - deformation_class : one of {none, rigid, affine, elastic, affine_elastic}
-  - u_max_interior, u_mean_interior
+  - u_max_interior, u_mean_interior  (full-volume max/mean ‖u‖; names kept for compat)
   - subject_id, qc_passed
+
+Note: ``source_mask`` / ``moving_mask`` / ``identity_grid_mask`` are written for
+visualization only. They are not mixed together and are not used for ‖u‖ stats/QC.
 
 TorchIO transforms run in physical space (mm) using the NIfTI affine; ``u`` is recovered
 in voxel index space via the identity-grid trick (backward warp).
@@ -174,18 +177,9 @@ def interior_valid_mask(shape_xyz: tuple[int, int, int], margin: int) -> np.ndar
     return mask
 
 
-def u_interior_stats(
-    u: np.ndarray,
-    mask: np.ndarray,
-    shape_xyz: tuple[int, int, int],
-    interior_margin: int,
-) -> tuple[float, float]:
+def u_volume_stats(u: np.ndarray) -> tuple[float, float]:
+    """Full-volume max and mean ‖u‖ (all voxels; no mask)."""
     mag = displacement_magnitude(u.astype(np.float64))
-    interior = interior_valid_mask(shape_xyz, interior_margin)
-    valid = interior & (mask > 0.5)
-    if valid.any():
-        vals = mag[valid]
-        return float(np.max(vals)), float(np.mean(vals))
     return float(np.max(mag)), float(np.mean(mag))
 
 
@@ -193,45 +187,38 @@ def passes_checks(
     u: np.ndarray,
     source: np.ndarray,
     moving: np.ndarray,
-    mask: np.ndarray,
+    brain_mask: np.ndarray,
     deformation_class: str,
-    interior_margin: int,
     max_u_interior_vox: float | None,
     max_u_global_vox: float | None,
     min_moving_mean_ratio: float | None,
 ) -> bool:
+    """QC on full-volume ‖u‖; brain_mask only for intensity mean-ratio check."""
     mag = displacement_magnitude(u.astype(np.float64))
     full_max = float(np.max(mag))
-
-    interior = interior_valid_mask(source.shape, interior_margin)
-    valid = interior & (mask > 0.5)
-    if valid.any():
-        region_max = float(np.max(mag[valid]))
-        region_mean = float(np.mean(mag[valid]))
-    else:
-        region_max = full_max
-        region_mean = full_max
+    full_mean = float(np.mean(mag))
 
     if deformation_class == "none":
-        if region_max >= MAX_U_NONE_VOX:
+        if full_max >= MAX_U_NONE_VOX:
             return False
     else:
         min_max = MIN_U_MAX_INTERIOR_BY_CLASS.get(deformation_class)
         min_mean = MIN_U_MEAN_INTERIOR_BY_CLASS.get(deformation_class)
-        if min_max is not None and region_max < min_max:
+        if min_max is not None and full_max < min_max:
             return False
-        if min_mean is not None and region_mean < min_mean:
+        if min_mean is not None and full_mean < min_mean:
             return False
 
     if max_u_global_vox is not None and full_max > max_u_global_vox:
         return False
 
-    if max_u_interior_vox is not None and region_max > max_u_interior_vox:
+    if max_u_interior_vox is not None and full_max > max_u_interior_vox:
         return False
 
     if min_moving_mean_ratio is not None:
-        src_region = source[mask > 0.5] if np.any(mask > 0.5) else source
-        mov_region = moving[mask > 0.5] if np.any(mask > 0.5) else moving
+        # Intensity sanity only (FreeSurfer brainmask); not mixed with NPZ viz masks.
+        src_region = source[brain_mask > 0.5] if np.any(brain_mask > 0.5) else source
+        mov_region = moving[brain_mask > 0.5] if np.any(brain_mask > 0.5) else moving
         src_mean = float(np.mean(src_region))
         mov_mean = float(np.mean(mov_region))
         floor = max(1e-6, src_mean * min_moving_mean_ratio)
@@ -438,7 +425,6 @@ def process_one_subject(
             cand_moving,
             mask,
             task.deformation_class,
-            interior_margin=INTERIOR_MARGIN,
             max_u_interior_vox=max_u_interior_vox,
             max_u_global_vox=max_u_global_vox,
             min_moving_mean_ratio=min_moving_mean_ratio,
@@ -452,7 +438,7 @@ def process_one_subject(
         and identity_grid_mask_bin is not None
         and u is not None
     )
-    u_max_int, u_mean_int = u_interior_stats(u, mask, shape_xyz, INTERIOR_MARGIN)
+    u_max_int, u_mean_int = u_volume_stats(u)
     source_z, moving_z, _, _ = zscore_brain_pair(
         source, moving, source_mask_bin, moving_mask_bin
     )
@@ -579,17 +565,26 @@ def build_dry_run_tasks(
     base_seed: int,
     skip_qc: bool,
 ) -> list[Task]:
-    """Dry run: N samples per deformation class (5 classes × N), flat output folder."""
+    """Dry run: N samples per class; distinct subjects within each class when possible."""
+    if len(subjects) < replicates:
+        raise ValueError(
+            f"Dry run needs ≥{replicates} subjects for distinct subjects within "
+            f"each class; found {len(subjects)}"
+        )
     out_dir = out_root
     out_dir.mkdir(parents=True, exist_ok=True)
     fail_dir = out_root / "_unused_qc_fail"
+    # Deterministic subject order; walk without replacement across the whole dry run
+    # so classes also get different subjects when enough subjects are available.
+    order = sorted(
+        subjects,
+        key=lambda s: (stable_subject_hash(s.subject_id, base_seed), s.subject_id),
+    )
     tasks: list[Task] = []
     task_idx = 0
-    for cls in DRY_RUN_CLASSES:
-        # Keep source subject fixed within a class so replicates are comparable.
-        subj_idx = stable_subject_hash(f"dryrun:{cls}", base_seed) % len(subjects)
-        subj = subjects[subj_idx]
+    for cls_i, cls in enumerate(DRY_RUN_CLASSES):
         for rep in range(replicates):
+            subj = order[(cls_i * replicates + rep) % len(order)]
             rep_suffix = rep + 1 if replicates > 1 else 0
             out_name = dry_run_filename(subj.subject_id, cls, rep_suffix)
             seed = (
@@ -619,7 +614,7 @@ def compute_class_u_stats_table(
     samples: list[SampleStats],
 ) -> list[dict[str, float | int | str]]:
     """
-    Per-class ‖u‖ summary over valid interior voxels pooled across dry-run samples.
+    Per-class ‖u‖ summary over the full volume (all voxels) pooled across dry-run samples.
 
     Returns rows with min / Q1 / mean / Q3 / max, plus sample count.
     """
@@ -637,15 +632,7 @@ def compute_class_u_stats_table(
         for fp in by_class[cls]:
             with np.load(fp) as z:
                 u = np.asarray(z["u"], dtype=np.float64)
-                mask = np.asarray(z["identity_grid_mask"], dtype=bool)
-                if "source_mask" in z.files:
-                    mask = mask & np.asarray(z["source_mask"], dtype=bool)
-                mag = displacement_magnitude(u)
-                shape = mag.shape
-                interior = interior_valid_mask(shape, INTERIOR_MARGIN)
-                valid = interior & mask
-                if np.any(valid):
-                    mags.append(mag[valid].ravel())
+                mags.append(displacement_magnitude(u).ravel())
         if not mags:
             rows.append(
                 {
@@ -678,7 +665,7 @@ def compute_class_u_stats_table(
 
 def print_and_save_class_u_stats(out_root: Path, samples: list[SampleStats]) -> Path:
     rows = compute_class_u_stats_table(out_root, samples)
-    print("\nPer-class ‖u‖ stats (interior ∩ valid mask, voxels):")
+    print("\nPer-class ‖u‖ stats (full volume, voxels):")
     print(
         f"{'class':<16} {'n':>3} {'min':>8} {'Q1':>8} {'mean':>8} {'Q3':>8} {'max':>8}"
     )
@@ -942,8 +929,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         metavar="N",
         help=(
-            "Dry run: 5 deformation classes × N samples into output-path/ (flat). "
-            "Default N=5 when flag is given alone → 25 samples."
+            "Dry run mode: write a flat folder with N samples per deformation class "
+            "(5 classes × N; default N=5 → 25). Omit this flag for a full Train/Val/Test run."
         ),
     )
     return p.parse_args()
