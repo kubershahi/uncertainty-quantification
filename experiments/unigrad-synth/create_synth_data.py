@@ -14,7 +14,7 @@ Each output npz contains:
   - source  : fixed/source image (float32 volume, masked z-score from brain mask)
   - moving  : deformed image (float32 volume, same normalization as source)
   - u       : displacement field (float32, shape (3, X, Y, Z), voxel units);
-              OOB set to 0 via identity_grid_mask, then a 12-voxel boundary is zeroed
+              OOB zeroed via identity_grid_mask, then 12-voxel border zeroed, then p99.9 clip
   - source_mask    : fixed brain mask (bool; for visualization only)
   - moving_mask    : source_mask warped with the same transform (bool; viz only)
   - identity_grid_mask : in-bounds mask for the displacement field (bool; viz only)
@@ -107,6 +107,8 @@ ELASTIC_NUM_CONTROL_POINTS = 7
 
 # After identity_grid_mask zeros OOB voxels, also zero this many voxels from each face.
 U_BOUNDARY_MARGIN = 12
+# Then clip ‖u‖ outliers at this percentile (over nonzero voxels only).
+U_CLIP_PERCENTILE = 99.9
 
 # Kept for legacy 2D helpers that import this module.
 INTERIOR_MARGIN = 10
@@ -159,6 +161,30 @@ def zero_u_boundary(u: np.ndarray, margin: int = U_BOUNDARY_MARGIN) -> np.ndarra
     shape_xyz = (int(out.shape[1]), int(out.shape[2]), int(out.shape[3]))
     keep = interior_valid_mask(shape_xyz, margin)
     out[:, ~keep] = 0.0
+    return out
+
+
+def clip_u_at_percentile(u: np.ndarray, percentile: float = U_CLIP_PERCENTILE) -> np.ndarray:
+    """
+    Scale vectors with ‖u‖ above the given percentile down to that threshold.
+
+    Call last, after OOB + boundary zeroing. Percentile is over nonzero ‖u‖ only
+    so the zeroed border does not collapse the threshold.
+    """
+    out = u.astype(np.float32, copy=True)
+    mag = displacement_magnitude(out.astype(np.float64))
+    positive = mag > 0.0
+    if not np.any(positive):
+        return out
+    thresh = float(np.percentile(mag[positive], percentile))
+    if thresh <= 0.0 or not np.isfinite(thresh):
+        return out
+    over = mag > thresh
+    if not np.any(over):
+        return out
+    scale = np.ones_like(mag, dtype=np.float64)
+    scale[over] = thresh / mag[over]
+    out *= scale.astype(np.float32)
     return out
 
 
@@ -335,6 +361,7 @@ def process_one_subject(task: Task, *, pin_threads: bool) -> SampleStats:
     identity_grid_mask_bin = cand_valid_mask > 0.99
     u[:, ~identity_grid_mask_bin] = 0.0
     u = zero_u_boundary(u, U_BOUNDARY_MARGIN)
+    u = clip_u_at_percentile(u, U_CLIP_PERCENTILE)
 
     source_z, moving_z, _, _ = zscore_brain_pair(
         source, moving, source_mask_bin, moving_mask_bin
@@ -591,7 +618,10 @@ def create_synthetic_data(
             f"Params: rigid={PARAM_RIGID}, affine={PARAM_AFFINE}, "
             f"elastic={PARAM_ELASTIC}, affine_elastic_elastic={PARAM_ELASTIC_IN_AFFINE}"
         )
-        print(f"u boundary zeroing: {U_BOUNDARY_MARGIN} voxels after identity_grid_mask")
+        print(
+            f"u cleanup: identity_grid_mask OOB → {U_BOUNDARY_MARGIN}-voxel border → "
+            f"p{U_CLIP_PERCENTILE:g} clip"
+        )
         tasks = build_dry_run_tasks(
             subjects,
             out_root,
@@ -659,6 +689,7 @@ def create_synthetic_data(
         "dry_run_replicates": dry_run_replicates if dry_run else None,
         "dry_run_classes": list(DRY_RUN_CLASSES) if dry_run else None,
         "u_boundary_margin": U_BOUNDARY_MARGIN,
+        "u_clip_percentile": U_CLIP_PERCENTILE,
         "transform_params": {
             "rigid": PARAM_RIGID,
             "affine": PARAM_AFFINE,
