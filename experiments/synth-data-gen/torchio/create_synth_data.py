@@ -8,7 +8,7 @@ Input layout (per subject):
 
 Output layout:
   datasets/synth-data/torchio/hcp/{Train,Val,Test}/<subject_id>_<suffix>.npz
-  Dry run: datasets/synth-data/torchio/hcp_dryrun3/<subject_id>_<class>[_NN].npz (flat)
+  Dry run: datasets/synth-data/torchio/hcp_synth_dryrun/<subject_id>_<class>[_NN].npz (flat)
 
 Each output npz contains:
   - source  : fixed/source image (float32 volume, masked z-score from brain mask)
@@ -39,13 +39,13 @@ Modes:
 
 Examples:
 # Dry run (25 samples)
-python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp_dryrun --dry-run 5 --workers 16
+python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp_synth_dryrun --dry-run 5 --workers 16
 
 # Full cohort (all subjects)
-python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp --workers 16
+python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp_synth --workers 16
 
 # Subset full run (100 subjects → ~70/15/15 + per-class ratios in each split)
-python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp_100 --max-subjects 100 --workers 16
+python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp_synth_100 --max-subjects 100 --workers 16
 """
 
 from __future__ import annotations
