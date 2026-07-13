@@ -17,17 +17,17 @@ Modes:
 
 Examples:
 # Dry-run figures
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_montage --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_synth_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_synth_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_montage --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
 
 # Full cohort: random one-per-class × all splits (15 plots) + CSV stats
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_100 --selection random --save-dir assets/images/synth-data/torchio/hcp/full100_random --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_synth_100 --selection random --save-dir assets/images/synth-data/torchio/hcp/full100_random --no-show --run-view orthogonal --u-contours --checkerboard
 
 # Full cohort: min/median/max by mean ‖u‖ (3 plots per split)
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_100 --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/full100_mmm --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_synth_100 --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/full100_mmm --no-show --run-view orthogonal --u-contours --checkerboard
 
 # Single split only
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_100 --split Train --selection random --save-dir assets/images/synth-data/torchio/hcp/full100_train --no-show
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_synth_100 --split Train --selection random --save-dir assets/images/synth-data/torchio/hcp/full100_train --no-show
 """
 
 from __future__ import annotations
@@ -57,6 +57,14 @@ HCP_REQUIRED_KEYS = frozenset(
 
 DEFORM_CLASSES = ("none", "rigid", "affine", "elastic", "affine_elastic")
 FULL_SPLITS = ("Train", "Val", "Test")
+
+DEFORM_TITLE_LABELS: dict[str, str] = {
+    "none": "No",
+    "rigid": "Rigid",
+    "affine": "Affine",
+    "elastic": "Elastic",
+    "affine_elastic": "Affine+Elastic",
+}
 
 DEFORM_ROW_ORDER: tuple[tuple[str, str], ...] = (
     ("rigid", "rig"),
@@ -299,11 +307,28 @@ def _style_axis(ax: plt.Axes) -> None:
         spine.set_color("0.35")
 
 
-def _row_label(subject_id: str, extra: dict) -> str:
-    lines = [subject_id]
-    if extra.get("deformation_class"):
-        lines.append(str(extra["deformation_class"]))
-    return "\n".join(lines)
+def _class_plot_title(deformation_class: str) -> str:
+    label = DEFORM_TITLE_LABELS.get(
+        deformation_class, deformation_class.replace("_", "+").title()
+    )
+    return f"HCP Synthetic Data Plot ({label} Transformation)"
+
+
+def _view_label(run_view: str) -> str:
+    return "Orthogonal View" if run_view == "orthogonal" else "Montage View"
+
+
+def _plot_subtitle(subject_id: str, run_view: str, extra: str | None = None) -> str:
+    base = (
+        f"Subject {subject_id} - Radiological-style display - {_view_label(run_view)}"
+    )
+    if extra:
+        return f"{base} · {extra}"
+    return base
+
+
+def _plane_row_label(plane: str, idx: int) -> str:
+    return f"{plane}({plane[0]}={idx})"
 
 
 def _render_figure(
@@ -328,9 +353,8 @@ def _render_figure(
     # source, moving, u vectors, ‖u‖, optional checkerboard
     col_titles = ["Source (fixed)", "Warped (moving)", "u vectors", r"$\|u\|$"]
     if use_checkerboard:
-        col_titles.append("checkerboard")
+        col_titles.append("Checkerboard")
 
-    plane_idx_notes: list[str] = []
     row_u_vmax: list[float] = []
     for row, (fp, _, _) in enumerate(picked):
         sample = load_sample(fp)
@@ -339,7 +363,6 @@ def _render_figure(
             idx = int(row_slice_indices[row])
         else:
             idx = plane_slice(sample["source"], plane, z_slice_index)[1]
-        plane_idx_notes.append(f"{plane[0]}={idx}")
         if plane == "axial":
             u_sl = sample["u"][:, :, :, idx]
         elif plane == "coronal":
@@ -349,24 +372,17 @@ def _render_figure(
         mag = displacement_magnitude(u_sl.astype(np.float64)).ravel()
         row_u_vmax.append(max(float(np.percentile(mag, _U_COLOR_PERCENTILE)), 1e-6))
 
-    full_subtitle = f"{subtitle} · {', '.join(plane_idx_notes)}"
-
     plt.rcParams.update({"font.family": _FONT, "figure.dpi": _DPI, "savefig.dpi": _DPI})
     fig_w = 3.0 * ncols + 1.6
     fig_h = row_h * nrows + 1.6
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
 
     im_u_last = None
-    for row, (file_path, rank_label, _) in enumerate(picked):
+    for row, (file_path, _rank_label, _) in enumerate(picked):
         sample = load_sample(file_path)
         source = sample["source"]
         moving = sample["moving"]
         u = sample["u"]
-        extra = {
-            k: sample[k]
-            for k in ("deformation_class", "subject_id")
-            if k in sample
-        }
 
         plane = row_planes[row] if row_planes is not None else "axial"
         if row_slice_indices is not None:
@@ -387,15 +403,11 @@ def _render_figure(
         mov_disp = orient_axial(mov_sl)
         u_vmax = row_u_vmax[row]
 
-        subject_id = extra.get("subject_id") or file_path.stem.split("_")[0]
-        plane_tag = rank_label if rank_label else plane
-        row_title = f"{subject_id} · {plane_tag}"
-
         ax_src = axes[row, 0]
         ax_src.imshow(src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
         _style_axis(ax_src)
         ax_src.set_ylabel(
-            _row_label(row_title, extra),
+            _plane_row_label(plane, idx),
             fontsize=_LABEL,
             rotation=90,
             ha="center",
@@ -457,7 +469,7 @@ def _render_figure(
         cbar.ax.tick_params(labelsize=_LABEL - 1)
 
     fig.suptitle(title, fontsize=_TITLE, fontweight="bold", y=0.98)
-    fig.text(0.5, 0.935, full_subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
+    fig.text(0.5, 0.935, subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
     bottom = 0.10 if sample_stats_note else 0.08
     if sample_stats_note:
         fig.text(
@@ -530,7 +542,7 @@ def _views_for_sample(
     z_slice_index: int | None,
     montage_z_step: int,
     run_view: str,
-) -> tuple[list[str], list[int], list[str], str]:
+) -> tuple[list[str], list[int], list[str]]:
     if run_view == "orthogonal":
         x0 = sample["source"].shape[0] // 2
         y0 = sample["source"].shape[1] // 2
@@ -539,7 +551,6 @@ def _views_for_sample(
             ["axial", "coronal", "sagittal"],
             [z0, y0, x0],
             ["axial", "coronal", "sagittal"],
-            "Orthogonal sanity check · Radiological-style display",
         )
     z0 = axial_slice(sample["source"], z_slice_index)[1]
     z_offsets = [-int(montage_z_step), 0, int(montage_z_step)]
@@ -550,7 +561,6 @@ def _views_for_sample(
         ["axial", "axial", "axial"],
         idx_rows,
         [f"z{dz:+d}" for dz in z_offsets],
-        "3-slice montage sanity check · Radiological-style display",
     )
 
 
@@ -558,13 +568,13 @@ def _render_single_sample_plot(
     fp: Path,
     *,
     save_path: Path,
-    title: str,
     z_slice_index: int | None,
     quiver_stride: int,
     use_u_contours: bool,
     use_checkerboard: bool,
     montage_z_step: int,
     run_view: str,
+    subtitle_extra: str | None = None,
 ) -> dict:
     sample = load_sample(fp)
     u_stats = sample_u_stats(sample)
@@ -572,19 +582,21 @@ def _render_single_sample_plot(
         f"‖u‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
         f"mean={u_stats['mean']:.2f}  Q3={u_stats['q3']:.2f}  max={u_stats['max']:.2f}"
     )
-    plane_rows, idx_rows, rank_rows, subtitle = _views_for_sample(
+    plane_rows, idx_rows, rank_rows = _views_for_sample(
         sample,
         z_slice_index=z_slice_index,
         montage_z_step=montage_z_step,
         run_view=run_view,
     )
+    subject_id = sample.get("subject_id") or fp.stem.split("_")[0]
+    deform_cls = str(sample.get("deformation_class") or "unknown")
     picked = [(fp, r, float("nan")) for r in rank_rows]
     _render_figure(
         picked,
         save_path=save_path,
         no_show=True,
-        title=title,
-        subtitle=subtitle,
+        title=_class_plot_title(deform_cls),
+        subtitle=_plot_subtitle(str(subject_id), run_view, subtitle_extra),
         z_slice_index=z_slice_index,
         quiver_stride=quiver_stride,
         row_planes=plane_rows,
@@ -713,7 +725,6 @@ def visualize_full_cohort(
                 _render_single_sample_plot(
                     fp,
                     save_path=out_split / f"{label}.png",
-                    title=f"HCP Synthetic — {sp} / {label}",
                     z_slice_index=z_slice_index,
                     quiver_stride=quiver_stride,
                     use_u_contours=use_u_contours,
@@ -729,16 +740,13 @@ def visualize_full_cohort(
                 _render_single_sample_plot(
                     fp,
                     save_path=out_split / f"{rank}.png",
-                    title=(
-                        f"HCP Synthetic — {sp} / {rank} "
-                        f"({u_metric} ‖u‖={score:.3f})"
-                    ),
                     z_slice_index=z_slice_index,
                     quiver_stride=quiver_stride,
                     use_u_contours=use_u_contours,
                     use_checkerboard=use_checkerboard,
                     montage_z_step=montage_z_step,
                     run_view=run_view,
+                    subtitle_extra=f"{rank} ({u_metric} ‖u‖={score:.3f})",
                 )
                 n_figs += 1
             print(
@@ -803,21 +811,20 @@ def visualize_per_class_combinations(
             plane_rows = ["axial", "coronal", "sagittal"]
             idx_rows = [z0, y0, x0]
             rank_rows = ["axial", "coronal", "sagittal"]
-            subtitle = "Orthogonal sanity check · Radiological-style display"
         else:
             z0 = axial_slice(sample["source"], z_slice_index)[1]
             z_offsets = [-int(montage_z_step), 0, int(montage_z_step)]
             plane_rows = ["axial", "axial", "axial"]
             idx_rows = [max(0, min(sample["source"].shape[2] - 1, z0 + dz)) for dz in z_offsets]
             rank_rows = [f"z{dz:+d}" for dz in z_offsets]
-            subtitle = "3-slice montage sanity check · Radiological-style display"
+        subject_id = sample.get("subject_id") or fp.stem.split("_")[0]
         picked = [(fp, r, float("nan")) for r in rank_rows]
         _render_figure(
             picked,
             save_path=save_dir / f"{label}.png",
             no_show=True,
-            title=f"HCP Synthetic Data Plot — {label}",
-            subtitle=subtitle,
+            title=_class_plot_title(label),
+            subtitle=_plot_subtitle(str(subject_id), run_view),
             z_slice_index=z_slice_index,
             quiver_stride=quiver_stride,
             row_planes=plane_rows,
@@ -913,7 +920,7 @@ def visualize_samples(
         examples_note = f"Rigid / affine / elastic examples (seed = {seed})"
     elif selection == "min_median_max":
         picked = select_min_median_max_files(files, u_metric)
-        examples_note = f"Min / median / max of {u_metric} " + r"$\|u\|$"
+        examples_note = f"min / median / max ({u_metric} ‖u‖)"
     else:
         raise ValueError(f"Unknown selection: {selection!r}")
 
@@ -923,7 +930,9 @@ def visualize_samples(
         save_path=save_path,
         no_show=no_show,
         title="HCP Synthetic Data Plot",
-        subtitle=f"{examples_note} · {split_label} split · Radiological-style display",
+        subtitle=(
+            f"{examples_note} - {split_label} split - Radiological-style display"
+        ),
         z_slice_index=z_slice_index,
         quiver_stride=quiver_stride,
         use_u_contours=use_u_contours,
