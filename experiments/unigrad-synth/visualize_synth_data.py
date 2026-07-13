@@ -7,23 +7,33 @@ Axial display is radiological (``rot90``, posterior up).
 
 Modes:
   - Dry-run folder (flat ``*.npz``): ``--selection per_class``
-  - Full cohort (Train/Val/Test): ``--split Train`` with ``random`` or ``min_median_max``
+  - Full cohort (``Train``/``Val``/``Test``):
+      ``--selection random`` (default) → one random sample per class per split
+      (up to 15 plots) with orthogonal/montage views
+      ``--selection min_median_max`` → three separate plots per split (min / median / max
+      by ``--u-metric``), not stacked in one figure
 
-``--selection per_class``: one random sample per deformation class.
 ``--run-view orthogonal|montage`` controls row layout (``--montage-z-step`` for montage).
 
 Examples:
 # Dry-run figures
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun3 --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun3_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun3 --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun3_montage --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
-# Full cohort preview
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth --split Train --selection min_median_max --u-metric mean --save-path assets/images/unigrad-synth/hcp/hcp_synth_minmedmax.png --no-show
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun_montage --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
+
+# Full cohort: random one-per-class × all splits (15 plots) + CSV stats
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_100 --selection random --save-dir assets/images/unigrad-synth/hcp/full100_random --no-show --run-view orthogonal --u-contours --checkerboard
+
+# Full cohort: min/median/max by mean ‖u‖ (3 plots per split)
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_100 --selection min_median_max --u-metric mean --save-dir assets/images/unigrad-synth/hcp/full100_mmm --no-show --run-view orthogonal --u-contours --checkerboard
+
+# Single split only
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_100 --split Train --selection random --save-dir assets/images/unigrad-synth/hcp/full100_train --no-show
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import csv
 import random
 import sys
 from pathlib import Path
@@ -46,6 +56,7 @@ HCP_REQUIRED_KEYS = frozenset(
 )
 
 DEFORM_CLASSES = ("none", "rigid", "affine", "elastic", "affine_elastic")
+FULL_SPLITS = ("Train", "Val", "Test")
 
 DEFORM_ROW_ORDER: tuple[tuple[str, str], ...] = (
     ("rigid", "rig"),
@@ -310,6 +321,7 @@ def _render_figure(
     use_checkerboard: bool = False,
     sample_stats_note: str | None = None,
     row_h: float = 3.2,
+    announce_save: bool = True,
 ) -> None:
     nrows = len(picked)
     ncols = 5 if use_checkerboard else 4
@@ -464,12 +476,284 @@ def _render_figure(
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=_DPI, bbox_inches="tight", facecolor="white")
-        print(f"Saved figure: {save_path}")
+        if announce_save:
+            print(f"Saved figure: {save_path}")
 
     if no_show:
         plt.close(fig)
     else:
         plt.show()
+
+
+def is_full_cohort_dir(input_dir: Path) -> bool:
+    return any((input_dir / sp).is_dir() for sp in FULL_SPLITS)
+
+
+def resolve_full_splits(input_dir: Path, split: str | None) -> list[str]:
+    if split:
+        if not (input_dir / split).is_dir():
+            raise FileNotFoundError(f"Split directory not found: {input_dir / split}")
+        return [split]
+    found = [sp for sp in FULL_SPLITS if (input_dir / sp).is_dir()]
+    if not found:
+        raise FileNotFoundError(
+            f"No Train/Val/Test folders under {input_dir}. "
+            "Pass a full-cohort root or use --selection per_class for a dry-run folder."
+        )
+    return found
+
+
+def group_class_examples_optional(
+    files: list[Path], seed: int
+) -> tuple[list[tuple[str, Path]], list[str]]:
+    """One random sample per class present; return (groups, missing_classes)."""
+    pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
+    for fp in files:
+        cls = load_sample(fp).get("deformation_class")
+        if cls in pools:
+            pools[str(cls)].append(fp)
+    rng = random.Random(seed)
+    groups: list[tuple[str, Path]] = []
+    missing: list[str] = []
+    for cls in DEFORM_CLASSES:
+        pool = pools[cls]
+        if not pool:
+            missing.append(cls)
+            continue
+        groups.append((cls, rng.choice(pool)))
+    return groups, missing
+
+
+def _views_for_sample(
+    sample: dict,
+    *,
+    z_slice_index: int | None,
+    montage_z_step: int,
+    run_view: str,
+) -> tuple[list[str], list[int], list[str], str]:
+    if run_view == "orthogonal":
+        x0 = sample["source"].shape[0] // 2
+        y0 = sample["source"].shape[1] // 2
+        z0 = axial_slice(sample["source"], z_slice_index)[1]
+        return (
+            ["axial", "coronal", "sagittal"],
+            [z0, y0, x0],
+            ["axial", "coronal", "sagittal"],
+            "Orthogonal sanity check · Radiological-style display",
+        )
+    z0 = axial_slice(sample["source"], z_slice_index)[1]
+    z_offsets = [-int(montage_z_step), 0, int(montage_z_step)]
+    idx_rows = [
+        max(0, min(sample["source"].shape[2] - 1, z0 + dz)) for dz in z_offsets
+    ]
+    return (
+        ["axial", "axial", "axial"],
+        idx_rows,
+        [f"z{dz:+d}" for dz in z_offsets],
+        "3-slice montage sanity check · Radiological-style display",
+    )
+
+
+def _render_single_sample_plot(
+    fp: Path,
+    *,
+    save_path: Path,
+    title: str,
+    z_slice_index: int | None,
+    quiver_stride: int,
+    use_u_contours: bool,
+    use_checkerboard: bool,
+    montage_z_step: int,
+    run_view: str,
+) -> dict:
+    sample = load_sample(fp)
+    u_stats = sample_u_stats(sample)
+    stats_note = (
+        f"‖u‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
+        f"mean={u_stats['mean']:.2f}  Q3={u_stats['q3']:.2f}  max={u_stats['max']:.2f}"
+    )
+    plane_rows, idx_rows, rank_rows, subtitle = _views_for_sample(
+        sample,
+        z_slice_index=z_slice_index,
+        montage_z_step=montage_z_step,
+        run_view=run_view,
+    )
+    picked = [(fp, r, float("nan")) for r in rank_rows]
+    _render_figure(
+        picked,
+        save_path=save_path,
+        no_show=True,
+        title=title,
+        subtitle=subtitle,
+        z_slice_index=z_slice_index,
+        quiver_stride=quiver_stride,
+        row_planes=plane_rows,
+        row_slice_indices=idx_rows,
+        use_u_contours=use_u_contours,
+        use_checkerboard=use_checkerboard,
+        sample_stats_note=stats_note,
+        row_h=3.0,
+        announce_save=False,
+    )
+    return {
+        "file": fp.name,
+        "subject_id": sample.get("subject_id"),
+        "deformation_class": sample.get("deformation_class"),
+        **u_stats,
+    }
+
+
+def compute_split_class_u_stats_rows(input_dir: Path, splits: list[str]) -> list[dict]:
+    """Per (split, class): per-sample ‖u‖ stats, then mean over samples."""
+    rows: list[dict] = []
+    for sp in splits:
+        files = collect_npz_files(input_dir, sp)
+        pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
+        for fp in files:
+            cls = load_sample(fp).get("deformation_class")
+            if cls in pools:
+                pools[str(cls)].append(fp)
+        for cls in DEFORM_CLASSES:
+            per_sample: list[dict[str, float]] = []
+            for fp in pools[cls]:
+                per_sample.append(sample_u_stats(load_sample(fp)))
+            if not per_sample:
+                rows.append(
+                    {
+                        "split": sp,
+                        "deformation_class": cls,
+                        "n_samples": 0,
+                        "min": float("nan"),
+                        "q1": float("nan"),
+                        "mean": float("nan"),
+                        "q3": float("nan"),
+                        "max": float("nan"),
+                    }
+                )
+                continue
+            rows.append(
+                {
+                    "split": sp,
+                    "deformation_class": cls,
+                    "n_samples": len(per_sample),
+                    "min": float(np.mean([s["min"] for s in per_sample])),
+                    "q1": float(np.mean([s["q1"] for s in per_sample])),
+                    "mean": float(np.mean([s["mean"] for s in per_sample])),
+                    "q3": float(np.mean([s["q3"] for s in per_sample])),
+                    "max": float(np.mean([s["max"] for s in per_sample])),
+                }
+            )
+    return rows
+
+
+def save_split_class_u_stats_csv(rows: list[dict], csv_path: Path) -> Path:
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "split",
+        "deformation_class",
+        "n_samples",
+        "min",
+        "q1",
+        "mean",
+        "q3",
+        "max",
+    ]
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r[k] for k in fieldnames})
+    print(f"Wrote {csv_path} (‖u‖ stats over all samples in each split × class)")
+    return csv_path
+
+
+def visualize_full_cohort(
+    input_dir: Path,
+    split: str | None,
+    save_dir: Path,
+    no_show: bool,
+    *,
+    selection: str,
+    u_metric: str,
+    seed: int,
+    z_slice_index: int | None,
+    quiver_stride: int,
+    use_u_contours: bool,
+    use_checkerboard: bool,
+    montage_z_step: int,
+    run_view: str,
+) -> None:
+    splits = resolve_full_splits(input_dir, split)
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    n_figs = 0
+    print(
+        f"Full cohort viz: selection={selection}  splits={', '.join(splits)}  "
+        f"view={run_view}  → {save_dir}"
+    )
+
+    for sp in splits:
+        files = collect_npz_files(input_dir, sp)
+        if not files:
+            print(f"Warning: no NPZ in {sp}; skipping.", file=sys.stderr)
+            continue
+        out_split = save_dir / sp
+        out_split.mkdir(parents=True, exist_ok=True)
+
+        if selection == "random":
+            groups, missing = group_class_examples_optional(files, seed=seed + hash(sp) % 10007)
+            if missing:
+                print(
+                    f"Warning: {sp} missing class(es) {', '.join(missing)}; "
+                    "plotting available classes only.",
+                    file=sys.stderr,
+                )
+            for label, fp in groups:
+                _render_single_sample_plot(
+                    fp,
+                    save_path=out_split / f"{label}.png",
+                    title=f"HCP Synthetic — {sp} / {label}",
+                    z_slice_index=z_slice_index,
+                    quiver_stride=quiver_stride,
+                    use_u_contours=use_u_contours,
+                    use_checkerboard=use_checkerboard,
+                    montage_z_step=montage_z_step,
+                    run_view=run_view,
+                )
+                n_figs += 1
+            print(f"  {sp}: {len(groups)} class plot(s) from {len(files)} NPZs")
+        elif selection == "min_median_max":
+            picked = select_min_median_max_files(files, u_metric)
+            for fp, rank, score in picked:
+                _render_single_sample_plot(
+                    fp,
+                    save_path=out_split / f"{rank}.png",
+                    title=(
+                        f"HCP Synthetic — {sp} / {rank} "
+                        f"({u_metric} ‖u‖={score:.3f})"
+                    ),
+                    z_slice_index=z_slice_index,
+                    quiver_stride=quiver_stride,
+                    use_u_contours=use_u_contours,
+                    use_checkerboard=use_checkerboard,
+                    montage_z_step=montage_z_step,
+                    run_view=run_view,
+                )
+                n_figs += 1
+            print(
+                f"  {sp}: min/median/max by {u_metric} ‖u‖ "
+                f"({len(files)} NPZs → {len(picked)} plots)"
+            )
+        else:
+            raise ValueError(f"Full cohort does not support selection={selection!r}")
+
+    print("Computing split × class ‖u‖ stats (all samples)…")
+    rows = compute_split_class_u_stats_rows(input_dir, splits)
+    save_split_class_u_stats_csv(rows, save_dir / "split_class_u_stats.csv")
+    if no_show:
+        plt.close("all")
+    print(f"Done: {n_figs} figures under {save_dir}")
 
 
 def visualize_per_class_combinations(
@@ -492,6 +776,10 @@ def visualize_per_class_combinations(
     groups = group_class_examples(files, seed=seed)
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    print(
+        f"Dry-run viz: {len(groups)} classes from {len(files)} NPZs  "
+        f"view={run_view}  → {save_dir}"
+    )
     chosen_stats: list[dict] = []
     for label, fp in groups:
         sample = load_sample(fp)
@@ -538,14 +826,19 @@ def visualize_per_class_combinations(
             use_checkerboard=use_checkerboard,
             sample_stats_note=stats_note,
             row_h=3.0,
+            announce_save=False,
         )
-    stats_path = save_dir / "chosen_sample_u_stats.json"
-    with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(chosen_stats, f, indent=2)
-    print(f"Wrote {stats_path}")
+    csv_path = save_dir / "chosen_sample_u_stats.csv"
+    fieldnames = ["class", "file", "subject_id", "min", "q1", "mean", "q3", "max"]
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in chosen_stats:
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
+    print(f"Wrote {csv_path} (‖u‖ stats for plotted samples only)")
     if no_show:
         plt.close("all")
-    print(f"Saved {len(groups)} figures under {save_dir}")
+    print(f"Done: {len(groups)} figures under {save_dir}")
 
 
 def visualize_samples(
@@ -565,6 +858,7 @@ def visualize_samples(
     montage_z_step: int = 10,
     run_view: str = "orthogonal",
 ) -> None:
+    # Dry-run path (unchanged): flat folder + per_class.
     if selection == "per_class":
         if save_dir is None:
             if save_path is not None:
@@ -576,6 +870,30 @@ def visualize_samples(
             None,
             save_dir,
             no_show,
+            seed=seed,
+            z_slice_index=z_slice_index,
+            quiver_stride=quiver_stride,
+            use_u_contours=use_u_contours,
+            use_checkerboard=use_checkerboard,
+            montage_z_step=montage_z_step,
+            run_view=run_view,
+        )
+        return
+
+    # Full cohort: Train/Val/Test → one plot per sample (random per class, or min/median/max).
+    if is_full_cohort_dir(input_dir) and selection in ("random", "min_median_max"):
+        if save_dir is None:
+            if save_path is not None:
+                save_dir = Path(save_path).parent / Path(save_path).stem
+            else:
+                save_dir = Path("assets/images/unigrad-synth/hcp/full_cohort")
+        visualize_full_cohort(
+            input_dir,
+            split,
+            save_dir,
+            no_show,
+            selection=selection,
+            u_metric=u_metric,
             seed=seed,
             z_slice_index=z_slice_index,
             quiver_stride=quiver_stride,
@@ -629,7 +947,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--split",
         type=str,
         default=None,
-        help="Full cohort: Train/Val/Test (default Train). Ignored for per_class on flat dry-run dirs.",
+        help=(
+            "Full cohort: Train/Val/Test. Omit to plot all present splits. "
+            "Ignored for dry-run --selection per_class."
+        ),
     )
     p.add_argument(
         "--selection",
@@ -637,8 +958,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="random",
         choices=["min_median_max", "random", "per_class"],
         help=(
-            "Sample pick. Dry-run: use per_class. Full cohort: random or min_median_max "
-            "(or per_class across the chosen split/dir)."
+            "Dry-run: per_class. Full cohort: random (one sample/class/split) or "
+            "min_median_max (three separate plots per split by --u-metric)."
         ),
     )
     p.add_argument(
@@ -678,7 +999,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--save-dir",
         type=Path,
         default=None,
-        help="Output directory for --selection per_class (one PNG per class).",
+        help=(
+            "Output directory for per_class (dry-run) or full-cohort plots "
+            "(split subfolders + split_class_u_stats.csv)."
+        ),
     )
     p.add_argument(
         "--montage-z-step",
@@ -692,7 +1016,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default="orthogonal",
         choices=["orthogonal", "montage"],
-        help="per_class rows: orthogonal planes (default) or 3-slice axial montage.",
+        help="Row layout: orthogonal planes (default) or 3-slice axial montage.",
     )
     p.add_argument(
         "--save-path",
@@ -710,9 +1034,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: data dir not found: {data_dir}", file=sys.stderr)
         return 2
 
-    split = args.split if args.selection != "per_class" else (args.split or None)
-    if split is None and args.selection != "per_class":
-        split = "Train"
+    # Dry-run: leave split unset. Full cohort: None means all splits; else use given split.
+    if args.selection == "per_class":
+        split = args.split or None
+    elif is_full_cohort_dir(data_dir):
+        split = args.split  # None → all Train/Val/Test present
+    else:
+        split = args.split or "Train"
 
     visualize_samples(
         data_dir,
