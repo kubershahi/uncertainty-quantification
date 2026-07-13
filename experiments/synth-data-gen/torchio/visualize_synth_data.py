@@ -328,7 +328,7 @@ def _plot_subtitle(subject_id: str, run_view: str, extra: str | None = None) -> 
 
 
 def _plane_row_label(plane: str, idx: int) -> str:
-    return f"{plane}({plane[0]}={idx})"
+    return f"{plane} ({plane[0]}={idx})"
 
 
 def _render_figure(
@@ -468,12 +468,16 @@ def _render_figure(
         cbar.set_label(r"$\|u\|$ (voxels)", fontsize=_LABEL)
         cbar.ax.tick_params(labelsize=_LABEL - 1)
 
-    fig.suptitle(title, fontsize=_TITLE, fontweight="bold", y=0.98)
-    fig.text(0.5, 0.935, subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
     bottom = 0.10 if sample_stats_note else 0.08
+    left, right = 0.24, 0.90
+    fig.subplots_adjust(left=left, right=right, top=0.86, bottom=bottom, wspace=0.26, hspace=0.34)
+    # Center over the image grid (not full figure), so bbox_inches="tight" stays balanced.
+    title_x = 0.5 * (left + right)
+    fig.suptitle(title, fontsize=_TITLE, fontweight="bold", x=title_x, y=0.98, ha="center")
+    fig.text(title_x, 0.935, subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
     if sample_stats_note:
         fig.text(
-            0.5,
+            title_x,
             0.02,
             sample_stats_note,
             ha="center",
@@ -482,7 +486,6 @@ def _render_figure(
             color="0.25",
             family="monospace",
         )
-    fig.subplots_adjust(left=0.24, right=0.90, top=0.86, bottom=bottom, wspace=0.26, hspace=0.34)
 
     if save_path is not None:
         save_path = Path(save_path)
