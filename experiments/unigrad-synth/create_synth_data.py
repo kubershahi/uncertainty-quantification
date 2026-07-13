@@ -14,7 +14,7 @@ Each output npz contains:
   - source  : fixed/source image (float32 volume, masked z-score from brain mask)
   - moving  : deformed image (float32 volume, same normalization as source)
   - u       : displacement field (float32, shape (3, X, Y, Z), voxel units);
-              OOB set to 0 via identity_grid_mask, then ‖u‖ clipped at p99
+              OOB set to 0 via identity_grid_mask, then a 12-voxel boundary is zeroed
   - source_mask    : fixed brain mask (bool; for visualization only)
   - moving_mask    : source_mask warped with the same transform (bool; viz only)
   - identity_grid_mask : in-bounds mask for the displacement field (bool; viz only)
@@ -48,6 +48,7 @@ python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp 
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -104,8 +105,8 @@ PARAM_ELASTIC_IN_AFFINE = {"max_disp_mm": 8.0}
 
 ELASTIC_NUM_CONTROL_POINTS = 7
 
-# After identity_grid_mask zeros OOB voxels, clip ‖u‖ outliers at this percentile.
-U_CLIP_PERCENTILE = 99.0
+# After identity_grid_mask zeros OOB voxels, also zero this many voxels from each face.
+U_BOUNDARY_MARGIN = 12
 
 # Kept for legacy 2D helpers that import this module.
 INTERIOR_MARGIN = 10
@@ -152,28 +153,12 @@ def interior_valid_mask(shape_xyz: tuple[int, int, int], margin: int) -> np.ndar
     return mask
 
 
-def clip_u_at_percentile(u: np.ndarray, percentile: float = U_CLIP_PERCENTILE) -> np.ndarray:
-    """
-    Scale vectors with ‖u‖ above the given percentile down to that threshold.
-
-    Call after identity_grid_mask has zeroed OOB voxels. Percentile is computed
-    over nonzero ‖u‖ only (zeros from OOB masking would otherwise collapse p99).
-    No lower-tail / p1 clip.
-    """
+def zero_u_boundary(u: np.ndarray, margin: int = U_BOUNDARY_MARGIN) -> np.ndarray:
+    """Zero displacement vectors within ``margin`` voxels of any volume face."""
     out = u.astype(np.float32, copy=True)
-    mag = displacement_magnitude(out.astype(np.float64))
-    positive = mag > 0.0
-    if not np.any(positive):
-        return out
-    thresh = float(np.percentile(mag[positive], percentile))
-    if thresh <= 0.0 or not np.isfinite(thresh):
-        return out
-    over = mag > thresh
-    if not np.any(over):
-        return out
-    scale = np.ones_like(mag, dtype=np.float64)
-    scale[over] = thresh / mag[over]
-    out *= scale.astype(np.float32)
+    shape_xyz = (int(out.shape[1]), int(out.shape[2]), int(out.shape[3]))
+    keep = interior_valid_mask(shape_xyz, margin)
+    out[:, ~keep] = 0.0
     return out
 
 
@@ -349,7 +334,7 @@ def process_one_subject(task: Task, *, pin_threads: bool) -> SampleStats:
     # identity_grid_mask False → OOB; zero those displacements (‖u‖ = 0).
     identity_grid_mask_bin = cand_valid_mask > 0.99
     u[:, ~identity_grid_mask_bin] = 0.0
-    u = clip_u_at_percentile(u, U_CLIP_PERCENTILE)
+    u = zero_u_boundary(u, U_BOUNDARY_MARGIN)
 
     source_z, moving_z, _, _ = zscore_brain_pair(
         source, moving, source_mask_bin, moving_mask_bin
@@ -548,11 +533,15 @@ def print_and_save_class_u_stats(out_root: Path, samples: list[SampleStats]) -> 
             f"{r['min']:8.3f} {r['q1']:8.3f} {r['mean']:8.3f} "
             f"{r['q3']:8.3f} {r['max']:8.3f}"
         )
-    json_path = out_root / "dryrun_class_u_stats.json"
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=2)
-    print(f"Wrote {json_path}")
-    return json_path
+    csv_path = out_root / "dryrun_class_u_stats.csv"
+    fieldnames = ["deformation_class", "n_samples", "min", "q1", "mean", "q3", "max"]
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r[k] for k in fieldnames})
+    print(f"Wrote {csv_path}")
+    return csv_path
 
 
 def collect_hcp_subjects(input_root: Path) -> list[SubjectEntry]:
@@ -602,7 +591,7 @@ def create_synthetic_data(
             f"Params: rigid={PARAM_RIGID}, affine={PARAM_AFFINE}, "
             f"elastic={PARAM_ELASTIC}, affine_elastic_elastic={PARAM_ELASTIC_IN_AFFINE}"
         )
-        print(f"‖u‖ clip: p{U_CLIP_PERCENTILE:g} after identity_grid_mask OOB zeroing")
+        print(f"u boundary zeroing: {U_BOUNDARY_MARGIN} voxels after identity_grid_mask")
         tasks = build_dry_run_tasks(
             subjects,
             out_root,
@@ -669,7 +658,7 @@ def create_synthetic_data(
         "dry_run": dry_run,
         "dry_run_replicates": dry_run_replicates if dry_run else None,
         "dry_run_classes": list(DRY_RUN_CLASSES) if dry_run else None,
-        "u_clip_percentile": U_CLIP_PERCENTILE,
+        "u_boundary_margin": U_BOUNDARY_MARGIN,
         "transform_params": {
             "rigid": PARAM_RIGID,
             "affine": PARAM_AFFINE,
