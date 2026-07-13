@@ -6,7 +6,7 @@ synth-related tracks:
 | Track | Dim | Phase I script | Output |
 | --- | ---: | --- | --- |
 | **IXI 2D** (legacy) | 2D | `create_synth_data.py` (superseded for HCP) | `*_triplet.npz` |
-| **HCP 3D** (current) | 3D | `create_synth_data.py` | `datasets/hcp_synth/<split>/*.npz` |
+| **HCP 3D** (current) | 3D | `create_synth_data.py` | `datasets/synth-data/torchio/hcp/<split>/*.npz` |
 
 For 3D IO on IXI see `docs/unigrad-io-experiment.md`. For HCP download/QC see `docs/hcp-dataset.md`.
 For registration vocabulary see `docs/registration-concepts.md`.
@@ -17,13 +17,13 @@ Artifact roots:
 | --- | --- |
 | IXI 2D slices | `data/IXI_2D/` (or `datasets/IXI_2D/`) |
 | IXI synth triplets | `data/IXI_2D_synth_trip/` |
-| IXI UniGrad fivers | `data/IXI_2D_unigrad_synth_fiver/` |
+| IXI UniGrad fivers | `datasets/error-map/unigrad-synth/ixi_2d_fiver/` |
 | HCP T1w (real) | `datasets/hcp/` |
-| **HCP 3D synth** | `datasets/hcp_synth/{Train,Val,Test}/` |
-| Data scripts | `experiments/unigrad-synth/` |
+| **HCP 3D synth** | `datasets/synth-data/torchio/hcp/{Train,Val,Test}/` |
+| Data scripts | `experiments/synth-data-gen/torchio/`, `experiments/error-map-gen/unigrad-synth/` |
 | Train / eval (2D) | `experiments/regression/unigrad-synth/` |
-| Run outputs | `assets/runs/2d/unigrad-synth/error_unet_run{N}/` |
-| QC figures | `assets/images/unigrad-synth/`, `assets/images/synth/` |
+| Run outputs | `assets/runs/regression/unigrad-synth/2d/error_unet_run{N}/` |
+| QC figures | `assets/images/synth-data/torchio/`, `assets/images/synth-data/` |
 
 ---
 
@@ -57,8 +57,8 @@ datasets/hcp/<subject_id>/T1w/
 **Output:**
 
 ```text
-datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<suffix>.npz          # qc_passed=True
-datasets/hcp_synth_qc_fail/{Train,Val,Test}/<subject_id>_<suffix>.npz  # qc_passed=False
+datasets/synth-data/torchio/hcp/{Train,Val,Test}/<subject_id>_<suffix>.npz          # qc_passed=True
+datasets/synth-data/torchio/hcp_qc_fail/{Train,Val,Test}/<subject_id>_<suffix>.npz  # qc_passed=False
 ```
 
 Suffixes: `none`, `rig`, `aff`, `ela`, `aela` (see deformation classes below). Training reads
@@ -91,7 +91,7 @@ only `hcp_synth/`; failed QC samples are kept under `hcp_synth_qc_fail/` for deb
 - **Deformation mix** (same ratios in every split): 5% none, 20% rigid, 25% affine, 25%
   elastic, 25% affine+elastic (`affine_elastic`).
 
-Manifest: `datasets/hcp_synth/split_manifest.json` (includes per-class/tier counts and
+Manifest: `datasets/synth-data/torchio/hcp/split_manifest.json` (includes per-class/tier counts and
 `deformation_stats` with ‖u‖ summaries for passed samples).
 
 ### Deformation classes and file nomenclature
@@ -134,7 +134,7 @@ affine_elastic →  composite (global + local), common in real registration
 | `non_rigid` | `_nr` | `elastic` / `_ela` |
 | `affine_rigid_plus_non_rigid` | `_ar` | `affine_elastic` / `_aela` |
 
-Constants in `experiments/unigrad-synth/create_synth_data.py`: `DEFORMATION_RATIOS`,
+Constants in `experiments/synth-data-gen/torchio/create_synth_data.py`: `DEFORMATION_RATIOS`,
 `DEFORMATION_SUFFIX`.
 
 **QC visualization** (`visualize_synth_data.py`, default `--selection random`): rows are one example
@@ -254,8 +254,8 @@ Per-class interior floors (voxels):
 | `elastic` | 1.5 | 0.5 |
 | `affine_elastic` | 3.0 | 1.0 |
 
-Failed samples after all attempts are saved to `datasets/hcp_synth_qc_fail/{split}/` with
-`qc_passed=False` (not in the training set). List: `datasets/hcp_synth_qc_fail/qc_flagged_paths.txt`.
+Failed samples after all attempts are saved to `datasets/synth-data/torchio/hcp_qc_fail/{split}/` with
+`qc_passed=False` (not in the training set). List: `datasets/synth-data/torchio/hcp_qc_fail/qc_flagged_paths.txt`.
 
 ### Padding artifact (moving display)
 
@@ -276,9 +276,9 @@ artifact, not missing HCP data. Training NPZ keeps this convention; use `mask` (
 ### Example commands
 
 ```bash
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --qc-fail-path datasets/hcp_synth_qc_fail --workers 8
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --max-subjects 30 --workers 4
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth --split Train --save-path assets/images/unigrad-synth/hcp/hcp_synth_random3.png --mask-moving --no-show
+python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp --qc-fail-path datasets/synth-data/torchio/hcp_qc_fail --workers 8
+python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp --max-subjects 30 --workers 4
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --split Train --save-path assets/images/synth-data/torchio/hcp/hcp_synth_random3.png --mask-moving --no-show
 ```
 
 ### Planned next steps (HCP branch)
@@ -353,12 +353,12 @@ python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp
 
 | File | Role |
 | --- | --- |
-| `experiments/unigrad-synth/create_synth_data.py` | Phase I — HCP 3D synth NPZ |
-| `experiments/unigrad-synth/create_unigrad_synth_data.py` | Phase II fivers (IXI 2D) |
-| `experiments/unigrad-synth/modify_synth_data.py` | Triplet post-processing (IXI 2D) |
-| `experiments/unigrad-synth/visualize_synth_data.py` | Triplet QC |
-| `experiments/unigrad-synth/visualize_unigrad_data.py` | Fiver QC |
-| `experiments/unigrad-synth/visualize_hcp_data.py` | HCP T1w QC |
+| `experiments/synth-data-gen/torchio/create_synth_data.py` | Phase I — HCP 3D synth NPZ |
+| `experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py` | Phase II fivers (IXI 2D) |
+| `experiments/synth-data-gen/torchio/modify_synth_data.py` | Triplet post-processing (IXI 2D) |
+| `experiments/synth-data-gen/torchio/visualize_synth_data.py` | Triplet QC |
+| `experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py` | Fiver QC |
+| `experiments/synth-data-gen/torchio/visualize_hcp_data.py` | HCP T1w QC |
 | `experiments/regression/unigrad-synth/train_unigrad_synth_unet.py` | Train 2D U-Net |
 | `experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py` | Eval + figures |
 | `scripts/download_hcp.sh` | HCP S3 download |

@@ -33,7 +33,7 @@ quantification** when dense GT is unavailable.
    IXI 2D TorchIO              IXI 3D IO budget              HCP T1w 3D
    phi_true known              phi_predio ≈ GT               native volumes
           │                           │                           │
-   experiments/unigrad-synth/   experiments/unigrad-io/      datasets/hcp/
+   experiments/synth-data-gen/torchio/   experiments/error-map-gen/unigrad-io/      datasets/hcp/
 ```
 
 | Track | Dim | Moving / fixed | GT displacement | Error map |
@@ -75,7 +75,7 @@ HCP T1w NIfTI (LAS, native space)
       ↓
 TorchIO warp + identity-grid u      ← create_synth_data.py
       ↓
-source, moving (z-scored), u, mask  → datasets/hcp_synth/
+source, moving (z-scored), u, mask  → datasets/synth-data/torchio/hcp/
       ↓
 (planned) UniGradICON + error-map U-Net
 ```
@@ -132,7 +132,7 @@ Non-integer φ(x) requires **interpolation** (trilinear for MRI intensity; neare
 
 This pipeline generates synthetic non-rigid registration pairs by passing a 3D volume through random
 spatial transformations while tracking the underlying geometric displacement. Implementation:
-`experiments/unigrad-synth/create_synth_data.py`. See also `docs/unigrad-synth-experiment.md`.
+`experiments/synth-data-gen/torchio/create_synth_data.py`. See also `docs/unigrad-synth-experiment.md`.
 
 ### 1. The implicit transformation pipeline
 
@@ -300,7 +300,7 @@ The network does **not** predict φ directly. It predicts **error_map** (or its 
 | **IO** | Extra gradient steps on the pair → `phi_predio`, lower LNCC / better alignment |
 | **Error map** | Measures **how much IO improved** over zero-shot (per voxel) |
 
-IO iteration count is chosen via `sweep_io_iterations.py` before building `datasets/IXI_unigrad_io/`.
+IO iteration count is chosen via `sweep_io_iterations.py` before building `datasets/error-map/unigrad-io/ixi/`.
 
 ---
 
@@ -343,9 +343,9 @@ classes and file nomenclature.
 
 | File | Role |
 | --- | --- |
-| `experiments/unigrad-synth/create_synth_data.py` | HCP 3D synth NPZ (Phase I) |
-| `experiments/unigrad-synth/create_unigrad_synth_data.py` | Phase II fivers |
-| `experiments/unigrad-io/create_unigrad_io_data.py` | Phase II IO volumes |
+| `experiments/synth-data-gen/torchio/create_synth_data.py` | HCP 3D synth NPZ (Phase I) |
+| `experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py` | Phase II fivers |
+| `experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py` | Phase II IO volumes |
 | `experiments/regression/unigrad-synth/` | 2D error-map U-Net |
 | `experiments/regression/unigrad-io/` | 3D error-map U-Net |
 | `docs/hcp-dataset.md` | HCP download and layout |

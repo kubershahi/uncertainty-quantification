@@ -254,7 +254,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-dir",
         "--input-dir",
         type=Path,
-        default=Path("./data/IXI_2D_unigrad_synth_fiver"),
+        default=Path("./datasets/error-map/unigrad-synth/ixi_2d_fiver"),
         dest="data_dir",
         help="Root with Train/Val/Test/Atlas subfolders.",
     )

@@ -23,9 +23,9 @@ Per-subject NPZ keys
 
 Examples (from repo root)::
 
-python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/IXI_unigrad_io/
+python experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/error-map/unigrad-io/ixi/
 
-python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/IXI_unigrad_io/ --splits Val --max-per-split 2
+python experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/error-map/unigrad-io/ixi/ --splits Val --max-per-split 2
 """
 
 from __future__ import annotations
@@ -358,8 +358,8 @@ def run_atlas_io_generation(
 def parse_args() -> argparse.Namespace:
     ex = """
 Examples:
-python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/IXI_unigrad_io/
-python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/IXI_unigrad_io/ --splits Train --max-per-split 3
+python experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/error-map/unigrad-io/ixi/
+python experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --output-path datasets/error-map/unigrad-io/ixi/ --splits Train --max-per-split 3
 """.strip()
     p = argparse.ArgumentParser(
         description="IXI 3D volume UniGradICON IO data: one .npz per subject .pkl.",
@@ -381,7 +381,7 @@ python experiments/unigrad-io/create_unigrad_io_data.py --ixi-root datasets/IXI 
     p.add_argument(
         "--output-path",
         type=Path,
-        default=Path("./datasets/IXI_unigrad_io"),
+        default=Path("./datasets/error-map/unigrad-io/ixi"),
         help="Output root; mirrors Train/Val/Test with <subject_stem>.npz per volume.",
     )
     p.add_argument(

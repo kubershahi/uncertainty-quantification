@@ -8,16 +8,16 @@ Artifact roots (this repo):
 
 | Role | Path |
 | --- | --- |
-| IO NPZ dataset | `datasets/IXI_unigrad_io/` |
+| IO NPZ dataset | `datasets/error-map/unigrad-io/ixi/` |
 | Train / eval scripts | `experiments/regression/unigrad-io/` |
-| Run outputs | `assets/runs/unigrad-io/error_unet_run{N}/` |
-| Sweep figures | `assets/images/unigrad-io/3d/` |
+| Run outputs | `assets/runs/regression/unigrad-io/3d/error_unet_run{N}/` |
+| Sweep figures | `assets/images/error-map/unigrad-io/3d/` |
 
 ---
 
 ## Pipeline
 
-1. **Data** — `experiments/unigrad-io/create_unigrad_io_data.py` writes shared
+1. **Data** — `experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py` writes shared
    `atlas_valid_mask.npz` and per-subject `Train|Val|Test/*.npz` with `source`,
    `phi_pred`, `phi_predio`, `error_map`, `io_iterations`.
 2. **Train** — `train_unigrad_io_unet.py`: 5-channel 3D U-Net → scalar `error_map`
@@ -56,13 +56,13 @@ still load for old runs).
 MSE baseline (run2-style):
 
 ```bash
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 2 --loss mse --val-every 3 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run2 --out-dir assets/runs/unigrad-io/error_unet_run2
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/error-map/unigrad-io/ixi --epochs 50 --batch-size 2 --loss mse --val-every 3 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run2 --out-dir assets/runs/regression/unigrad-io/3d/error_unet_run2
 ```
 
 **run4b** (L1 re-run: meaningful early stop, val every 3):
 
 ```bash
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 60 --batch-size 2 --loss l1 --val-every 3 --early-stop-patience 8 --early-stop-min-delta 0.005 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run4b --out-dir assets/runs/unigrad-io/error_unet_run4b
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/error-map/unigrad-io/ixi --epochs 60 --batch-size 2 --loss l1 --val-every 3 --early-stop-patience 8 --early-stop-min-delta 0.005 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run4b --out-dir assets/runs/regression/unigrad-io/3d/error_unet_run4b
 ```
 
 Use **`--val-start-epoch N`** to override warmup fraction.
@@ -78,19 +78,19 @@ Default under **`--run-path`**:
 - `test_error_pred_random.png`, `test_error_pred_easy_normal_hard.png`
 
 ```bash
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4 --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/regression/unigrad-io/3d/error_unet_run4 --eval-dir datasets/error-map/unigrad-io/ixi --no-show
 ```
 
 Curves only (no GPU Test pass):
 
 ```bash
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4 --curves-only --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/regression/unigrad-io/3d/error_unet_run4 --curves-only --no-show
 ```
 
 Legacy runs (old `metrics.csv` without val warmup): hide early val spikes on the plot:
 
 ```bash
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run3 --curves-only --no-show --val-plot-min-epoch 5
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/regression/unigrad-io/3d/error_unet_run3 --curves-only --no-show --val-plot-min-epoch 5
 ```
 
 ---
@@ -118,7 +118,7 @@ implement only after run4b QC.
 
 ## Error-map U-Net runs (1–4)
 
-Summary of completed runs under `assets/runs/unigrad-io/`. Test metrics are **masked**
+Summary of completed runs under `assets/runs/regression/unigrad-io/3d/`. Test metrics are **masked**
 over the full Test split (115 volumes). QC figures are qualitative (one axial slice;
 shared color scale can make predictions look “dim” vs peaky GT).
 
@@ -168,7 +168,7 @@ shared color scale can make predictions look “dim” vs peaky GT).
 
 ### run4 — `error_unet_run4` (L1 + early stop)
 
-Artifacts: `assets/runs/unigrad-io/error_unet_run4/` (`training_curves.png`,
+Artifacts: `assets/runs/regression/unigrad-io/3d/error_unet_run4/` (`training_curves.png`,
 `test_error_pred_random.png`, `test_error_pred_easy_normal_hard.png`, `test_metrics.json`).
 
 - **Config**: max 60 epochs, batch 2, **`--loss l1`**, TV 0, `val_every=1`, val from epoch 6,
@@ -204,7 +204,7 @@ keeping the same early-stop settings. Run4 already used min-delta early stop suc
 | `--early-stop-patience` | **`8`** | Same as run4 |
 
 ```bash
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4 --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/regression/unigrad-io/3d/error_unet_run4 --eval-dir datasets/error-map/unigrad-io/ixi --no-show
 ```
 
 ---
@@ -226,11 +226,11 @@ Keep inputs/target/mask pipeline unchanged.
 ## IO iteration sweep (upstream)
 
 Before fixing IO budget for `create_unigrad_io_data.py`, use
-`experiments/unigrad-io/sweep_io_iterations.py` to pick iteration count `N` (LNCC elbow,
+`experiments/error-map-gen/unigrad-io/sweep_io_iterations.py` to pick iteration count `N` (LNCC elbow,
 low `neg_jac_pct`, sensible `error_map` anatomy). Defaults and figure reading:
 
 ```bash
-python experiments/unigrad-io/sweep_io_iterations.py --mode 3d-pkl --split Train --num-subjects 5 --save-path assets/images/unigrad-io/3d/sweep_io.png --no-show
+python experiments/error-map-gen/unigrad-io/sweep_io_iterations.py --mode 3d-pkl --split Train --num-subjects 5 --save-path assets/images/error-map/unigrad-io/3d/sweep_io.png --no-show
 ```
 
 Outputs: `sweep_io_<subject>_images.png`, `_curves.png`, `_metrics.csv` beside `--save-path`.
@@ -244,8 +244,8 @@ see `reports/uniGradICON.pdf` Eq. (1) and `docs/gpu-memory-optimizations.md`.
 
 | File | Role |
 | --- | --- |
-| `experiments/unigrad-io/create_unigrad_io_data.py` | Build `datasets/IXI_unigrad_io/` |
+| `experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py` | Build `datasets/error-map/unigrad-io/ixi/` |
 | `experiments/regression/unigrad-io/train_unigrad_io_unet.py` | Train error-map U-Net |
 | `experiments/regression/unigrad-io/eval_unigrad_io_unet.py` | Curves + Test QC |
-| `experiments/unigrad-io/visualize_unigrad_io_data.py` | NPZ QC |
+| `experiments/error-map-gen/unigrad-io/visualize_unigrad_io_data.py` | NPZ QC |
 | `docs/unigrad-io-error-unet-next-steps.md` | Ablations and diagnostics checklist |

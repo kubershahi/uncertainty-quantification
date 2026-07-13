@@ -8,7 +8,7 @@ Data (``create_unigrad_synth_data.py``), one ``*_fiver.npz`` per slice under ``T
 Model input (4 channels): normalized image, warped, ``phi_pred / phi_scale``.
 
 Example:
-python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir data/IXI_2D_unigrad_synth_fiver --batch-size 8 --out-dir assets/runs/2d/unigrad-synth/error_unet_run1
+python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/ixi_2d_fiver --batch-size 8 --out-dir assets/runs/regression/unigrad-synth/2d/error_unet_run1
 """
 
 from __future__ import annotations
@@ -338,7 +338,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("data/IXI_2D_unigrad_synth_fiver"),
+        default=Path("datasets/error-map/unigrad-synth/ixi_2d_fiver"),
         help="Root with Train/Val/Test/*_fiver.npz.",
     )
     p.add_argument("--train-split", type=str, default="Train")
@@ -356,7 +356,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("assets/runs/2d/unigrad-synth/error_unet_run1"),
+        default=Path("assets/runs/regression/unigrad-synth/2d/error_unet_run1"),
     )
     p.add_argument("--no-amp", action="store_true")
     p.add_argument("--smooth-weight", type=float, default=0.05)

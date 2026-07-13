@@ -1,8 +1,8 @@
 # HCP dataset — role, download, layout, and QC
 
 Notes for **Human Connectome Project (HCP) Young Adult (S1200)** structural T1w data used in this
-repo. HCP is the **real-data** track alongside **IXI 2D synth** (`experiments/unigrad-synth/`) and
-**IXI 3D IO** (`experiments/unigrad-io/`). See `docs/registration-concepts.md` for registration
+repo. HCP is the **real-data** track alongside **IXI 2D synth** (`experiments/synth-data-gen/torchio/`) and
+**IXI 3D IO** (`experiments/error-map-gen/unigrad-io/`). See `docs/registration-concepts.md` for registration
 vocabulary and `docs/unigrad-synth-experiment.md` for the IXI synth pipeline.
 
 ---
@@ -123,7 +123,7 @@ datasets/hcp/
 
 ## QC visualization
 
-**Script:** `experiments/unigrad-synth/visualize_hcp_data.py`
+**Script:** `experiments/synth-data-gen/torchio/visualize_hcp_data.py`
 
 Layout: **columns = subjects**, **rows = modality** (T1 top, mask middle; optional segmentation row).
 
@@ -132,16 +132,16 @@ keep this native voxel order. `visualize_hcp_data.py` applies `np.rot90` for **r
 display only (image-left = R, image-right = L); see figure subtitle.
 
 ```bash
-python experiments/unigrad-synth/visualize_hcp_data.py --data-dir datasets/hcp --num-samples 3 --save-path assets/images/unigrad-synth/hcp/hcp_random3.png --no-show
-python experiments/unigrad-synth/visualize_hcp_data.py --data-dir datasets/hcp --num-samples 3 --show-segmentation --save-path assets/images/unigrad-synth/hcp/hcp_random3_seg.png --no-show
+python experiments/synth-data-gen/torchio/visualize_hcp_data.py --data-dir datasets/hcp --num-samples 3 --save-path assets/images/synth-data/torchio/hcp/hcp_random3.png --no-show
+python experiments/synth-data-gen/torchio/visualize_hcp_data.py --data-dir datasets/hcp --num-samples 3 --show-segmentation --save-path assets/images/synth-data/torchio/hcp/hcp_random3_seg.png --no-show
 ```
 
 ---
 
 ## HCP 3D synthetic data (Phase I)
 
-**Script:** `experiments/unigrad-synth/create_synth_data.py`  
-**Output:** `datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<suffix>.npz`
+**Script:** `experiments/synth-data-gen/torchio/create_synth_data.py`  
+**Output:** `datasets/synth-data/torchio/hcp/{Train,Val,Test}/<subject_id>_<suffix>.npz`
 
 One warp per subject; balanced deformation classes (`none`, `rigid`, `affine`, `elastic`,
 `affine_elastic`); filenames `<subject_id>_<suffix>.npz` with suffixes `none`, `rig`, `aff`, `ela`,
@@ -151,7 +151,7 @@ One warp per subject; balanced deformation classes (`none`, `rigid`, `affine`, `
 experiment config: `docs/unigrad-synth-experiment.md`.
 
 ```bash
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --workers 8
+python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp --workers 8
 ```
 
 ---
@@ -171,8 +171,8 @@ python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp 
 | --- | --- |
 | `scripts/download_hcp.sh` | S3 download to `datasets/hcp/` |
 | `deploy/nautilus/scripts/hcp_subjects_test10.txt` | 10-subject smoke list |
-| `experiments/unigrad-synth/create_synth_data.py` | HCP 3D synth NPZ generation |
+| `experiments/synth-data-gen/torchio/create_synth_data.py` | HCP 3D synth NPZ generation |
 | `docs/registration-concepts.md` | Registration / displacement / error-map concepts |
-| `experiments/unigrad-synth/visualize_hcp_data.py` | Random-sample QC figure |
+| `experiments/synth-data-gen/torchio/visualize_hcp_data.py` | Random-sample QC figure |
 | `docs/unigrad-synth-experiment.md` | HCP synth pipeline detail |
 | `docs/unigrad-io-experiment.md` | IXI 3D IO + error-map U-Net track |

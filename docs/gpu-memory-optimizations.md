@@ -1,6 +1,6 @@
 # GPU memory optimizations for UniGradICON instance optimization
 
-Notes for keeping **`experiments/unigrad-io/create_unigrad_io_data.py`** IO inside VRAM on ~11 GiB GPUs without changing the UniGradICON protocol (Adam `lr=2e-5`, LNCC, 50 steps).
+Notes for keeping **`experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py`** IO inside VRAM on ~11 GiB GPUs without changing the UniGradICON protocol (Adam `lr=2e-5`, LNCC, 50 steps).
 
 ## TL;DR
 
@@ -14,7 +14,7 @@ Notes for keeping **`experiments/unigrad-io/create_unigrad_io_data.py`** IO insi
 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | Possible small allocator overhead | Fixes fragmentation when many different allocation sizes appear | Workloads with large, varied tensors (3D vision, transformers with dynamic shapes) |
 
 Implementation lives in
-[`experiments/unigrad-io/create_unigrad_io_data.py`](../experiments/unigrad-io/create_unigrad_io_data.py),
+[`experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py`](../experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py),
 specifically `run_io_then_extract_phi_px` and the inner loop of
 `run_atlas_io_generation`.
 

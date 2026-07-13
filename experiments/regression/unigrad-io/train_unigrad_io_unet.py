@@ -32,10 +32,10 @@ Speed (full volumes are expensive; default is one 3D U-Net step per subject per 
 True multi-GPU needs DDP (not implemented); one epoch ≈ 403 train + 58 val forward passes at batch 1.
 
 Example (MSE, default):
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 50 --batch-size 2 --out-dir assets/runs/unigrad-io/error_unet_run2
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/error-map/unigrad-io/ixi --epochs 50 --batch-size 2 --out-dir assets/runs/regression/unigrad-io/3d/error_unet_run2
 
 Example (L1 re-run with early stop, run4b):
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/IXI_unigrad_io --epochs 60 --batch-size 2 --loss l1 --val-every 3 --early-stop-patience 8 --early-stop-min-delta 0.005 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run4b --out-dir assets/runs/unigrad-io/error_unet_run4b
+python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/error-map/unigrad-io/ixi --epochs 60 --batch-size 2 --loss l1 --val-every 3 --early-stop-patience 8 --early-stop-min-delta 0.005 --compile --wandb --wandb-project unc-quan --wandb-run-name error_unet_run4b --out-dir assets/runs/regression/unigrad-io/3d/error_unet_run4b
 
 """
 
@@ -683,7 +683,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("datasets/IXI_unigrad_io"),
+        default=Path("datasets/error-map/unigrad-io/ixi"),
         help="Root with Train/Val/Test/*.npz from create_unigrad_io_data.py.",
     )
     p.add_argument("--train-split", type=str, default="Train")
@@ -742,7 +742,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("assets/runs/3d/unigrad-io/error_unet_run1"),
+        default=Path("assets/runs/regression/unigrad-io/3d/error_unet_run1"),
     )
     p.add_argument("--no-amp", action="store_true")
     p.add_argument(
