@@ -7,23 +7,23 @@ Input layout (per subject):
     - brainmask_fs.nii.gz
 
 Output layout:
-  datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<suffix>.npz  (qc_passed=True)
-  datasets/hcp_synth_qc_fail/{Train,Val,Test}/...                 (qc_passed=False)
+  datasets/hcp_synth/{Train,Val,Test}/<subject_id>_<suffix>.npz
+  Dry run: datasets/hcp_synth_dryrun3/<subject_id>_<class>[_NN].npz (flat)
 
 Each output npz contains:
   - source  : fixed/source image (float32 volume, masked z-score from brain mask)
   - moving  : deformed image (float32 volume, same normalization as source)
-  - u       : displacement field (float32, shape (3, X, Y, Z), voxel units)
+  - u       : displacement field (float32, shape (3, X, Y, Z), voxel units);
+              OOB set to 0 via identity_grid_mask, then ‖u‖ clipped at p99
   - source_mask    : fixed brain mask (bool; for visualization only)
   - moving_mask    : source_mask warped with the same transform (bool; viz only)
   - identity_grid_mask : in-bounds mask for the displacement field (bool; viz only)
   - source_affine
   - deformation_class : one of {none, rigid, affine, elastic, affine_elastic}
-  - u_max_interior, u_mean_interior  (full-volume max/mean ‖u‖; names kept for compat)
-  - subject_id, qc_passed
+  - subject_id
 
 Note: ``source_mask`` / ``moving_mask`` / ``identity_grid_mask`` are written for
-visualization only. They are not mixed together and are not used for ‖u‖ stats/QC.
+visualization only. They are not mixed together and are not used for ‖u‖ stats.
 
 TorchIO transforms run in physical space (mm) using the NIfTI affine; ``u`` is recovered
 in voxel index space via the identity-grid trick (backward warp).
@@ -39,10 +39,10 @@ Modes:
 
 Examples:
 # Full cohort
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --qc-fail-path datasets/hcp_synth_qc_fail --workers 16
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --workers 16
 python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --max-subjects 30 --workers 16
 # Dry run (25 samples)
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth_dryrun2 --dry-run 5 --no-qc --workers 16
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth_dryrun3 --dry-run 5 --workers 16
 """
 
 from __future__ import annotations
@@ -76,22 +76,20 @@ VAL_FRAC = 0.15
 # Test gets the remainder
 
 # Deformation ratios (must sum to 1.0)
-DEFORMATION_RATIOS = {
+DEFORM_RATIOS = {
     "none": 0.05,
     "rigid": 0.20,
     "affine": 0.25,
     "elastic": 0.25,
     "affine_elastic": 0.25,
 }
-DEFORMATION_SUFFIX = {
+DEFORM_SUFFIX = {
     "none": "none",
     "rigid": "rig",
     "affine": "aff",
     "elastic": "ela",
     "affine_elastic": "aela",
 }
-
-DEFAULT_QC_FAIL_ROOT = "datasets/hcp_synth_qc_fail"
 
 DRY_RUN_CLASSES = ("none", "rigid", "affine", "elastic", "affine_elastic")
 
@@ -106,29 +104,11 @@ PARAM_ELASTIC_IN_AFFINE = {"max_disp_mm": 8.0}
 
 ELASTIC_NUM_CONTROL_POINTS = 7
 
-# QC checks — max caps (all classes)
-INTERIOR_MARGIN = 10
-MAX_U_INTERIOR_VOX = 25.0
-MAX_U_GLOBAL_VOX = 60.0
-MIN_MOVING_MEAN_RATIO = 0.05
-MAX_TRANSFORM_ATTEMPTS = 20
-MAX_U_NONE_VOX = 0.5
+# After identity_grid_mask zeros OOB voxels, clip ‖u‖ outliers at this percentile.
+U_CLIP_PERCENTILE = 99.0
 
-# Per-class minimum interior ‖u‖ (voxels); none uses MAX_U_NONE_VOX instead
-MIN_U_MAX_INTERIOR_BY_CLASS: dict[str, float | None] = {
-    "none": None,
-    "rigid": 1.5,
-    "affine": 2.0,
-    "elastic": 1.5,
-    "affine_elastic": 3.0,
-}
-MIN_U_MEAN_INTERIOR_BY_CLASS: dict[str, float | None] = {
-    "none": None,
-    "rigid": 0.5,
-    "affine": 0.7,
-    "elastic": 0.5,
-    "affine_elastic": 1.0,
-}
+# Kept for legacy 2D helpers that import this module.
+INTERIOR_MARGIN = 10
 
 
 @dataclass(frozen=True)
@@ -146,9 +126,7 @@ class Task:
     t1_path: str
     mask_path: str
     out_path: str
-    qc_fail_out_path: str
     seed: int
-    skip_qc: bool = False
 
 
 @dataclass(frozen=True)
@@ -156,9 +134,6 @@ class SampleStats:
     subject_id: str
     split: str
     deformation_class: str
-    qc_passed: bool
-    u_max_interior: float
-    u_mean_interior: float
     rel_path: str
 
 
@@ -177,55 +152,29 @@ def interior_valid_mask(shape_xyz: tuple[int, int, int], margin: int) -> np.ndar
     return mask
 
 
-def u_volume_stats(u: np.ndarray) -> tuple[float, float]:
-    """Full-volume max and mean ‖u‖ (all voxels; no mask)."""
-    mag = displacement_magnitude(u.astype(np.float64))
-    return float(np.max(mag)), float(np.mean(mag))
+def clip_u_at_percentile(u: np.ndarray, percentile: float = U_CLIP_PERCENTILE) -> np.ndarray:
+    """
+    Scale vectors with ‖u‖ above the given percentile down to that threshold.
 
-
-def passes_checks(
-    u: np.ndarray,
-    source: np.ndarray,
-    moving: np.ndarray,
-    brain_mask: np.ndarray,
-    deformation_class: str,
-    max_u_interior_vox: float | None,
-    max_u_global_vox: float | None,
-    min_moving_mean_ratio: float | None,
-) -> bool:
-    """QC on full-volume ‖u‖; brain_mask only for intensity mean-ratio check."""
-    mag = displacement_magnitude(u.astype(np.float64))
-    full_max = float(np.max(mag))
-    full_mean = float(np.mean(mag))
-
-    if deformation_class == "none":
-        if full_max >= MAX_U_NONE_VOX:
-            return False
-    else:
-        min_max = MIN_U_MAX_INTERIOR_BY_CLASS.get(deformation_class)
-        min_mean = MIN_U_MEAN_INTERIOR_BY_CLASS.get(deformation_class)
-        if min_max is not None and full_max < min_max:
-            return False
-        if min_mean is not None and full_mean < min_mean:
-            return False
-
-    if max_u_global_vox is not None and full_max > max_u_global_vox:
-        return False
-
-    if max_u_interior_vox is not None and full_max > max_u_interior_vox:
-        return False
-
-    if min_moving_mean_ratio is not None:
-        # Intensity sanity only (FreeSurfer brainmask); not mixed with NPZ viz masks.
-        src_region = source[brain_mask > 0.5] if np.any(brain_mask > 0.5) else source
-        mov_region = moving[brain_mask > 0.5] if np.any(brain_mask > 0.5) else moving
-        src_mean = float(np.mean(src_region))
-        mov_mean = float(np.mean(mov_region))
-        floor = max(1e-6, src_mean * min_moving_mean_ratio)
-        if mov_mean < floor:
-            return False
-
-    return True
+    Call after identity_grid_mask has zeroed OOB voxels. Percentile is computed
+    over nonzero ‖u‖ only (zeros from OOB masking would otherwise collapse p99).
+    No lower-tail / p1 clip.
+    """
+    out = u.astype(np.float32, copy=True)
+    mag = displacement_magnitude(out.astype(np.float64))
+    positive = mag > 0.0
+    if not np.any(positive):
+        return out
+    thresh = float(np.percentile(mag[positive], percentile))
+    if thresh <= 0.0 or not np.isfinite(thresh):
+        return out
+    over = mag > thresh
+    if not np.any(over):
+        return out
+    scale = np.ones_like(mag, dtype=np.float64)
+    scale[over] = thresh / mag[over]
+    out *= scale.astype(np.float32)
+    return out
 
 
 def dry_run_filename(subject_id: str, deformation_class: str, replicate: int) -> str:
@@ -368,14 +317,7 @@ def _build_identity_grid(shape_xyz: tuple[int, int, int]) -> torch.Tensor:
     return torch.stack([cx, cy, cz], dim=0).float()
 
 
-def process_one_subject(
-    task: Task,
-    *,
-    max_u_interior_vox: float | None,
-    max_u_global_vox: float | None,
-    min_moving_mean_ratio: float | None,
-    pin_threads: bool,
-) -> SampleStats:
+def process_one_subject(task: Task, *, pin_threads: bool) -> SampleStats:
     if pin_threads:
         _pin_worker_cpu_threads()
 
@@ -384,69 +326,38 @@ def process_one_subject(
     shape_xyz = (int(source.shape[0]), int(source.shape[1]), int(source.shape[2]))
     identity_grid = _build_identity_grid(shape_xyz)
     transform = build_transform(task.deformation_class)
-
-    moving: np.ndarray | None = None
-    moving_mask_bin: np.ndarray | None = None
-    u: np.ndarray | None = None
-    qc_passed = task.skip_qc
-    n_attempts = 1 if task.skip_qc else MAX_TRANSFORM_ATTEMPTS
     source_mask_bin = mask > 0.5
 
-    identity_grid_mask_bin: np.ndarray | None = None
-
-    for attempt in range(n_attempts):
-        torch.manual_seed((task.seed + attempt * 100003) % (2**31))
-        img_tensor = torch.from_numpy(source).unsqueeze(0).float()
-        mask_tensor = torch.from_numpy(source_mask_bin.astype(np.float32)).unsqueeze(0)
-        ones_tensor = torch.ones_like(img_tensor, dtype=torch.float32)
-        affine = source_affine.astype(np.float64)
-        subject = tio.Subject(
-            mri=tio.ScalarImage(tensor=img_tensor, affine=affine),
-            grid=tio.ScalarImage(tensor=identity_grid.clone(), affine=affine),
-            brain_mask=tio.LabelMap(tensor=mask_tensor, affine=affine),
-            valid_mask=tio.LabelMap(tensor=ones_tensor, affine=affine),
-        )
-        transformed = transform(subject)
-        cand_moving = transformed.mri.data.squeeze(0).numpy()
-        cand_moving_mask = transformed.brain_mask.data.squeeze(0).numpy() > 0.5
-        cand_valid_mask = transformed.valid_mask.data.squeeze(0).numpy()
-        cand_u = (
-            transformed.grid.data.squeeze(0).numpy() - identity_grid.numpy()
-        ).astype(np.float32)
-        identity_grid_mask_bin = cand_valid_mask > 0.99
-        invalid = ~identity_grid_mask_bin
-        cand_u[:, invalid] = 0.0
-
-        moving, moving_mask_bin, u = cand_moving, cand_moving_mask, cand_u
-
-        if task.skip_qc or passes_checks(
-            cand_u,
-            source,
-            cand_moving,
-            mask,
-            task.deformation_class,
-            max_u_interior_vox=max_u_interior_vox,
-            max_u_global_vox=max_u_global_vox,
-            min_moving_mean_ratio=min_moving_mean_ratio,
-        ):
-            qc_passed = True
-            break
-
-    assert (
-        moving is not None
-        and moving_mask_bin is not None
-        and identity_grid_mask_bin is not None
-        and u is not None
+    torch.manual_seed(task.seed % (2**31))
+    img_tensor = torch.from_numpy(source).unsqueeze(0).float()
+    mask_tensor = torch.from_numpy(source_mask_bin.astype(np.float32)).unsqueeze(0)
+    ones_tensor = torch.ones_like(img_tensor, dtype=torch.float32)
+    affine = source_affine.astype(np.float64)
+    subject = tio.Subject(
+        mri=tio.ScalarImage(tensor=img_tensor, affine=affine),
+        grid=tio.ScalarImage(tensor=identity_grid.clone(), affine=affine),
+        brain_mask=tio.LabelMap(tensor=mask_tensor, affine=affine),
+        valid_mask=tio.LabelMap(tensor=ones_tensor, affine=affine),
     )
-    u_max_int, u_mean_int = u_volume_stats(u)
+    transformed = transform(subject)
+    moving = transformed.mri.data.squeeze(0).numpy()
+    moving_mask_bin = transformed.brain_mask.data.squeeze(0).numpy() > 0.5
+    cand_valid_mask = transformed.valid_mask.data.squeeze(0).numpy()
+    u = (
+        transformed.grid.data.squeeze(0).numpy() - identity_grid.numpy()
+    ).astype(np.float32)
+    # identity_grid_mask False → OOB; zero those displacements (‖u‖ = 0).
+    identity_grid_mask_bin = cand_valid_mask > 0.99
+    u[:, ~identity_grid_mask_bin] = 0.0
+    u = clip_u_at_percentile(u, U_CLIP_PERCENTILE)
+
     source_z, moving_z, _, _ = zscore_brain_pair(
         source, moving, source_mask_bin, moving_mask_bin
     )
 
-    save_path = task.out_path if (qc_passed or task.skip_qc) else task.qc_fail_out_path
-    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(task.out_path).parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
-        save_path,
+        task.out_path,
         source=source_z,
         moving=moving_z,
         u=u.astype(np.float32),
@@ -455,65 +366,29 @@ def process_one_subject(
         identity_grid_mask=identity_grid_mask_bin.astype(bool),
         source_affine=source_affine.astype(np.float32),
         deformation_class=np.array(task.deformation_class),
-        u_max_interior=np.float32(u_max_int),
-        u_mean_interior=np.float32(u_mean_int),
         subject_id=np.array(task.subject_id),
-        qc_passed=qc_passed,
     )
 
-    rel = Path(save_path).name if not task.split else f"{task.split}/{Path(save_path).name}"
+    rel = Path(task.out_path).name if not task.split else f"{task.split}/{Path(task.out_path).name}"
     return SampleStats(
         subject_id=task.subject_id,
         split=task.split,
         deformation_class=task.deformation_class,
-        qc_passed=qc_passed,
-        u_max_interior=u_max_int,
-        u_mean_interior=u_mean_int,
         rel_path=rel,
-    )
-
-
-def _qc_fail_warning(stats: SampleStats) -> str:
-    cls = stats.deformation_class
-    min_max = MIN_U_MAX_INTERIOR_BY_CLASS.get(cls)
-    min_mean = MIN_U_MEAN_INTERIOR_BY_CLASS.get(cls)
-    return (
-        f"QC_FAIL (saved to qc_fail): {stats.rel_path} | "
-        f"class={cls} | "
-        f"u_max_int={stats.u_max_interior:.2f} u_mean_int={stats.u_mean_interior:.2f} | "
-        f"(floors: max≥{min_max}, mean≥{min_mean}; caps: interior≤{MAX_U_INTERIOR_VOX}, "
-        f"global≤{MAX_U_GLOBAL_VOX})"
     )
 
 
 def _worker_create_sample(task: Task) -> SampleStats:
     _pin_worker_cpu_threads()
-    return process_one_subject(
-        task,
-        max_u_interior_vox=MAX_U_INTERIOR_VOX,
-        max_u_global_vox=MAX_U_GLOBAL_VOX,
-        min_moving_mean_ratio=MIN_MOVING_MEAN_RATIO,
-        pin_threads=False,
-    )
+    return process_one_subject(task, pin_threads=False)
 
 
-def build_deformation_stats(samples: list[SampleStats]) -> dict[str, dict[str, float | int]]:
-    """Per-class counts and u_max_interior / u_mean_interior p50 summaries."""
-    buckets: dict[str, list[SampleStats]] = {}
+def build_deformation_stats(samples: list[SampleStats]) -> dict[str, dict[str, int]]:
+    """Per-class sample counts."""
+    buckets: dict[str, int] = {}
     for s in samples:
-        if not s.qc_passed:
-            continue
-        buckets.setdefault(s.deformation_class, []).append(s)
-    out: dict[str, dict[str, float | int]] = {}
-    for cls, items in sorted(buckets.items()):
-        max_vals = np.asarray([s.u_max_interior for s in items], dtype=np.float64)
-        mean_vals = np.asarray([s.u_mean_interior for s in items], dtype=np.float64)
-        out[cls] = {
-            "count": int(len(items)),
-            "u_max_p50": float(np.percentile(max_vals, 50)) if max_vals.size else 0.0,
-            "u_mean_p50": float(np.percentile(mean_vals, 50)) if mean_vals.size else 0.0,
-        }
-    return out
+        buckets[s.deformation_class] = buckets.get(s.deformation_class, 0) + 1
+    return {cls: {"count": n} for cls, n in sorted(buckets.items())}
 
 
 def stable_subject_hash(subject_id: str, seed: int) -> int:
@@ -548,9 +423,9 @@ def assign_deformation_classes(subject_ids: list[str], seed: int) -> dict[str, s
     rng = np.random.default_rng(seed)
     order = subject_ids.copy()
     rng.shuffle(order)
-    quotas = compute_quotas(len(order), DEFORMATION_RATIOS)
+    quotas = compute_quotas(len(order), DEFORM_RATIOS)
     cls_list: list[str] = []
-    for cls in DEFORMATION_RATIOS:
+    for cls in DEFORM_RATIOS:
         cls_list.extend([cls] * quotas[cls])
     if len(cls_list) < len(order):
         cls_list.extend(["affine"] * (len(order) - len(cls_list)))
@@ -563,7 +438,6 @@ def build_dry_run_tasks(
     *,
     replicates: int,
     base_seed: int,
-    skip_qc: bool,
 ) -> list[Task]:
     """Dry run: N samples per class; distinct subjects within each class when possible."""
     if len(subjects) < replicates:
@@ -573,9 +447,6 @@ def build_dry_run_tasks(
         )
     out_dir = out_root
     out_dir.mkdir(parents=True, exist_ok=True)
-    fail_dir = out_root / "_unused_qc_fail"
-    # Deterministic subject order; walk without replacement across the whole dry run
-    # so classes also get different subjects when enough subjects are available.
     order = sorted(
         subjects,
         key=lambda s: (stable_subject_hash(s.subject_id, base_seed), s.subject_id),
@@ -600,9 +471,7 @@ def build_dry_run_tasks(
                     t1_path=subj.t1_path,
                     mask_path=subj.mask_path,
                     out_path=str(out_dir / out_name),
-                    qc_fail_out_path=str(fail_dir / out_name),
                     seed=seed,
-                    skip_qc=skip_qc,
                 )
             )
             task_idx += 1
@@ -699,22 +568,16 @@ def create_synthetic_data(
     input_root: str,
     output_root: str,
     *,
-    qc_fail_root: str = DEFAULT_QC_FAIL_ROOT,
     workers: int | None = None,
     base_seed: int = 42,
     max_subjects: int | None = None,
-    skip_qc: bool = False,
     dry_run: bool = False,
     dry_run_replicates: int = 5,
 ) -> None:
     in_root = Path(input_root)
     out_root = Path(output_root)
-    fail_root = Path(qc_fail_root)
     out_root.mkdir(parents=True, exist_ok=True)
-    if not skip_qc:
-        fail_root.mkdir(parents=True, exist_ok=True)
     n_workers = max(1, workers if workers is not None else _default_parallel_workers())
-    flagged_rel_paths: list[str] = []
     all_stats: list[SampleStats] = []
 
     subjects = collect_hcp_subjects(in_root)
@@ -735,14 +598,12 @@ def create_synthetic_data(
             f"Params: rigid={PARAM_RIGID}, affine={PARAM_AFFINE}, "
             f"elastic={PARAM_ELASTIC}, affine_elastic_elastic={PARAM_ELASTIC_IN_AFFINE}"
         )
-        if skip_qc:
-            print("QC disabled (--no-qc): single random draw per task, all saved to output-path")
+        print(f"‖u‖ clip: p{U_CLIP_PERCENTILE:g} after identity_grid_mask OOB zeroing")
         tasks = build_dry_run_tasks(
             subjects,
             out_root,
             replicates=dry_run_replicates,
             base_seed=base_seed,
-            skip_qc=skip_qc,
         )
         split_summary: dict[str, dict[str, int]] = {}
         split_subjects = {"": subjects}
@@ -760,16 +621,13 @@ def create_synthetic_data(
                 seed=base_seed + stable_subject_hash(split, base_seed),
             )
             out_dir = out_root / split
-            fail_dir = fail_root / split
             out_dir.mkdir(parents=True, exist_ok=True)
-            fail_dir.mkdir(parents=True, exist_ok=True)
             c = Counter()
             for idx, e in enumerate(entries):
                 cls = sid_to_class[e.subject_id]
                 suf = DEFORM_SUFFIX[cls]
                 out_name = f"{e.subject_id}_{suf}.npz"
                 out_path = out_dir / out_name
-                fail_path = fail_dir / out_name
                 seed = (base_seed + stable_subject_hash(e.subject_id, base_seed) + idx * 100003) % (
                     2**31
                 )
@@ -781,9 +639,7 @@ def create_synthetic_data(
                         t1_path=e.t1_path,
                         mask_path=e.mask_path,
                         out_path=str(out_path),
-                        qc_fail_out_path=str(fail_path),
                         seed=seed,
-                        skip_qc=skip_qc,
                     )
                 )
                 c[cls] += 1
@@ -795,38 +651,21 @@ def create_synthetic_data(
 
     if n_workers <= 1:
         for t in tqdm(tasks, desc="Create HCP synth"):
-            stats = process_one_subject(
-                t,
-                max_u_interior_vox=MAX_U_INTERIOR_VOX,
-                max_u_global_vox=MAX_U_GLOBAL_VOX,
-                min_moving_mean_ratio=MIN_MOVING_MEAN_RATIO,
-                pin_threads=False,
-            )
-            all_stats.append(stats)
-            if not stats.qc_passed:
-                flagged_rel_paths.append(stats.rel_path)
-                tqdm.write(_qc_fail_warning(stats))
+            all_stats.append(process_one_subject(t, pin_threads=False))
     else:
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
             futs = [ex.submit(_worker_create_sample, t) for t in tasks]
             for fut in tqdm(as_completed(futs), total=len(futs), desc="Create HCP synth"):
-                stats = fut.result()
-                all_stats.append(stats)
-                if not stats.qc_passed:
-                    flagged_rel_paths.append(stats.rel_path)
-                    tqdm.write(_qc_fail_warning(stats))
+                all_stats.append(fut.result())
 
-    passed = sum(1 for s in all_stats if s.qc_passed)
-    failed = len(all_stats) - passed
     meta = {
         "input_root": str(in_root),
         "output_root": str(out_root),
-        "qc_fail_root": str(fail_root) if not skip_qc else None,
         "seed": base_seed,
-        "skip_qc": skip_qc,
         "dry_run": dry_run,
         "dry_run_replicates": dry_run_replicates if dry_run else None,
         "dry_run_classes": list(DRY_RUN_CLASSES) if dry_run else None,
+        "u_clip_percentile": U_CLIP_PERCENTILE,
         "transform_params": {
             "rigid": PARAM_RIGID,
             "affine": PARAM_AFFINE,
@@ -835,8 +674,6 @@ def create_synthetic_data(
         },
         "n_subjects": len(subjects),
         "n_tasks": len(tasks),
-        "qc_passed_count": passed,
-        "qc_failed_count": failed,
         "split_counts": {k: len(v) for k, v in split_subjects.items()},
         "deformation_ratios_target": DEFORM_RATIOS if not dry_run else None,
         "deformation_counts_actual": split_summary,
@@ -848,8 +685,9 @@ def create_synthetic_data(
             "source_mask",
             "moving_mask",
             "identity_grid_mask",
-            "u_max_interior",
-            "u_mean_interior",
+            "source_affine",
+            "deformation_class",
+            "subject_id",
         ],
     }
     with open(out_root / "split_manifest.json", "w", encoding="utf-8") as f:
@@ -857,21 +695,6 @@ def create_synthetic_data(
 
     if dry_run:
         print_and_save_class_u_stats(out_root, all_stats)
-
-    manifest = os.path.join(qc_fail_root, "qc_flagged_paths.txt")
-    if flagged_rel_paths and not skip_qc:
-        with open(manifest, "w", encoding="utf-8") as f:
-            f.write("# Samples with qc_passed=False — stored under qc_fail_root\n")
-            for line in sorted(flagged_rel_paths):
-                f.write(f"{line}\n")
-        print(
-            f"Warning: {failed} sample(s) failed QC after {MAX_TRANSFORM_ATTEMPTS} attempts "
-            f"({failed / max(len(all_stats), 1) * 100:.1f}%). Saved under {fail_root}. "
-            f"List: {manifest}"
-        )
-    else:
-        if os.path.isfile(manifest):
-            os.remove(manifest)
 
 
 def parse_args() -> argparse.Namespace:
@@ -888,13 +711,7 @@ def parse_args() -> argparse.Namespace:
         "--output-path",
         type=str,
         default="datasets/hcp_synth",
-        help="Output root for qc_passed samples (split folders with *_<suffix>.npz)",
-    )
-    p.add_argument(
-        "--qc-fail-path",
-        type=str,
-        default=DEFAULT_QC_FAIL_ROOT,
-        help="Output root for qc_passed=False samples",
+        help="Output root (Train/Val/Test, or flat folder for --dry-run).",
     )
     p.add_argument(
         "--workers",
@@ -915,11 +732,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=42,
         help="Base seed; per-file seeds are derived for reproducible parallel runs.",
-    )
-    p.add_argument(
-        "--no-qc",
-        action="store_true",
-        help="Disable QC checks and retries; save first transform draw to output-path.",
     )
     p.add_argument(
         "--dry-run",
@@ -943,11 +755,9 @@ if __name__ == "__main__":
     create_synthetic_data(
         args.input_path,
         args.output_path,
-        qc_fail_root=args.qc_fail_path,
         workers=args.workers,
         base_seed=args.seed,
         max_subjects=args.max_subjects,
-        skip_qc=args.no_qc,
         dry_run=dry_run,
         dry_run_replicates=dry_run_replicates,
     )

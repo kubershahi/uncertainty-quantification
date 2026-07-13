@@ -13,9 +13,9 @@ Modes:
 ``--run-view orthogonal|montage`` controls row layout (``--montage-z-step`` for montage).
 
 Examples:
-# Dry-run QC figures
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun2 --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun_report2 --no-show --run-view orthogonal --u-contours --checkerboard
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun2 --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun_montage2 --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
+# Dry-run figures
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun3 --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun3_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun3 --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun3_montage --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
 # Full cohort preview
 python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth --split Train --selection min_median_max --u-metric mean --save-path assets/images/unigrad-synth/hcp/hcp_synth_minmedmax.png --no-show
 """
@@ -42,7 +42,6 @@ HCP_REQUIRED_KEYS = frozenset(
         "identity_grid_mask",
         "deformation_class",
         "subject_id",
-        "qc_passed",
     }
 )
 
@@ -73,19 +72,6 @@ def _unpack_scalar_str(raw) -> str:
     if a.size == 0:
         return ""
     return str(a.reshape(-1)[0])
-
-
-def _unpack_qc_passed(raw) -> tuple[bool | None, str | None]:
-    a = np.asarray(raw)
-    if a.size != 1:
-        return None, f"qc_passed must be a single value, got shape {a.shape}"
-    v = a.reshape(-1)[0]
-    if isinstance(v, (np.floating, float)) and not np.isfinite(float(v)):
-        return None, "qc_passed is non-finite"
-    try:
-        return bool(v), None
-    except (ValueError, TypeError) as e:
-        return None, f"qc_passed not bool-convertible: {e}"
 
 
 def resolve_npz_dir(input_dir: Path, split: str | None) -> Path:
@@ -180,9 +166,6 @@ def load_sample(npz_path: Path) -> dict:
         missing = HCP_REQUIRED_KEYS - set(data.files)
         if missing:
             raise KeyError(f"{npz_path.name} missing {sorted(missing)}")
-        qc_val, qc_err = _unpack_qc_passed(data["qc_passed"])
-        if qc_err:
-            raise ValueError(f"{npz_path.name}: {qc_err}")
         return {
             "source": np.asarray(data["source"]),
             "moving": np.asarray(data["moving"]),
@@ -190,23 +173,9 @@ def load_sample(npz_path: Path) -> dict:
             "source_mask": np.asarray(data["source_mask"]),
             "moving_mask": np.asarray(data["moving_mask"]),
             "identity_grid_mask": np.asarray(data["identity_grid_mask"]),
-            "qc_passed": qc_val,
             "deformation_class": _unpack_scalar_str(data["deformation_class"]),
             "subject_id": _unpack_scalar_str(data["subject_id"]),
-            "u_max_interior": float(np.asarray(data["u_max_interior"]).reshape(-1)[0])
-            if "u_max_interior" in data.files
-            else float("nan"),
-            "u_mean_interior": float(np.asarray(data["u_mean_interior"]).reshape(-1)[0])
-            if "u_mean_interior" in data.files
-            else float("nan"),
         }
-
-
-def prefer_qc_passed_files(files: list[Path]) -> tuple[list[Path], bool]:
-    passed = [fp for fp in files if load_sample(fp).get("qc_passed") is True]
-    if passed:
-        return passed, False
-    return files, True
 
 
 def sample_u_stats(sample: dict) -> dict[str, float]:
@@ -265,20 +234,14 @@ def select_deformation_class_examples(
     files: list[Path],
     seed: int,
 ) -> list[tuple[Path, str, float]]:
-    pool_files, used_fallback = prefer_qc_passed_files(files)
-    if used_fallback:
-        print(
-            "Warning: no qc_passed=True samples in split; using all files for row selection.",
-            file=sys.stderr,
-        )
     pools: dict[str, list[Path]] = {cls: [] for cls, _ in DEFORM_ROW_ORDER}
-    for fp in pool_files:
+    for fp in files:
         cls = load_sample(fp).get("deformation_class")
         if cls in pools:
             pools[str(cls)].append(fp)
     for cls, suf in DEFORM_ROW_ORDER:
         if not pools[cls]:
-            pools[cls] = [fp for fp in pool_files if fp.stem.endswith(f"_{suf}")]
+            pools[cls] = [fp for fp in files if fp.stem.endswith(f"_{suf}")]
 
     rng = random.Random(seed)
     picked: list[tuple[Path, str, float]] = []
@@ -294,14 +257,8 @@ def select_deformation_class_examples(
 
 def group_class_examples(files: list[Path], seed: int) -> list[tuple[str, Path]]:
     """One random sample per deformation class."""
-    pool_files, used_fallback = prefer_qc_passed_files(files)
-    if used_fallback:
-        print(
-            "Warning: no qc_passed=True samples; using all files for per_class.",
-            file=sys.stderr,
-        )
     pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
-    for fp in pool_files:
+    for fp in files:
         cls = load_sample(fp).get("deformation_class")
         if cls in pools:
             pools[str(cls)].append(fp)
@@ -333,13 +290,8 @@ def _style_axis(ax: plt.Axes) -> None:
 
 def _row_label(subject_id: str, extra: dict) -> str:
     lines = [subject_id]
-    meta: list[str] = []
     if extra.get("deformation_class"):
-        meta.append(str(extra["deformation_class"]))
-    if "qc_passed" in extra:
-        meta.append(f"qc={extra['qc_passed']}")
-    if meta:
-        lines.append(" · ".join(meta))
+        lines.append(str(extra["deformation_class"]))
     return "\n".join(lines)
 
 
@@ -361,7 +313,7 @@ def _render_figure(
 ) -> None:
     nrows = len(picked)
     ncols = 5 if use_checkerboard else 4
-    # source, moving, u vectors, |u|, optional checkerboard
+    # source, moving, u vectors, ‖u‖, optional checkerboard
     col_titles = ["Source (fixed)", "Warped (moving)", "u vectors", r"$\|u\|$"]
     if use_checkerboard:
         col_titles.append("checkerboard")
@@ -400,7 +352,7 @@ def _render_figure(
         u = sample["u"]
         extra = {
             k: sample[k]
-            for k in ("qc_passed", "deformation_class", "subject_id")
+            for k in ("deformation_class", "subject_id")
             if k in sample
         }
 
@@ -489,7 +441,7 @@ def _render_figure(
     if im_u_last is not None:
         cbar_ax = fig.add_axes([0.92, 0.22, 0.018, 0.56])
         cbar = fig.colorbar(im_u_last, cax=cbar_ax)
-        cbar.set_label(r"Displacement norm $\|u\|$ (voxels)", fontsize=_LABEL)
+        cbar.set_label(r"$\|u\|$ (voxels)", fontsize=_LABEL)
         cbar.ax.tick_params(labelsize=_LABEL - 1)
 
     fig.suptitle(title, fontsize=_TITLE, fontweight="bold", y=0.98)
@@ -549,13 +501,11 @@ def visualize_per_class_combinations(
                 "class": label,
                 "file": fp.name,
                 "subject_id": sample.get("subject_id"),
-                "u_max_interior": sample.get("u_max_interior"),
-                "u_mean_interior": sample.get("u_mean_interior"),
                 **u_stats,
             }
         )
         stats_note = (
-            f"|u| voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
+            f"‖u‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
             f"mean={u_stats['mean']:.2f}  Q3={u_stats['q3']:.2f}  max={u_stats['max']:.2f}"
         )
         if run_view == "orthogonal":
@@ -644,13 +594,7 @@ def visualize_samples(
         picked = select_deformation_class_examples(files, seed)
         examples_note = f"Rigid / affine / elastic examples (seed = {seed})"
     elif selection == "min_median_max":
-        pool_files, used_fallback = prefer_qc_passed_files(files)
-        if used_fallback:
-            print(
-                "Warning: no qc_passed=True samples in split; using all files for min/median/max.",
-                file=sys.stderr,
-            )
-        picked = select_min_median_max_files(pool_files, u_metric)
+        picked = select_min_median_max_files(files, u_metric)
         examples_note = f"Min / median / max of {u_metric} " + r"$\|u\|$"
     else:
         raise ValueError(f"Unknown selection: {selection!r}")
