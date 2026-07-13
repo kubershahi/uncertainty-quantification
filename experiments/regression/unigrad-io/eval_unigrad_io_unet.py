@@ -16,10 +16,10 @@ Use ``--curves-only`` to skip Test eval (no GPU). Checkpoints from ``torch.compi
 Training curves plot ``train_{loss}`` and ``val_{loss}`` only (see ``metrics.csv``).
 
 Example (full eval):
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run4b --eval-dir datasets/IXI_unigrad_io --no-show
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/regression/unigrad-io/3d/error_unet_run4b --eval-dir datasets/error-map/unigrad-io/ixi --no-show
 
 Example (curves only; legacy CSVs without val warmup — hide early val spikes):
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/unigrad-io/error_unet_run3 --curves-only --no-show --val-plot-min-epoch 5
+python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/regression/unigrad-io/3d/error_unet_run3 --curves-only --no-show --val-plot-min-epoch 5
 """
 
 from __future__ import annotations
@@ -526,9 +526,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--run-path",
         type=Path,
-        default=Path("assets/runs/3d/unigrad-io/error_unet_run1"),
+        default=Path("assets/runs/regression/unigrad-io/3d/error_unet_run1"),
     )
-    p.add_argument("--eval-dir", type=Path, default=Path("datasets/IXI_unigrad_io"))
+    p.add_argument("--eval-dir", type=Path, default=Path("datasets/error-map/unigrad-io/ixi"))
     p.add_argument("--eval-split", type=str, default="Test")
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--num-workers", type=int, default=0)

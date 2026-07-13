@@ -6,7 +6,7 @@ Writes under ``--run-path``: ``training_curves.png``, ``test_metrics.json``,
 ``test_error_pred_random.png``, ``test_error_pred_easy_normal_hard.png``.
 
 Example:
-python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/2d/unigrad-synth/error_unet_run1 --eval-dir data/IXI_2D_unigrad_synth_fiver --no-show
+python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/regression/unigrad-synth/2d/error_unet_run1 --eval-dir datasets/error-map/unigrad-synth/ixi_2d_fiver --no-show
 """
 
 from __future__ import annotations
@@ -358,9 +358,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--run-path",
         type=Path,
-        default=Path("assets/runs/2d/unigrad-synth/error_unet_run1"),
+        default=Path("assets/runs/regression/unigrad-synth/2d/error_unet_run1"),
     )
-    p.add_argument("--eval-dir", type=Path, default=Path("data/IXI_2D_unigrad_synth_fiver"))
+    p.add_argument("--eval-dir", type=Path, default=Path("datasets/error-map/unigrad-synth/ixi_2d_fiver"))
     p.add_argument("--eval-split", type=str, default="Test")
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--num-workers", type=int, default=0)

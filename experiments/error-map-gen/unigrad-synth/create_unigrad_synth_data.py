@@ -11,10 +11,9 @@ Pass ``--process-all-triplets`` to include failures / legacy archives without th
 normalized coordinates; this script uses (phi - identity) and scales to pixel displacement.
 
 Example usage:
-python create_unigrad_synth_data.py
-python create_unigrad_synth_data.py --max-per-split 2 --output-path ./data/IXI_2D_unigrad_synth_fiver/
-python create_unigrad_synth_data.py --input-path ./data/IXI_2D_synth_trip/ --output-path ./data/IXI_2D_unigrad_synth_fiver/
-
+python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py
+python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --max-per-split 2 --output-path datasets/error-map/unigrad-synth/ixi_2d_fiver/
+python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --input-path data/IXI_2D_synth_trip/ --output-path datasets/error-map/unigrad-synth/ixi_2d_fiver/
 """
 
 import argparse
@@ -28,9 +27,10 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from unigradicon import get_unigradicon
 
-_DH = Path(__file__).resolve().parent
-if str(_DH) not in sys.path:
-    sys.path.insert(0, str(_DH))
+# TorchIO synth helpers (interior_valid_mask, etc.) live under synth-data-gen/torchio.
+_TORCHIO = Path(__file__).resolve().parents[2] / "synth-data-gen" / "torchio"
+if str(_TORCHIO) not in sys.path:
+    sys.path.insert(0, str(_TORCHIO))
 import create_synth_data as csd
 
 
@@ -221,10 +221,10 @@ def parse_args():
     examples = """
 Examples:
 python create_unigrad_synth_data.py
-python create_unigrad_synth_data.py --max-per-split 2 --output-path ./data/IXI_2D_unigrad_synth_fiver/
+python create_unigrad_synth_data.py --max-per-split 2 --output-path ./datasets/error-map/unigrad-synth/ixi_2d_fiver/
 python create_unigrad_synth_data.py --process-all-triplets
 python create_unigrad_synth_data.py --device cpu
-python create_unigrad_synth_data.py --input-path ./data/IXI_2D_synth_trip/ --output-path ./data/IXI_2D_unigrad_synth_fiver/
+python create_unigrad_synth_data.py --input-path ./data/IXI_2D_synth_trip/ --output-path ./datasets/error-map/unigrad-synth/ixi_2d_fiver/
 """.strip()
     
     p = argparse.ArgumentParser(
@@ -241,7 +241,7 @@ python create_unigrad_synth_data.py --input-path ./data/IXI_2D_synth_trip/ --out
     p.add_argument(
         "--output-path",
         type=str,
-        default="./data/IXI_2D_unigrad_synth_fiver/",
+        default="./datasets/error-map/unigrad-synth/ixi_2d_fiver/",
         help="Where to write _fiver.npz outputs (mirrors split subfolders).",
     )
     p.add_argument(

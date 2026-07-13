@@ -17,17 +17,17 @@ Modes:
 
 Examples:
 # Dry-run figures
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_dryrun --selection per_class --save-dir assets/images/unigrad-synth/hcp/dryrun_montage --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_montage --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
 
 # Full cohort: random one-per-class × all splits (15 plots) + CSV stats
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_100 --selection random --save-dir assets/images/unigrad-synth/hcp/full100_random --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_100 --selection random --save-dir assets/images/synth-data/torchio/hcp/full100_random --no-show --run-view orthogonal --u-contours --checkerboard
 
 # Full cohort: min/median/max by mean ‖u‖ (3 plots per split)
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_100 --selection min_median_max --u-metric mean --save-dir assets/images/unigrad-synth/hcp/full100_mmm --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_100 --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/full100_mmm --no-show --run-view orthogonal --u-contours --checkerboard
 
 # Single split only
-python experiments/unigrad-synth/visualize_synth_data.py --data-dir datasets/hcp_synth_100 --split Train --selection random --save-dir assets/images/unigrad-synth/hcp/full100_train --no-show
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_100 --split Train --selection random --save-dir assets/images/synth-data/torchio/hcp/full100_train --no-show
 """
 
 from __future__ import annotations
@@ -864,7 +864,7 @@ def visualize_samples(
             if save_path is not None:
                 save_dir = Path(save_path).parent / Path(save_path).stem
             else:
-                save_dir = Path("assets/images/unigrad-synth/hcp/per_class")
+                save_dir = Path("assets/images/synth-data/torchio/hcp/per_class")
         visualize_per_class_combinations(
             input_dir,
             None,
@@ -886,7 +886,7 @@ def visualize_samples(
             if save_path is not None:
                 save_dir = Path(save_path).parent / Path(save_path).stem
             else:
-                save_dir = Path("assets/images/unigrad-synth/hcp/full_cohort")
+                save_dir = Path("assets/images/synth-data/torchio/hcp/full_cohort")
         visualize_full_cohort(
             input_dir,
             split,
@@ -940,7 +940,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("datasets/hcp_synth"),
+        default=Path("datasets/synth-data/torchio/hcp"),
         help="Dry-run flat folder, or full-cohort root with Train/Val/Test.",
     )
     p.add_argument(
@@ -1021,7 +1021,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--save-path",
         type=Path,
-        default=Path("assets/images/unigrad-synth/hcp/hcp_synth_preview.png"),
+        default=Path("assets/images/synth-data/torchio/hcp/hcp_synth_preview.png"),
     )
     p.add_argument("--no-show", action="store_true")
     return p.parse_args(argv)

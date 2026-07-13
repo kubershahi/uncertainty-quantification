@@ -25,10 +25,10 @@ Outputs per subject (saved next to ``--save-path``)
 
 Example (Nautilus PVC, ``/files`` mounted)::
 
-python experiments/unigrad-io/sweep_io_iterations.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --split Train --num-subjects 5 --save-path assets/images/unigrad-io/unigradio_sweep_io.png --no-show
+python experiments/error-map-gen/unigrad-io/sweep_io_iterations.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --split Train --num-subjects 5 --save-path assets/images/error-map/unigrad-io/unigradio_sweep_io.png --no-show
 
 Omit ``--ixi-root`` / ``--save-path`` to use defaults (see argparse help): on NRP,
-inputs under ``<repo>/datasets/IXI``; figures under ``<repo>/assets/images/unigrad-io/3d/``.
+inputs under ``<repo>/datasets/IXI``; figures under ``<repo>/assets/images/error-map/unigrad-io/3d/``.
 
 Default ``--checkpoints``: ``0,50,100,150,200,250,300``. ``--seed 42``.
 """
@@ -107,9 +107,9 @@ _FILES_ROOT = Path("/files")
 NRP_REPO = _FILES_ROOT / "repo" / "uncertainty-quantification"
 NRP_DATASETS = NRP_REPO / "datasets"
 NRP_IXI_PKL_ROOT = NRP_DATASETS / "IXI"
-NRP_SWEEP_SAVE = NRP_REPO / "assets" / "images" / "unigrad-io" / "3d" / "sweep_io.png"
+NRP_SWEEP_SAVE = NRP_REPO / "assets" / "images" / "error-map" / "unigrad-io" / "3d" / "sweep_io.png"
 LOCAL_IXI_PKL = Path("./datasets/IXI/")
-LOCAL_SWEEP_SAVE = Path("./assets/images/unigrad-io/3d/sweep_io.png")
+LOCAL_SWEEP_SAVE = Path("./assets/images/error-map/unigrad-io/3d/sweep_io.png")
 
 CHECKPOINTS_DEFAULT = "0,50,100,150,200,250,300"
 
@@ -129,7 +129,7 @@ def default_ixi_root() -> Path:
 
 
 def default_save_path() -> Path:
-    """Sweep figure prefix: ``<repo>/assets/images/unigrad-io/`` on NRP when repo is on PVC."""
+    """Sweep figure prefix: ``<repo>/assets/images/error-map/unigrad-io/`` on NRP when repo is on PVC."""
     if NRP_REPO.is_dir():
         return NRP_SWEEP_SAVE
     return LOCAL_SWEEP_SAVE
@@ -988,7 +988,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="If set and atlas_valid_mask.npz exists, load atlas from there "
-        "(e.g. datasets/IXI_unigrad_io).",
+        "(e.g. datasets/error-map/unigrad-io/ixi).",
     )
     p.add_argument(
         "--viz-axial-index",
@@ -1078,7 +1078,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Base path for outputs (parent dirs created). For each swept subject "
         "S, three files are written: <stem>_<S>_images<ext>, <stem>_<S>_curves<ext>, "
         "and <stem>_<S>_metrics.csv. Default on NRP: "
-        "/files/repo/uncertainty-quantification/assets/images/unigrad-io/3d/sweep_io.png.",
+        "/files/repo/uncertainty-quantification/assets/images/error-map/unigrad-io/3d/sweep_io.png.",
     )
     p.add_argument("--no-show", action="store_true")
     return p.parse_args(argv)

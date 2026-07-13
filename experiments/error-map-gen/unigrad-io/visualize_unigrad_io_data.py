@@ -15,9 +15,9 @@ Use ``--split Train`` or ``--split Train,Test``. With multiple subjects, writes 
 under ``--save-dir`` (``{split}_{label}.png``). Use ``--combined`` for a single multi-row figure.
 
 Examples:
-python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Train,Test --selection easy_normal_hard --save-dir assets/images/unigrad-io/ --no-show
-python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Val --selection random --num-samples 4 --save-dir assets/images/unigrad-io/ --no-show
-python experiments/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/IXI_unigrad_io --split Train --selection easy_normal_hard --combined --save-path assets/images/unigrad-io/unigradio_train_easy_normal_hard.png --no-show
+python experiments/error-map-gen/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/error-map/unigrad-io/ixi --split Train,Test --selection easy_normal_hard --save-dir assets/images/error-map/unigrad-io/ --no-show
+python experiments/error-map-gen/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/error-map/unigrad-io/ixi --split Val --selection random --num-samples 4 --save-dir assets/images/error-map/unigrad-io/ --no-show
+python experiments/error-map-gen/unigrad-io/visualize_unigrad_io_data.py --data-dir datasets/error-map/unigrad-io/ixi --split Train --selection easy_normal_hard --combined --save-path assets/images/error-map/unigrad-io/unigradio_train_easy_normal_hard.png --no-show
 """
 
 from __future__ import annotations
@@ -511,7 +511,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("datasets/IXI_unigrad_io"),
+        default=Path("datasets/error-map/unigrad-io/ixi"),
     )
     p.add_argument(
         "--split",
@@ -545,7 +545,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--save-dir",
         type=Path,
         default=None,
-        help="Directory for per-subject PNGs (default: assets/images/unigrad-io/3d/viz).",
+        help="Directory for per-subject PNGs (default: assets/images/error-map/unigrad-io/3d/viz).",
     )
     p.add_argument(
         "--save-path",
@@ -584,7 +584,7 @@ def main(argv: list[str] | None = None) -> int:
 
     save_dir = args.save_dir
     if save_dir is None and args.save_path is None and args.no_show:
-        save_dir = Path("assets/images/unigrad-io/3d/viz")
+        save_dir = Path("assets/images/error-map/unigrad-io/3d/viz")
 
     for split in splits:
         try:
