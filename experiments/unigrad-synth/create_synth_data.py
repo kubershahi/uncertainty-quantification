@@ -483,9 +483,8 @@ def compute_class_u_stats_table(
     samples: list[SampleStats],
 ) -> list[dict[str, float | int | str]]:
     """
-    Per-class ‖u‖ summary over the full volume (all voxels) pooled across dry-run samples.
-
-    Returns rows with min / Q1 / mean / Q3 / max, plus sample count.
+    Per-class ‖u‖ summary: compute min/Q1/mean/Q3/max on each sample's full
+    volume, then average those scalars across samples in the class.
     """
     by_class: dict[str, list[Path]] = {cls: [] for cls in DRY_RUN_CLASSES}
     for s in samples:
@@ -497,17 +496,24 @@ def compute_class_u_stats_table(
 
     rows: list[dict[str, float | int | str]] = []
     for cls in DRY_RUN_CLASSES:
-        mags: list[np.ndarray] = []
+        per_sample: list[dict[str, float]] = []
         for fp in by_class[cls]:
             with np.load(fp) as z:
-                u = np.asarray(z["u"], dtype=np.float64)
-                mags.append(displacement_magnitude(u).ravel())
-        if not mags:
+                vals = displacement_magnitude(np.asarray(z["u"], dtype=np.float64)).ravel()
+            per_sample.append(
+                {
+                    "min": float(np.min(vals)),
+                    "q1": float(np.percentile(vals, 25)),
+                    "mean": float(np.mean(vals)),
+                    "q3": float(np.percentile(vals, 75)),
+                    "max": float(np.max(vals)),
+                }
+            )
+        if not per_sample:
             rows.append(
                 {
                     "deformation_class": cls,
                     "n_samples": 0,
-                    "n_voxels": 0,
                     "min": float("nan"),
                     "q1": float("nan"),
                     "mean": float("nan"),
@@ -516,17 +522,15 @@ def compute_class_u_stats_table(
                 }
             )
             continue
-        vals = np.concatenate(mags)
         rows.append(
             {
                 "deformation_class": cls,
-                "n_samples": len(by_class[cls]),
-                "n_voxels": int(vals.size),
-                "min": float(np.min(vals)),
-                "q1": float(np.percentile(vals, 25)),
-                "mean": float(np.mean(vals)),
-                "q3": float(np.percentile(vals, 75)),
-                "max": float(np.max(vals)),
+                "n_samples": len(per_sample),
+                "min": float(np.mean([s["min"] for s in per_sample])),
+                "q1": float(np.mean([s["q1"] for s in per_sample])),
+                "mean": float(np.mean([s["mean"] for s in per_sample])),
+                "q3": float(np.mean([s["q3"] for s in per_sample])),
+                "max": float(np.mean([s["max"] for s in per_sample])),
             }
         )
     return rows
@@ -534,7 +538,7 @@ def compute_class_u_stats_table(
 
 def print_and_save_class_u_stats(out_root: Path, samples: list[SampleStats]) -> Path:
     rows = compute_class_u_stats_table(out_root, samples)
-    print("\nPer-class ‖u‖ stats (full volume, voxels):")
+    print("\nPer-class ‖u‖ stats (per-sample full-volume stats, then mean over samples):")
     print(
         f"{'class':<16} {'n':>3} {'min':>8} {'Q1':>8} {'mean':>8} {'Q3':>8} {'max':>8}"
     )
