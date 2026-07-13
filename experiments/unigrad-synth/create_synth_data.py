@@ -38,11 +38,14 @@ Modes:
   - Dry run: ``--dry-run [N]`` → flat folder, 5 classes × N samples (default N=5)
 
 Examples:
-# Full cohort
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --workers 16
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --max-subjects 30 --workers 16
 # Dry run (25 samples)
-python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth_dryrun3 --dry-run 5 --workers 16
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth_dryrun --dry-run 5 --workers 16
+
+# Full cohort (all subjects)
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth --workers 16
+
+# Subset full run (100 subjects → ~70/15/15 + per-class ratios in each split)
+python experiments/unigrad-synth/create_synth_data.py --input-path datasets/hcp --output-path datasets/hcp_synth_100 --max-subjects 100 --workers 16
 """
 
 from __future__ import annotations
@@ -571,6 +574,112 @@ def print_and_save_class_u_stats(out_root: Path, samples: list[SampleStats]) -> 
     return csv_path
 
 
+def compute_split_class_u_stats_table(
+    out_root: Path,
+    samples: list[SampleStats],
+) -> list[dict[str, float | int | str]]:
+    """
+    Full-run ‖u‖ summary: per (split, class), compute min/Q1/mean/Q3/max on each
+    sample, then average those scalars across samples in that bucket.
+    """
+    splits = ("Train", "Val", "Test")
+    by_key: dict[tuple[str, str], list[Path]] = {
+        (sp, cls): [] for sp in splits for cls in DRY_RUN_CLASSES
+    }
+    for s in samples:
+        key = (s.split, s.deformation_class)
+        if key not in by_key:
+            continue
+        fp = out_root / s.rel_path
+        if fp.is_file():
+            by_key[key].append(fp)
+
+    rows: list[dict[str, float | int | str]] = []
+    for sp in splits:
+        for cls in DRY_RUN_CLASSES:
+            paths = by_key[(sp, cls)]
+            per_sample: list[dict[str, float]] = []
+            for fp in paths:
+                with np.load(fp) as z:
+                    vals = displacement_magnitude(
+                        np.asarray(z["u"], dtype=np.float64)
+                    ).ravel()
+                per_sample.append(
+                    {
+                        "min": float(np.min(vals)),
+                        "q1": float(np.percentile(vals, 25)),
+                        "mean": float(np.mean(vals)),
+                        "q3": float(np.percentile(vals, 75)),
+                        "max": float(np.max(vals)),
+                    }
+                )
+            if not per_sample:
+                rows.append(
+                    {
+                        "split": sp,
+                        "deformation_class": cls,
+                        "n_samples": 0,
+                        "min": float("nan"),
+                        "q1": float("nan"),
+                        "mean": float("nan"),
+                        "q3": float("nan"),
+                        "max": float("nan"),
+                    }
+                )
+                continue
+            rows.append(
+                {
+                    "split": sp,
+                    "deformation_class": cls,
+                    "n_samples": len(per_sample),
+                    "min": float(np.mean([x["min"] for x in per_sample])),
+                    "q1": float(np.mean([x["q1"] for x in per_sample])),
+                    "mean": float(np.mean([x["mean"] for x in per_sample])),
+                    "q3": float(np.mean([x["q3"] for x in per_sample])),
+                    "max": float(np.mean([x["max"] for x in per_sample])),
+                }
+            )
+    return rows
+
+
+def print_and_save_split_class_u_stats(
+    out_root: Path, samples: list[SampleStats]
+) -> Path:
+    rows = compute_split_class_u_stats_table(out_root, samples)
+    print(
+        "\nPer-split × class ‖u‖ stats "
+        "(per-sample full-volume stats, then mean over samples):"
+    )
+    print(
+        f"{'split':<6} {'class':<16} {'n':>3} "
+        f"{'min':>8} {'Q1':>8} {'mean':>8} {'Q3':>8} {'max':>8}"
+    )
+    for r in rows:
+        print(
+            f"{r['split']:<6} {r['deformation_class']:<16} {r['n_samples']:>3} "
+            f"{r['min']:8.3f} {r['q1']:8.3f} {r['mean']:8.3f} "
+            f"{r['q3']:8.3f} {r['max']:8.3f}"
+        )
+    csv_path = out_root / "split_class_u_stats.csv"
+    fieldnames = [
+        "split",
+        "deformation_class",
+        "n_samples",
+        "min",
+        "q1",
+        "mean",
+        "q3",
+        "max",
+    ]
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r[k] for k in fieldnames})
+    print(f"Wrote {csv_path}")
+    return csv_path
+
+
 def collect_hcp_subjects(input_root: Path) -> list[SubjectEntry]:
     out: list[SubjectEntry] = []
     for subj_dir in sorted(input_root.iterdir()):
@@ -606,6 +715,7 @@ def create_synthetic_data(
         return
     if max_subjects is not None and max_subjects > 0:
         subjects = subjects[:max_subjects]
+    print(f"Subjects: {len(subjects)} from {in_root} → {out_root}")
 
     if dry_run:
         n_tasks = len(DRY_RUN_CLASSES) * dry_run_replicates
@@ -668,9 +778,21 @@ def create_synthetic_data(
                 c[cls] += 1
             split_summary[split] = dict(c)
 
-    print(
-        f"Parallel workers: {n_workers} (default = all logical CPUs; each worker uses 1 OpenMP thread)"
-    )
+        print(
+            "Full run splits: "
+            + ", ".join(f"{sp}={len(split_subjects[sp])}" for sp in ("Train", "Val", "Test"))
+        )
+        for sp in ("Train", "Val", "Test"):
+            counts = split_summary.get(sp, {})
+            if counts:
+                mix = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+                print(f"  {sp} classes: {mix}")
+        print(
+            f"u cleanup: identity_grid_mask OOB → {U_BOUNDARY_MARGIN}-voxel border → "
+            f"p{U_CLIP_PERCENTILE:g} clip"
+        )
+
+    print(f"Generating {len(tasks)} NPZs with {n_workers} worker(s)…")
 
     if n_workers <= 1:
         for t in tqdm(tasks, desc="Create HCP synth"):
@@ -681,6 +803,7 @@ def create_synthetic_data(
             for fut in tqdm(as_completed(futs), total=len(futs), desc="Create HCP synth"):
                 all_stats.append(fut.result())
 
+    print(f"Wrote {len(all_stats)} NPZs")
     meta = {
         "input_root": str(in_root),
         "output_root": str(out_root),
@@ -719,6 +842,8 @@ def create_synthetic_data(
 
     if dry_run:
         print_and_save_class_u_stats(out_root, all_stats)
+    else:
+        print_and_save_split_class_u_stats(out_root, all_stats)
 
 
 def parse_args() -> argparse.Namespace:
