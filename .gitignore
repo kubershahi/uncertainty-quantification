@@ -34,6 +34,8 @@ env/
 # Large project directories (keep folder structure only)
 !datasets/.gitkeep
 !models/.gitkeep
+/datasets/**
+/models/**
 
 # NIfTI / pickle outputs
 *.nii
@@ -44,7 +46,6 @@ env/
 *.log
 
 # Training run artifacts (W&B syncs best_model.pt; keep metrics/plots in git if needed)
-/datasets/hcp/**
 **/best_model.pt
 **/wandb/
 
@@ -66,6 +67,3 @@ deploy/nautilus/local/
 
 # Commands
 commands.sh
-
-# Documentation
-docs/unigrad-io-error-unet-next-steps.md
