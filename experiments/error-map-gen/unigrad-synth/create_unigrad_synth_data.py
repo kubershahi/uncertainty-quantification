@@ -31,7 +31,7 @@ Registration: ``net(moving, source)``; displacement lives on the **fixed** (sour
 ``u_pred`` cleanup matches Phase I border/OOB handling (no p99.9 clip on predictions).
 
 Examples:
-python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --input-path datasets/synth-data/torchio/hcp --output-path datasets/error-map/unigrad-synth/hcp
+python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --input-path datasets/synth-data/torchio/hcp --output-path datasets/error-map/unigrad-synth/hcp --device cuda
 python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --input-path datasets/synth-data/torchio/hcp --output-path datasets/error-map/unigrad-synth/hcp --splits Train --max-per-split 15 --device cuda
 """
 
@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -200,6 +201,11 @@ def load_hcp_synth_npz(path: Path) -> dict[str, np.ndarray]:
         return {k: np.asarray(data[k]) for k in data.files}
 
 
+def _sync_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+
+
 def run_hcp_error_map_generation(
     input_root: Path,
     output_root: Path,
@@ -215,15 +221,13 @@ def run_hcp_error_map_generation(
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading UniGradICON on {device}...")
-    net = get_unigradicon().to(device)
-    net.eval()
-
+    # Count files first so we can explain cost before the model download stalls the terminal.
+    split_files: dict[str, list[str]] = {}
     total = 0
     for split in splits:
         in_dir = input_root / split
         if not in_dir.is_dir():
-            print(f"Skip {split}: missing {in_dir}")
+            print(f"Skip {split}: missing {in_dir}", flush=True)
             continue
         out_dir = output_root / split
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -233,27 +237,59 @@ def run_hcp_error_map_generation(
         if not overwrite:
             done = {f for f in os.listdir(out_dir) if f.endswith(".npz")}
             files = [f for f in files if f not in done]
-        print(f"{split}: {len(files)} sample(s) to process")
+        split_files[split] = files
+        print(f"{split}: {len(files)} sample(s) to process", flush=True)
         total += len(files)
 
     if total == 0:
-        print("Nothing to process.")
+        print("Nothing to process.", flush=True)
         return
 
+    print(
+        f"\nAbout to run UniGradICON on {total} volume pair(s) on {device}.\n"
+        "  Cost per sample (rough): load NPZ → resize to 175³ → ICON forward → "
+        "upsample phi → save compressed NPZ.\n"
+        "  Expect ~seconds/sample on GPU, often minutes/sample on CPU "
+        "(full 3D registration network).\n",
+        flush=True,
+    )
+    if device.type == "cpu":
+        print(
+            "WARNING: device=cpu — each forward pass is very slow. "
+            "Prefer --device cuda if a GPU is available.\n",
+            flush=True,
+        )
+
+    t0 = time.perf_counter()
+    print(f"[{time.strftime('%H:%M:%S')}] Loading UniGradICON weights on {device}...", flush=True)
+    net = get_unigradicon().to(device)
+    net.eval()
+    print(
+        f"[{time.strftime('%H:%M:%S')}] Model ready ({time.perf_counter() - t0:.1f}s). "
+        "Starting samples...\n",
+        flush=True,
+    )
+
     n_done = 0
-    with tqdm(total=total, desc="UniGradICON HCP synth") as pbar:
+    sample_times: list[float] = []
+    with tqdm(total=total, desc="UniGradICON HCP synth", dynamic_ncols=True) as pbar:
         for split in splits:
+            files = split_files.get(split, [])
+            if not files:
+                continue
             in_dir = input_root / split
             out_dir = output_root / split
-            if not in_dir.is_dir():
-                continue
-            files = sorted(f for f in os.listdir(in_dir) if f.endswith(".npz"))
-            if max_per_split is not None:
-                files = files[:max_per_split]
-            if not overwrite:
-                done = {f for f in os.listdir(out_dir) if f.endswith(".npz")}
-                files = [f for f in files if f not in done]
             for fname in files:
+                sample_i = n_done + 1
+                pbar.set_postfix_str(f"{split}/{fname}", refresh=True)
+                print(
+                    f"\n[{sample_i}/{total}] {split}/{fname}",
+                    flush=True,
+                )
+                t_sample = time.perf_counter()
+
+                print("  [1/5] load NPZ...", flush=True)
+                t_step = time.perf_counter()
                 in_path = in_dir / fname
                 sample = load_hcp_synth_npz(in_path)
                 source = sample["source"]
@@ -266,15 +302,37 @@ def run_hcp_error_map_generation(
                     raise ValueError(f"{fname}: moving {moving.shape} vs source {source.shape}")
                 if u_gt.shape != (3, nx, ny, nz):
                     raise ValueError(f"{fname}: u {u_gt.shape} vs expected (3, {nx}, {ny}, {nz})")
+                print(
+                    f"        shape ({nx},{ny},{nz}) in {time.perf_counter() - t_step:.1f}s",
+                    flush=True,
+                )
 
+                print("  [2/5] preprocess → 175³ ...", flush=True)
+                t_step = time.perf_counter()
                 moving_5d = hcp_volume_xyz_to_torch5d(moving).to(device)
                 source_5d = hcp_volume_xyz_to_torch5d(source).to(device)
                 moving_175 = preprocess_volume_for_unigrad(moving_5d)
                 source_175 = preprocess_volume_for_unigrad(source_5d)
                 del moving_5d, source_5d
+                _sync_device(device)
+                print(f"        done in {time.perf_counter() - t_step:.1f}s", flush=True)
 
+                print(
+                    "  [3/5] UniGradICON forward (net(moving, source)) — usually the slow step...",
+                    flush=True,
+                )
+                t_step = time.perf_counter()
                 with torch.no_grad():
                     net(moving_175, source_175)
+                    _sync_device(device)
+                print(
+                    f"        forward done in {time.perf_counter() - t_step:.1f}s",
+                    flush=True,
+                )
+
+                print("  [4/5] upsample phi → native u_pred, build error map...", flush=True)
+                t_step = time.perf_counter()
+                with torch.no_grad():
                     phi_dhw = phi_vectorfield_to_volume_voxels(net, nz, nx, ny)
                 del moving_175, source_175
                 if device.type == "cuda":
@@ -284,7 +342,10 @@ def run_hcp_error_map_generation(
                 u_pred = cleanup_u_pred(u_pred, u_gt_igm)
                 u_err = u_error_map_from_gt_pred(u_gt, u_pred)
                 err_mask = error_map_mask_from_igm(u_gt_igm, (nx, ny, nz))
+                print(f"        done in {time.perf_counter() - t_step:.1f}s", flush=True)
 
+                print("  [5/5] save compressed NPZ...", flush=True)
+                t_step = time.perf_counter()
                 out_payload: dict[str, np.ndarray] = {}
                 for key in HCP_SYNTH_PASS_KEYS:
                     out_payload[key] = sample[key]
@@ -295,12 +356,31 @@ def run_hcp_error_map_generation(
                 out_payload["error_map_mask"] = err_mask
 
                 np.savez_compressed(out_dir / fname, **out_payload)
+                elapsed = time.perf_counter() - t_sample
+                sample_times.append(elapsed)
+                mean_s = sum(sample_times) / len(sample_times)
+                remaining = total - sample_i
+                eta_s = mean_s * remaining
+                print(
+                    f"        saved in {time.perf_counter() - t_step:.1f}s | "
+                    f"sample total {elapsed:.1f}s | "
+                    f"avg {mean_s:.1f}s | ETA ~{eta_s / 60.0:.1f} min",
+                    flush=True,
+                )
                 n_done += 1
                 pbar.update(1)
 
-    print(f"Done: wrote {n_done} NPZ(s) under {output_root.resolve()}")
+    print(f"\nDone: wrote {n_done} NPZ(s) under {output_root.resolve()}", flush=True)
+    if sample_times:
+        print(
+            f"  Timing: min {min(sample_times):.1f}s / "
+            f"mean {sum(sample_times) / len(sample_times):.1f}s / "
+            f"max {max(sample_times):.1f}s per sample",
+            flush=True,
+        )
     print(
-        "  Per sample: HCP synth keys + u_gt, u_gt_igm, u_pred, u_error_map, error_map_mask"
+        "  Per sample: HCP synth keys + u_gt, u_gt_igm, u_pred, u_error_map, error_map_mask",
+        flush=True,
     )
 
 
