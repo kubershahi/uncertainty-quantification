@@ -75,8 +75,8 @@ T1_NAME = "T1w_acpc_dc_restore_brain.nii.gz"
 MASK_NAME = "brainmask_fs.nii.gz"
 
 # Split ratios (70/15/15)
-TRAIN_FRAC = 0.70
-VAL_FRAC = 0.15
+TRAIN_FRAC = 0.75
+VAL_FRAC = 0.10
 # Test gets the remainder
 
 # Deformation ratios (must sum to 1.0)
