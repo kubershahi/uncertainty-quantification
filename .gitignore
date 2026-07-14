@@ -30,10 +30,8 @@ env/
 *.trch
 *.ckpt
 
+
 # Large project directories (keep folder structure only)
-data/**
-models/**
-datasets/**
 !datasets/.gitkeep
 !models/.gitkeep
 
@@ -46,6 +44,7 @@ datasets/**
 *.log
 
 # Training run artifacts (W&B syncs best_model.pt; keep metrics/plots in git if needed)
+/datasets/hcp/**
 **/best_model.pt
 **/wandb/
 

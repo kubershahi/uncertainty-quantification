@@ -10,8 +10,9 @@ Modes:
   - Full cohort (``Train``/``Val``/``Test``):
       ``--selection random`` (default) → one random sample per class per split
       (up to 15 plots) with orthogonal/montage views
-      ``--selection min_median_max`` → three separate plots per split (min / median / max
-      by ``--u-metric``), not stacked in one figure
+      ``--selection min_median_max`` → min / median / max per class per split
+      by ``--u-metric`` (scores ‖u‖ only for selection; cohort stats live in
+      ``create_synth_data.py`` output ``split_class_u_stats.csv``)
 
 ``--run-view orthogonal|montage`` controls row layout (``--montage-z-step`` for montage).
 
@@ -20,14 +21,14 @@ Examples:
 python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
 python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_montage --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
 
-# Full cohort: random one-per-class × all splits (15 plots) + CSV stats
+# Full cohort: random one-per-class × all splits (15 plots)
 python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection random --save-dir assets/images/synth-data/torchio/hcp/fullrun_random_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
 
-# Full cohort: min/median/max by mean ‖u‖ (3 plots per split)
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/fullrun_mmm_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
+# Full cohort: min/median/max per class by mean ‖u‖ (15 plots per split)
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/fullrun_mmm --no-show --run-view orthogonal --u-contours --checkerboard
 
 # Single split only
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --split Train --selection random --save-dir assets/images/synth-data/torchio/hcp/fullrun_train_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --split Train --selection random --save-dir assets/images/synth-data/torchio/hcp/fullrun_train --no-show
 """
 
 from __future__ import annotations
@@ -297,6 +298,27 @@ def group_class_examples(files: list[Path], seed: int) -> list[tuple[str, Path]]
             f"Run: create_synth_data.py --dry-run 5"
         )
     return groups
+
+
+def select_min_median_max_by_class(
+    files: list[Path],
+    u_metric: str,
+) -> list[tuple[str, Path, str, float]]:
+    """Per deformation class: min / median / max by ``u_metric`` over the split."""
+    pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
+    for fp in files:
+        cls = load_sample(fp).get("deformation_class")
+        if cls in pools:
+            pools[str(cls)].append(fp)
+    picked: list[tuple[str, Path, str, float]] = []
+    for cls in DEFORM_CLASSES:
+        pool = pools[cls]
+        if not pool:
+            continue
+        print(f"    {cls}: scoring {len(pool)} sample(s) by {u_metric} ‖u‖…")
+        for fp, rank, score in select_min_median_max_files(pool, u_metric):
+            picked.append((cls, fp, rank, score))
+    return picked
 
 
 def _style_axis(ax: plt.Axes) -> None:
@@ -578,13 +600,18 @@ def _render_single_sample_plot(
     montage_z_step: int,
     run_view: str,
     subtitle_extra: str | None = None,
+    include_plot_u_stats: bool = True,
 ) -> dict:
     sample = load_sample(fp)
-    u_stats = sample_u_stats(sample)
-    stats_note = (
-        f"‖u‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
-        f"mean={u_stats['mean']:.2f}  Q3={u_stats['q3']:.2f}  max={u_stats['max']:.2f}"
-    )
+    stats_note = None
+    u_stats: dict[str, float] = {}
+    if include_plot_u_stats:
+        print(f"    Computing ‖u‖ stats for plot: {fp.name}")
+        u_stats = sample_u_stats(sample)
+        stats_note = (
+            f"‖u‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
+            f"mean={u_stats['mean']:.2f}  Q3={u_stats['q3']:.2f}  max={u_stats['max']:.2f}"
+        )
     plane_rows, idx_rows, rank_rows = _views_for_sample(
         sample,
         z_slice_index=z_slice_index,
@@ -594,6 +621,7 @@ def _render_single_sample_plot(
     subject_id = sample.get("subject_id") or fp.stem.split("_")[0]
     deform_cls = str(sample.get("deformation_class") or "unknown")
     picked = [(fp, r, float("nan")) for r in rank_rows]
+    print(f"    Plotting → {save_path}")
     _render_figure(
         picked,
         save_path=save_path,
@@ -616,71 +644,6 @@ def _render_single_sample_plot(
         "deformation_class": sample.get("deformation_class"),
         **u_stats,
     }
-
-
-def compute_split_class_u_stats_rows(input_dir: Path, splits: list[str]) -> list[dict]:
-    """Per (split, class): per-sample ‖u‖ stats, then mean over samples."""
-    rows: list[dict] = []
-    for sp in splits:
-        files = collect_npz_files(input_dir, sp)
-        pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
-        for fp in files:
-            cls = load_sample(fp).get("deformation_class")
-            if cls in pools:
-                pools[str(cls)].append(fp)
-        for cls in DEFORM_CLASSES:
-            per_sample: list[dict[str, float]] = []
-            for fp in pools[cls]:
-                per_sample.append(sample_u_stats(load_sample(fp)))
-            if not per_sample:
-                rows.append(
-                    {
-                        "split": sp,
-                        "deformation_class": cls,
-                        "n_samples": 0,
-                        "min": float("nan"),
-                        "q1": float("nan"),
-                        "mean": float("nan"),
-                        "q3": float("nan"),
-                        "max": float("nan"),
-                    }
-                )
-                continue
-            rows.append(
-                {
-                    "split": sp,
-                    "deformation_class": cls,
-                    "n_samples": len(per_sample),
-                    "min": float(np.mean([s["min"] for s in per_sample])),
-                    "q1": float(np.mean([s["q1"] for s in per_sample])),
-                    "mean": float(np.mean([s["mean"] for s in per_sample])),
-                    "q3": float(np.mean([s["q3"] for s in per_sample])),
-                    "max": float(np.mean([s["max"] for s in per_sample])),
-                }
-            )
-    return rows
-
-
-def save_split_class_u_stats_csv(rows: list[dict], csv_path: Path) -> Path:
-    csv_path = Path(csv_path)
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "split",
-        "deformation_class",
-        "n_samples",
-        "min",
-        "q1",
-        "mean",
-        "q3",
-        "max",
-    ]
-    with open(csv_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for r in rows:
-            writer.writerow({k: r[k] for k in fieldnames})
-    print(f"Wrote {csv_path} (‖u‖ stats over all samples in each split × class)")
-    return csv_path
 
 
 def visualize_full_cohort(
@@ -717,6 +680,10 @@ def visualize_full_cohort(
         out_split.mkdir(parents=True, exist_ok=True)
 
         if selection == "random":
+            print(
+                f"  {sp}: selecting one random sample per class "
+                f"({len(DEFORM_CLASSES)} classes, {len(files)} NPZs)…"
+            )
             groups, missing = group_class_examples_optional(files, seed=seed + hash(sp) % 10007)
             if missing:
                 print(
@@ -725,6 +692,7 @@ def visualize_full_cohort(
                     file=sys.stderr,
                 )
             for label, fp in groups:
+                print(f"  {sp} / {label}: plotting {fp.name}")
                 _render_single_sample_plot(
                     fp,
                     save_path=out_split / f"{label}.png",
@@ -736,13 +704,21 @@ def visualize_full_cohort(
                     run_view=run_view,
                 )
                 n_figs += 1
-            print(f"  {sp}: {len(groups)} class plot(s) from {len(files)} NPZs")
+            print(f"  {sp}: wrote {len(groups)} class plot(s)")
         elif selection == "min_median_max":
-            picked = select_min_median_max_files(files, u_metric)
-            for fp, rank, score in picked:
+            print(
+                f"  {sp}: computing {u_metric} ‖u‖ scores per class "
+                f"({len(files)} NPZs)…"
+            )
+            picked = select_min_median_max_by_class(files, u_metric)
+            for label, fp, rank, score in picked:
+                print(
+                    f"  {sp} / {label} {rank}: "
+                    f"{u_metric} ‖u‖={score:.3f} from {fp.name}"
+                )
                 _render_single_sample_plot(
                     fp,
-                    save_path=out_split / f"{rank}.png",
+                    save_path=out_split / f"{label}_{rank}.png",
                     z_slice_index=z_slice_index,
                     quiver_stride=quiver_stride,
                     use_u_contours=use_u_contours,
@@ -753,15 +729,12 @@ def visualize_full_cohort(
                 )
                 n_figs += 1
             print(
-                f"  {sp}: min/median/max by {u_metric} ‖u‖ "
-                f"({len(files)} NPZs → {len(picked)} plots)"
+                f"  {sp}: wrote {len(picked)} min/median/max plot(s) "
+                f"by {u_metric} ‖u‖"
             )
         else:
             raise ValueError(f"Full cohort does not support selection={selection!r}")
 
-    print("Computing split × class ‖u‖ stats (all samples)…")
-    rows = compute_split_class_u_stats_rows(input_dir, splits)
-    save_split_class_u_stats_csv(rows, save_dir / "split_class_u_stats.csv")
     if no_show:
         plt.close("all")
     print(f"Done: {n_figs} figures under {save_dir}")
@@ -793,7 +766,9 @@ def visualize_per_class_combinations(
     )
     chosen_stats: list[dict] = []
     for label, fp in groups:
+        print(f"  {label}: loading {fp.name}")
         sample = load_sample(fp)
+        print(f"  {label}: computing ‖u‖ stats for plot")
         u_stats = sample_u_stats(sample)
         chosen_stats.append(
             {
@@ -822,6 +797,7 @@ def visualize_per_class_combinations(
             rank_rows = [f"z{dz:+d}" for dz in z_offsets]
         subject_id = sample.get("subject_id") or fp.stem.split("_")[0]
         picked = [(fp, r, float("nan")) for r in rank_rows]
+        print(f"  {label}: plotting → {save_dir / f'{label}.png'}")
         _render_figure(
             picked,
             save_path=save_dir / f"{label}.png",
@@ -840,6 +816,7 @@ def visualize_per_class_combinations(
         )
     csv_path = save_dir / "chosen_sample_u_stats.csv"
     fieldnames = ["class", "file", "subject_id", "min", "q1", "mean", "q3", "max"]
+    print(f"Writing chosen-sample ‖u‖ stats → {csv_path}")
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -1013,7 +990,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Output directory for per_class (dry-run) or full-cohort plots "
-            "(split subfolders + split_class_u_stats.csv)."
+            "(split subfolders)."
         ),
     )
     p.add_argument(
