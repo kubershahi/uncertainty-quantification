@@ -104,15 +104,67 @@ HCP `T1w/` volumes are AC-PC aligned and distortion corrected but remain in **na
 
 ---
 
-## Displacement vs deformation
+## Displacement **u** vs position map **φ**
 
-For voxel/pixel position **x**:
+Registration stores geometry on the **fixed** (output) grid. At each fixed-grid location **x**:
 
-- **Displacement** **u(x)** = (dx, dy[, dz]) — how far the point moves
-- **Deformation** **φ(x)** = **x + u(x)** — where the output grid samples from
+| Symbol | Name in this repo | What it stores | Shape (3D) |
+| --- | --- | --- | --- |
+| **u(x)** | displacement / **u vectors** | offset **(dx, dy, dz)** in voxels | `(3, X, Y, Z)` |
+| **φ(x)** | **position map** (not displacement) | absolute sample coordinate **x + u(x)** | `(3, X, Y, Z)` |
 
-UniGradICON may output a **position map** (φ); scripts convert to pixel/voxel displacement by
-subtracting the identity grid and scaling (see `create_unigrad_synth_data.py`).
+Relation (component-wise):
+
+```text
+φ(x) = x + u(x)
+u(x) = φ(x) − x
+```
+
+### How to read **u(x)** (intuition)
+
+For output-grid voxel **x** on the **fixed** image:
+
+- **u(x)** is the **offset** into the **moving** volume.
+- Sample **moving(x + u(x))** to get the anatomy that should match **fixed(x)**.
+
+So the aligned (warped) moving image is:
+
+```text
+registered_moving(x) ≈ moving(x + u(x)) ≈ fixed(x)
+```
+
+**Example (2D, one voxel).** Fixed and moving share the same grid. At fixed voxel **x = (50, 80)**:
+
+- Suppose **u(x) = (+3, −1)** voxels.
+- Then **φ(x) = (53, 79)**.
+- Meaning: intensity for fixed(50, 80) is looked up in the moving image at ≈ (53, 79).
+- Matching anatomy for that fixed location lives ~3 voxels right and 1 voxel down in moving space.
+
+**Example (vector view).** The array **u** is a stack of three channels. At every **x**, the three values form one **vector** pointing from **x** toward the moving sample location. Calling these **u vectors** is fine and matches QC plots that label a “u vectors” panel (arrow / RGB-as-vector viz of the three components).
+
+### Is **φ** a “deformation field”?
+
+Prefer **position map** (or warping map / deformation map) for **φ**:
+
+| Term | Use for | Why |
+| --- | --- | --- |
+| **Position map φ** | Absolute coordinates to sample from | Clear: values are locations, not offsets |
+| **Displacement field / u vectors** | Offsets **u(x)** | Clear: each voxel stores a vector offset |
+| **“Deformation field”** | Ambiguous colloquialism | People use it for **either** φ **or** u |
+
+Mathematically both **φ** and **u** are maps **x ↦ ℝ³**, so both can be called “fields.” In practice, **field** almost always means **u** (a vector of increments at each point). **φ** stores **positions**, so “deformation / position map” is the accurate label here — it is **not** the same object as a displacement field until you subtract the identity grid.
+
+UniGradICON internals often expose something named like `phi_AB_vectorfield`. After subtracting the identity map you get a **displacement**; scripts then convert that to voxel **u** (see `create_unigrad_synth_data.py`: `phi_vectorfield_to_volume_voxels`, then `phi_dhw_to_u_xyz`).
+
+### Naming cheat sheet (this repo)
+
+| Say | Mean |
+| --- | --- |
+| **u** / **u vectors** / displacement | Offsets on fixed grid; HCP keys `u`, `u_gt`, `u_pred` |
+| **‖u‖** | Magnitude of the displacement vector at each voxel |
+| **φ** / **position map** | Absolute sample coordinates; ICON output before `− identity` |
+| **identity map / identity grid** | φ₀(x) = x — “do nothing” warp |
+| **Backward / pull warp** | For each fixed **x**, sample moving at **φ(x)** |
 
 ---
 
@@ -120,11 +172,17 @@ subtracting the identity grid and scaling (see `create_unigrad_synth_data.py`).
 
 Registration warps the **moving** image onto the **fixed** grid:
 
-1. For each output voxel, compute source coordinate φ(x)
-2. Sample moving image at φ(x) (interpolation)
-3. Write intensity to output voxel
+1. For each fixed (output) voxel **x**, compute sample coordinate **φ(x) = x + u(x)**
+2. Sample the moving image at **φ(x)** (interpolation)
+3. Write that intensity into the registered output at **x**
 
-Non-integer φ(x) requires **interpolation** (trilinear for MRI intensity; nearest-neighbor for labels).
+Non-integer **φ(x)** requires **interpolation** (trilinear for MRI intensity; nearest-neighbor for labels).
+
+```text
+fixed grid x  ──►  φ(x) = x + u(x)  ──►  sample moving  ──►  registered_moving(x)
+                        ▲
+                        └── u(x) is the offset (u vector) on the fixed grid
+```
 
 ---
 
