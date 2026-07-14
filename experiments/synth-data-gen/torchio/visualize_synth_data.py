@@ -11,7 +11,8 @@ Modes:
       ``--selection random`` (default) → one random sample per class per split
       (up to 15 plots) with orthogonal/montage views
       ``--selection min_median_max`` → min / median / max per split over non-``none``
-      classes (4 transforms × 3 splits → 9 plots) by ``--u-metric``
+      classes (4 transforms × 3 splits → 9 plots) by ``--u-metric``; writes
+      ``min_median_max_selection.csv`` in ``--save-dir`` to skip re-scoring on reruns
 
 ``--run-view orthogonal|montage`` controls row layout (``--montage-z-step`` for montage).
 
@@ -328,6 +329,106 @@ def group_class_examples(files: list[Path], seed: int) -> list[tuple[str, Path]]
             f"Run: create_synth_data.py --dry-run 5"
         )
     return groups
+
+
+MMM_SELECTION_CSV = "min_median_max_selection.csv"
+MMM_RANK_ORDER = ("min", "median", "max")
+MMM_SELECTION_FIELDS = (
+    "split",
+    "rank",
+    "u_metric",
+    "subject_id",
+    "file",
+    "deformation_class",
+    "u_score",
+)
+
+
+def _resolve_split_npz(input_dir: Path, split: str, file_name: str) -> Path | None:
+    fp = input_dir / split / file_name
+    if fp.is_file():
+        return fp
+    fp = resolve_npz_dir(input_dir, split) / file_name
+    return fp if fp.is_file() else None
+
+
+def _subject_id_from_npz_path(fp: Path) -> str:
+    stem = fp.stem
+    if "_" in stem:
+        return stem.rsplit("_", 1)[0]
+    return stem
+
+
+def _mmm_pick_row(
+    *,
+    split: str,
+    rank: str,
+    u_metric: str,
+    fp: Path,
+    score: float,
+) -> dict[str, str | float]:
+    return {
+        "split": split,
+        "rank": rank,
+        "u_metric": u_metric,
+        "subject_id": _subject_id_from_npz_path(fp),
+        "file": fp.name,
+        "deformation_class": deformation_class_from_filename(fp),
+        "u_score": score,
+    }
+
+
+def try_load_mmm_split_cache(
+    save_dir: Path,
+    input_dir: Path,
+    split: str,
+    u_metric: str,
+) -> list[tuple[Path, str, float]] | None:
+    csv_path = save_dir / MMM_SELECTION_CSV
+    if not csv_path.is_file():
+        return None
+    rows: list[dict[str, str]] = []
+    with open(csv_path, encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("u_metric") == u_metric and row.get("split") == split:
+                rows.append(row)
+    if not rows:
+        return None
+    rank_index = {rank: i for i, rank in enumerate(MMM_RANK_ORDER)}
+    rows.sort(key=lambda r: rank_index.get(r["rank"], 99))
+    picked: list[tuple[Path, str, float]] = []
+    for row in rows:
+        fp = _resolve_split_npz(input_dir, split, row["file"])
+        if fp is None:
+            return None
+        picked.append((fp, row["rank"], float(row["u_score"])))
+    return picked
+
+
+def save_mmm_selection_csv(
+    save_dir: Path,
+    new_rows: list[dict[str, str | float]],
+    u_metric: str,
+    splits_updated: set[str],
+) -> Path:
+    csv_path = save_dir / MMM_SELECTION_CSV
+    kept: list[dict[str, str]] = []
+    if csv_path.is_file():
+        with open(csv_path, encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("u_metric") == u_metric and row.get("split") in splits_updated:
+                    continue
+                kept.append(row)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=MMM_SELECTION_FIELDS)
+        writer.writeheader()
+        for row in kept:
+            writer.writerow({k: row[k] for k in MMM_SELECTION_FIELDS})
+        for row in new_rows:
+            writer.writerow({k: row[k] for k in MMM_SELECTION_FIELDS})
+    print(f"Wrote {csv_path} (min/median/max picks for u {u_metric})")
+    return csv_path
 
 
 def select_min_median_max_full_cohort_split(
@@ -694,10 +795,15 @@ def visualize_full_cohort(
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     n_figs = 0
+    mmm_cache_rows: list[dict[str, str | float]] = []
+    mmm_splits_updated: set[str] = set()
     print(
         f"Full cohort viz: selection={selection}  splits={', '.join(splits)}  "
         f"view={run_view}  → {save_dir}"
     )
+
+    if selection == "min_median_max" and (save_dir / MMM_SELECTION_CSV).is_file():
+        print(f"Found {MMM_SELECTION_CSV}; will reuse picks for u {u_metric} when valid")
 
     for sp in splits:
         files = collect_npz_files(input_dir, sp)
@@ -734,14 +840,29 @@ def visualize_full_cohort(
                 n_figs += 1
             print(f"  {sp}: wrote {len(groups)} class plot(s)")
         elif selection == "min_median_max":
-            eligible = [
-                fp for fp in files if deformation_class_from_filename(fp) != "none"
-            ]
-            print(
-                f"  {sp}: scoring {u_metric} ‖u‖ on {len(eligible)} NPZs "
-                f"(excluding none; {len(files) - len(eligible)} skipped)…"
-            )
-            picked = select_min_median_max_full_cohort_split(files, u_metric)
+            picked = try_load_mmm_split_cache(save_dir, input_dir, sp, u_metric)
+            if picked is not None:
+                print(f"  {sp}: using cached min/median/max selection ({len(picked)} picks)")
+            else:
+                eligible = [
+                    fp for fp in files if deformation_class_from_filename(fp) != "none"
+                ]
+                print(
+                    f"  {sp}: scoring {u_metric} ‖u‖ on {len(eligible)} NPZs "
+                    f"(excluding none; {len(files) - len(eligible)} skipped)…"
+                )
+                picked = select_min_median_max_full_cohort_split(files, u_metric)
+                mmm_splits_updated.add(sp)
+                for fp, rank, score in picked:
+                    mmm_cache_rows.append(
+                        _mmm_pick_row(
+                            split=sp,
+                            rank=rank,
+                            u_metric=u_metric,
+                            fp=fp,
+                            score=score,
+                        )
+                    )
             for fp, rank, score in picked:
                 print(
                     f"  {sp} / {rank}: {u_metric} ‖u‖={score:.3f} from {fp.name}"
@@ -764,6 +885,9 @@ def visualize_full_cohort(
             )
         else:
             raise ValueError(f"Full cohort does not support selection={selection!r}")
+
+    if selection == "min_median_max" and mmm_cache_rows:
+        save_mmm_selection_csv(save_dir, mmm_cache_rows, u_metric, mmm_splits_updated)
 
     if no_show:
         plt.close("all")
