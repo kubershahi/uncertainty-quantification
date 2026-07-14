@@ -10,9 +10,8 @@ Modes:
   - Full cohort (``Train``/``Val``/``Test``):
       ``--selection random`` (default) → one random sample per class per split
       (up to 15 plots) with orthogonal/montage views
-      ``--selection min_median_max`` → min / median / max per class per split
-      by ``--u-metric`` (scores ‖u‖ only for selection; cohort stats live in
-      ``create_synth_data.py`` output ``split_class_u_stats.csv``)
+      ``--selection min_median_max`` → min / median / max per split over non-``none``
+      classes (4 transforms × 3 splits → 9 plots) by ``--u-metric``
 
 ``--run-view orthogonal|montage`` controls row layout (``--montage-z-step`` for montage).
 
@@ -24,7 +23,7 @@ python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir dat
 # Full cohort: random one-per-class × all splits (15 plots)
 python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection random --save-dir assets/images/synth-data/torchio/hcp/fullrun_random_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
 
-# Full cohort: min/median/max per class by mean ‖u‖ (15 plots per split)
+# Full cohort: min/median/max per split by mean ‖u‖, excluding none (9 plots)
 python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/fullrun_mmm --no-show --run-view orthogonal --u-contours --checkerboard
 
 # Single split only
@@ -331,25 +330,20 @@ def group_class_examples(files: list[Path], seed: int) -> list[tuple[str, Path]]
     return groups
 
 
-def select_min_median_max_by_class(
+def select_min_median_max_full_cohort_split(
     files: list[Path],
     u_metric: str,
-) -> list[tuple[str, Path, str, float]]:
-    """Per deformation class: min / median / max by ``u_metric`` over the split."""
-    pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
-    for fp in files:
-        cls = deformation_class_from_filename(fp)
-        if cls in pools:
-            pools[str(cls)].append(fp)
-    picked: list[tuple[str, Path, str, float]] = []
-    for cls in DEFORM_CLASSES:
-        pool = pools[cls]
-        if not pool:
-            continue
-        print(f"    {cls}: scoring {len(pool)} sample(s) by {u_metric} ‖u‖…")
-        for fp, rank, score in select_min_median_max_files(pool, u_metric):
-            picked.append((cls, fp, rank, score))
-    return picked
+) -> list[tuple[Path, str, float]]:
+    """Min / median / max by ``u_metric`` over a split, excluding ``none`` class."""
+    eligible = [
+        fp for fp in files if deformation_class_from_filename(fp) != "none"
+    ]
+    return select_min_median_max_files(eligible, u_metric)
+
+
+def _mmm_rank_subtitle(rank: str, u_metric: str) -> str:
+    rank_label = {"min": "Minimum", "median": "Median", "max": "Maximum"}[rank]
+    return f"{rank_label} of u {u_metric} sample"
 
 
 def _style_axis(ax: plt.Axes) -> None:
@@ -740,26 +734,28 @@ def visualize_full_cohort(
                 n_figs += 1
             print(f"  {sp}: wrote {len(groups)} class plot(s)")
         elif selection == "min_median_max":
+            eligible = [
+                fp for fp in files if deformation_class_from_filename(fp) != "none"
+            ]
             print(
-                f"  {sp}: computing {u_metric} ‖u‖ scores per class "
-                f"({len(files)} NPZs)…"
+                f"  {sp}: scoring {u_metric} ‖u‖ on {len(eligible)} NPZs "
+                f"(excluding none; {len(files) - len(eligible)} skipped)…"
             )
-            picked = select_min_median_max_by_class(files, u_metric)
-            for label, fp, rank, score in picked:
+            picked = select_min_median_max_full_cohort_split(files, u_metric)
+            for fp, rank, score in picked:
                 print(
-                    f"  {sp} / {label} {rank}: "
-                    f"{u_metric} ‖u‖={score:.3f} from {fp.name}"
+                    f"  {sp} / {rank}: {u_metric} ‖u‖={score:.3f} from {fp.name}"
                 )
                 _render_single_sample_plot(
                     fp,
-                    save_path=out_split / f"{label}_{rank}.png",
+                    save_path=out_split / f"{rank}.png",
                     z_slice_index=z_slice_index,
                     quiver_stride=quiver_stride,
                     use_u_contours=use_u_contours,
                     use_checkerboard=use_checkerboard,
                     montage_z_step=montage_z_step,
                     run_view=run_view,
-                    subtitle_extra=f"{rank} ({u_metric} ‖u‖={score:.3f})",
+                    subtitle_extra=_mmm_rank_subtitle(rank, u_metric),
                 )
                 n_figs += 1
             print(
@@ -983,7 +979,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["min_median_max", "random", "per_class"],
         help=(
             "Dry-run: per_class. Full cohort: random (one sample/class/split) or "
-            "min_median_max (three separate plots per split by --u-metric)."
+            "min_median_max (min/median/max per split over non-none classes, 9 plots)."
         ),
     )
     p.add_argument(
