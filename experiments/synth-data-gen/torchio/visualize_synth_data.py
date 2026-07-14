@@ -21,13 +21,13 @@ python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir dat
 python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_montage --no-show --run-view montage --montage-z-step 10 --u-contours --checkerboard
 
 # Full cohort: random one-per-class × all splits (15 plots) + CSV stats
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_100 --selection random --save-dir assets/images/synth-data/torchio/hcp/full100_random --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection random --save-dir assets/images/synth-data/torchio/hcp/fullrun_random_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
 
 # Full cohort: min/median/max by mean ‖u‖ (3 plots per split)
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_100 --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/full100_mmm --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/fullrun_mmm_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
 
 # Single split only
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_100 --split Train --selection random --save-dir assets/images/synth-data/torchio/hcp/full100_train --no-show
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --split Train --selection random --save-dir assets/images/synth-data/torchio/hcp/fullrun_train_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
 """
 
 from __future__ import annotations
