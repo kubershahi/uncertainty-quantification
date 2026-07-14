@@ -67,6 +67,15 @@ DEFORM_TITLE_LABELS: dict[str, str] = {
     "affine_elastic": "Affine+Elastic",
 }
 
+DEFORM_SUFFIX = {
+    "none": "none",
+    "rigid": "rig",
+    "affine": "aff",
+    "elastic": "ela",
+    "affine_elastic": "aela",
+}
+SUFFIX_TO_CLASS = {suffix: cls for cls, suffix in DEFORM_SUFFIX.items()}
+
 DEFORM_ROW_ORDER: tuple[tuple[str, str], ...] = (
     ("rigid", "rig"),
     ("affine", "aff"),
@@ -198,6 +207,28 @@ def load_sample(npz_path: Path) -> dict:
         }
 
 
+def deformation_class_from_filename(npz_path: Path) -> str:
+    """Parse class from NPZ stem (full run: ``{subject}_{suf}``; dry-run: ``{subject}_{class}[_NN]``)."""
+    stem = npz_path.stem
+    if "_" not in stem:
+        raise ValueError(f"Cannot parse deformation class from filename: {npz_path.name}")
+    suffix = stem.rsplit("_", 1)[-1]
+    if suffix in SUFFIX_TO_CLASS:
+        return SUFFIX_TO_CLASS[suffix]
+    if suffix.isdigit():
+        stem = stem.rsplit("_", 1)[0]
+    for cls in sorted(DEFORM_CLASSES, key=len, reverse=True):
+        if stem.endswith(f"_{cls}"):
+            return cls
+    raise ValueError(f"Cannot parse deformation class from filename: {npz_path.name}")
+
+
+def _cached_sample(path: Path, cache: dict[Path, dict]) -> dict:
+    if path not in cache:
+        cache[path] = load_sample(path)
+    return cache[path]
+
+
 def sample_u_stats(sample: dict) -> dict[str, float]:
     """‖u‖ min/Q1/mean/Q3/max over the full volume (all voxels)."""
     mag = displacement_magnitude(sample["u"].astype(np.float64))
@@ -256,7 +287,7 @@ def select_deformation_class_examples(
 ) -> list[tuple[Path, str, float]]:
     pools: dict[str, list[Path]] = {cls: [] for cls, _ in DEFORM_ROW_ORDER}
     for fp in files:
-        cls = load_sample(fp).get("deformation_class")
+        cls = deformation_class_from_filename(fp)
         if cls in pools:
             pools[str(cls)].append(fp)
     for cls, suf in DEFORM_ROW_ORDER:
@@ -279,7 +310,7 @@ def group_class_examples(files: list[Path], seed: int) -> list[tuple[str, Path]]
     """One random sample per deformation class."""
     pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
     for fp in files:
-        cls = load_sample(fp).get("deformation_class")
+        cls = deformation_class_from_filename(fp)
         if cls in pools:
             pools[str(cls)].append(fp)
 
@@ -307,7 +338,7 @@ def select_min_median_max_by_class(
     """Per deformation class: min / median / max by ``u_metric`` over the split."""
     pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
     for fp in files:
-        cls = load_sample(fp).get("deformation_class")
+        cls = deformation_class_from_filename(fp)
         if cls in pools:
             pools[str(cls)].append(fp)
     picked: list[tuple[str, Path, str, float]] = []
@@ -369,6 +400,7 @@ def _render_figure(
     sample_stats_note: str | None = None,
     row_h: float = 3.2,
     announce_save: bool = True,
+    sample_cache: dict[Path, dict] | None = None,
 ) -> None:
     nrows = len(picked)
     ncols = 5 if use_checkerboard else 4
@@ -377,9 +409,10 @@ def _render_figure(
     if use_checkerboard:
         col_titles.append("Checkerboard")
 
+    cache: dict[Path, dict] = {} if sample_cache is None else sample_cache
     row_u_vmax: list[float] = []
     for row, (fp, _, _) in enumerate(picked):
-        sample = load_sample(fp)
+        sample = _cached_sample(fp, cache)
         plane = row_planes[row] if row_planes is not None else "axial"
         if row_slice_indices is not None:
             idx = int(row_slice_indices[row])
@@ -401,7 +434,7 @@ def _render_figure(
 
     im_u_last = None
     for row, (file_path, _rank_label, _) in enumerate(picked):
-        sample = load_sample(file_path)
+        sample = _cached_sample(file_path, cache)
         source = sample["source"]
         moving = sample["moving"]
         u = sample["u"]
@@ -546,7 +579,7 @@ def group_class_examples_optional(
     """One random sample per class present; return (groups, missing_classes)."""
     pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
     for fp in files:
-        cls = load_sample(fp).get("deformation_class")
+        cls = deformation_class_from_filename(fp)
         if cls in pools:
             pools[str(cls)].append(fp)
     rng = random.Random(seed)
@@ -637,6 +670,7 @@ def _render_single_sample_plot(
         sample_stats_note=stats_note,
         row_h=3.0,
         announce_save=False,
+        sample_cache={fp: sample},
     )
     return {
         "file": fp.name,
@@ -681,8 +715,8 @@ def visualize_full_cohort(
 
         if selection == "random":
             print(
-                f"  {sp}: selecting one random sample per class "
-                f"({len(DEFORM_CLASSES)} classes, {len(files)} NPZs)…"
+                f"  {sp}: grouping {len(files)} NPZs by class "
+                f"(filename suffix only)…"
             )
             groups, missing = group_class_examples_optional(files, seed=seed + hash(sp) % 10007)
             if missing:
@@ -813,6 +847,7 @@ def visualize_per_class_combinations(
             sample_stats_note=stats_note,
             row_h=3.0,
             announce_save=False,
+            sample_cache={fp: sample},
         )
     csv_path = save_dir / "chosen_sample_u_stats.csv"
     fieldnames = ["class", "file", "subject_id", "min", "q1", "mean", "q3", "max"]
