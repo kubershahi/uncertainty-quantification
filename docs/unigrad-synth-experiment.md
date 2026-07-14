@@ -1,351 +1,108 @@
-# UniGrad Synth experiment — data, error-map U-Net, and runs
+# UniGrad Synth experiment — HCP pipeline overview
 
-End-to-end notes for **synthetic registration** and error-map U-Net training. This repo has two
-synth-related tracks:
+End-to-end plan for synthetic data and error-map generation, and error-map U-Net training
+on HCP anatomy. For registration vocabulary see `docs/registration-concepts.md`. For HCP download,
+layout, and Phase I script detail see `docs/hcp-dataset.md`.
 
-| Track | Dim | Phase I script | Output |
-| --- | ---: | --- | --- |
-| **IXI 2D** (legacy) | 2D | `create_synth_data.py` (superseded for HCP) | `*_triplet.npz` |
-| **HCP 3D** (current) | 3D | `create_synth_data.py` | `datasets/synth-data/torchio/hcp/<split>/*.npz` |
+---
 
-For 3D IO on IXI see `docs/unigrad-io-experiment.md`. For HCP download/QC see `docs/hcp-dataset.md`.
-For registration vocabulary see `docs/registration-concepts.md`.
+## Three phases
 
-Artifact roots:
+| Phase | Goal | Scripts (current / planned) | Output |
+| --- | --- | --- | --- |
+| **1) Synthetic data generation** | Known GT displacement `u` from TorchIO warps | `experiments/synth-data-gen/torchio/` | `datasets/synth-data/torchio/hcp/` |
+| **2) Error-map generation** | `u_pred` from UniGradICON → error map vs GT | `experiments/error-map-gen/unigrad-synth/` | `datasets/error-map/unigrad-synth/hcp/` (planned) |
+| **3) Error-map U-Net regression** | Learn to predict error map from registration inputs | `experiments/regression/unigrad-synth/` | `assets/runs/regression/unigrad-synth/` (planned) |
+
+**Artifact roots:**
 
 | Role | Path |
 | --- | --- |
-| IXI 2D slices | `data/IXI_2D/` (or `datasets/IXI_2D/`) |
-| IXI synth triplets | `data/IXI_2D_synth_trip/` |
-| IXI UniGrad fivers | `datasets/error-map/unigrad-synth/ixi_2d_fiver/` |
 | HCP T1w (real) | `datasets/hcp/` |
-| **HCP 3D synth** | `datasets/synth-data/torchio/hcp/{Train,Val,Test}/` |
-| Data scripts | `experiments/synth-data-gen/torchio/`, `experiments/error-map-gen/unigrad-synth/` |
-| Train / eval (2D) | `experiments/regression/unigrad-synth/` |
-| Run outputs | `assets/runs/regression/unigrad-synth/2d/error_unet_run{N}/` |
-| QC figures | `assets/images/synth-data/torchio/`, `assets/images/synth-data/` |
+| HCP synth NPZ | `datasets/synth-data/torchio/hcp/{Train,Val,Test}/` |
+| Error-map NPZ (planned) | `datasets/error-map/unigrad-synth/hcp/` |
+| QC figures | `assets/images/synth-data/torchio/hcp/` |
+| U-Net runs (planned) | `assets/runs/regression/unigrad-synth/` |
 
 ---
 
-## Pipeline (IXI 2D — legacy)
+## Phase 1 — Synthetic data generation
 
-1. **Phase I — Triplets** — TorchIO affine + elastic → `*_triplet.npz` (`image`, `warped`, `phi`, …).
-2. **Phase II — Fivers** — `create_unigrad_synth_data.py`: UniGradICON → `phi_pred`, `error_map`.
-3. **Phase III — Train** — `train_unigrad_synth_unet.py`: 4-channel `UNet2D` → scalar `error_map`.
-4. **Eval / QC** — `eval_unigrad_synth_unet.py`, `visualize_synth_data.py`, `visualize_unigrad_data.py`.
+TorchIO applies controlled deformations to HCP T1w volumes and writes registration triplets with
+ground-truth displacement `u` in voxel units. One sample per subject in full run; five deformation
+classes (`none`, `rigid`, `affine`, `elastic`, `affine_elastic`); deterministic Train / Val / Test
+splits and balanced class mix.
 
-Model inputs: normalized **image**, **warped**, **`phi_pred / phi_scale`**.  
-Target: **`error_map`** (pixels). Loss on **`valid_mask`** where applicable.
+For NPZ schema, ‖u‖ cleanup, split policy, visualization modes (`per_class`, `random`,
+`min_median_max`), and commands, see **`docs/hcp-dataset.md` § HCP synthetic data generation
+(Phase I)**.
 
 ---
 
-## HCP 3D synthetic data (`create_synth_data.py`)
+## Phase 2 — Error-map generation (medical image registration model)
 
-Phase I for the **HCP branch**: one synthetic registration pair per subject, 3D volumes in native
-LAS voxel grid.
+**Goal:** For each synth pair from Phase 1, run **UniGradICON** (or an equivalent pretrained
+deformable registration model) to estimate a predicted displacement field `u_pred`. Compare against
+stored ground truth `u` to build an **error map** — the per-voxel registration error that Phase 3
+will learn to predict.
 
-### Input / output layout
+**Planned workflow:**
 
-**Input** (per subject):
+1. Load `source`, `moving` from HCP synth NPZ (masked z-score intensities on the native voxel grid).
+2. Register moving → fixed with UniGradICON; recover `u_pred` in the same voxel index space as `u`.
+3. Compute error map (e.g. magnitude ‖u_pred − u‖ or stacked component error).
+4. Write augmented NPZ under `datasets/error-map/unigrad-synth/hcp/{Train,Val,Test}/` with keys such
+   as `u_pred`, `u` (GT), `error_map`, and masks for valid voxels.
 
-```text
-datasets/hcp/<subject_id>/T1w/
-  T1w_acpc_dc_restore_brain.nii.gz
-  brainmask_fs.nii.gz
-```
+**Why synth first:** GT `u` is exact, so registration error is known without manual annotation.
+This isolates model failure modes (affine vs elastic vs composite warps) before applying the same
+pipeline to real HCP-held-out subjects.
 
-**Output:**
+**Status:** planned. Existing `create_unigrad_synth_data.py` targets legacy 2D triplets; HCP volume
+input and output paths will be wired in next.
 
-```text
-datasets/synth-data/torchio/hcp/{Train,Val,Test}/<subject_id>_<suffix>.npz          # qc_passed=True
-datasets/synth-data/torchio/hcp_qc_fail/{Train,Val,Test}/<subject_id>_<suffix>.npz  # qc_passed=False
-```
+**Scripts (target):**
 
-Suffixes: `none`, `rig`, `aff`, `ela`, `aela` (see deformation classes below). Training reads
-only `hcp_synth/`; failed QC samples are kept under `hcp_synth_qc_fail/` for debugging.
-
-### NPZ schema
-
-| Key | Shape / type | Meaning |
-| --- | --- | --- |
-| `source` | `(X, Y, Z)` float32 | Fixed image; **masked z-score** (μ, σ from source brain mask) |
-| `moving` | `(X, Y, Z)` float32 | Warped image; same μ, σ as `source` |
-| `u` | `(3, X, Y, Z)` float32 | Ground-truth displacement; **voxel units** (`u_unit="vox"`) |
-| `mask` | `(X, Y, Z)` bool | `brainmask_fs` |
-| `source_affine` | `(4, 4)` float32 | NIfTI voxel → world (mm) |
-| `source_spacing` | `(3,)` float32 | Voxel size in mm |
-| `u_unit` | str | `"vox"` |
-| `deformation_class` | str | See below |
-| `magnitude_range` | str | `low` / `mid` / `high` / `none` — TorchIO **sampling bounds**, not realized ‖u‖ |
-| `u_max_interior` | float | Max ‖u‖ in mask ∩ interior margin (voxels) |
-| `u_mean_interior` | float | Mean ‖u‖ in mask ∩ interior margin (voxels) |
-| `subject_id` | str | HCP ID |
-| `qc_passed` | bool | QC on raw warp (see below) |
-
-**Naming:** we store **`u`** (displacement), not φ. Position map would be φ = identity + u.
-
-### Split and deformation balance
-
-- **Split:** deterministic 70 / 15 / 15 by subject hash (`Train` / `Val` / `Test`). One sample per
-  subject (no multi-warp reuse).
-- **Deformation mix** (same ratios in every split): 5% none, 20% rigid, 25% affine, 25%
-  elastic, 25% affine+elastic (`affine_elastic`).
-
-Manifest: `datasets/synth-data/torchio/hcp/split_manifest.json` (includes per-class/tier counts and
-`deformation_stats` with ‖u‖ summaries for passed samples).
-
-### Deformation classes and file nomenclature
-
-Each HCP subject gets **one** synthetic sample. The warp type is stored in NPZ as `deformation_class`
-and encoded in the filename suffix: `<subject_id>_<suffix>.npz`.
-
-There are **five** classes (not four): four are actual warps plus an identity baseline.
-
-| `deformation_class` | Suffix | Example filename | TorchIO | Description |
-| --- | --- | --- | --- | --- |
-| `none` | `none` | `100206_none.npz` | (identity) | No warp; `moving ≈ source`, `u ≈ 0`. Baseline (~5%). |
-| `rigid` | `rig` | `100206_rig.npz` | `RandomAffine` | Rotation + translation only (`scales=1`). (~20%). |
-| `affine` | `aff` | `100206_aff.npz` | `RandomAffine` | Full affine: scale, shear, rotate, translate. (~25%). |
-| `elastic` | `ela` | `100206_ela.npz` | `RandomElasticDeformation` | B-spline elastic / non-rigid only. (~25%). |
-| `affine_elastic` | `aela` | `100206_aela.npz` | Affine → elastic | Global affine **then** local elastic (combined). (~25%). |
-
-**Naming rationale**
-
-- **`elastic`** — matches TorchIO `RandomElasticDeformation` (clearer than `non_rigid`).
-- **`affine_elastic`** — reads as “affine then elastic” (clearer than `affine_rigid_plus_non_rigid`).
-- **`rigid`** — rotation + translation without scale (was `rigid_like` in early versions).
-- Short **suffixes** keep filenames readable; full class name is always in `deformation_class`.
-
-**Registration taxonomy mapping**
-
-```text
-none          →  identity (not a deformation; QC / baseline)
-rigid         →  rigid motion
-affine        →  affine motion
-elastic       →  non-rigid / deformable (elastic only)
-affine_elastic →  composite (global + local), common in real registration
-```
-
-**Legacy names** (regenerate data if NPZ still uses these):
-
-| Legacy `deformation_class` | Legacy suffix | Current |
-| --- | --- | --- |
-| `rigid_like` | `_rig` | `rigid` / `_rig` |
-| `non_rigid` | `_nr` | `elastic` / `_ela` |
-| `affine_rigid_plus_non_rigid` | `_ar` | `affine_elastic` / `_aela` |
-
-Constants in `experiments/synth-data-gen/torchio/create_synth_data.py`: `DEFORMATION_RATIOS`,
-`DEFORMATION_SUFFIX`.
-
-**QC visualization** (`visualize_synth_data.py`, default `--selection random`): rows are one example
-each of **`rigid`**, **`affine`**, **`elastic`** (not `none` or `affine_elastic`). Prefers
-`qc_passed=True` samples; per-row ‖u‖ color scaling is on by default (`--per-row-u-scale`). Use
-`--mask-moving` for display-only masking of warped slices (reduces black padding voids; does not
-change saved NPZ).
-
-### Magnitude ranges (low / mid / high)
-
-Within each non-`none` class, a **parameter sampling range** is assigned deterministically from
-`subject_id + deformation_class + seed`. Ranges set TorchIO bounds for `RandomAffine` /
-`RandomElasticDeformation`; each draw is still **uniformly random inside** those bounds, so
-`high` range does **not** guarantee a large realized ‖u‖.
-
-| Range | Share | Role |
-| --- | ---: | --- |
-| `low` | ~30% | Narrower parameter bounds |
-| `mid` | ~40% | Mid bounds |
-| `high` | ~30% | Wider bounds (still below global max QC) |
-
-`none` uses range `none` (identity). Per-range TorchIO bounds (degrees, translation mm, scales,
-elastic max displacement mm) are in `create_synth_data.py` (`RANGE_RIGID`, `RANGE_AFFINE`,
-`RANGE_ELASTIC`).
-
-### TorchIO: how deformation is created
-
-Full technical walkthrough: **`docs/registration-concepts.md` § 3D synthetic deformation and
-displacement extraction** (implicit backward warp, identity-grid trick, z-score vs φ).
-
-Summary:
-
-1. TorchIO/SimpleITK samples transform parameters (mm) and applies **implicit backward warping**
-   — no full-resolution deformation field is materialized in memory.
-2. Dense **`u`** is recovered via the **identity-grid trick** in `create_synth_data.py`.
-3. Intensities are **masked z-scored after** warp; **`u` is unchanged** (see below and registration-concepts).
-
-See `docs/registration-concepts.md` for φ vs u and backward warping.
-
-### Intensity normalization vs displacement (important)
-
-**Z-scoring `source` and `moving` after computing `u` does not change `u`.**
-
-| Quantity | What it is | Affected by intensity z-score? |
-| --- | --- | --- |
-| `u` (stored GT) | Geometric map: which **voxel index** each output voxel samples from | **No** — from coordinate grid, not intensities |
-| `source`, `moving` | Scalar **intensity** per voxel | **Yes** — linear `(I − μ) / σ` for training stability |
-| `phi_pred` (downstream) | Registration network output: displacement / position map in **voxel index space** | **No** (in principle) — geometry, not intensity scaling |
-
-#### Phase I: why z-score does not alter `u`
-
-`u` is extracted from warping an **identity coordinate grid**, not from MRI intensities. Masked
-z-score `(I − μ) / σ` is applied only to scalar intensity arrays **after** `u` is computed. It
-rescales signal values per voxel; it does not move indices on the grid.
-
-#### Downstream registration: why z-score does not alter `phi_pred`
-
-When Phase II runs UniGradICON (or similar) on the saved NPZ pair:
-
-- Inputs are z-scored **`source`** and **`moving`** on the **same voxel grid** as stored **`u`**.
-- Registration estimates **where** structures align (geometry). Displacement φ (or u) lives in
-  **index space**, not intensity space.
-- Masked z-score with **shared μ, σ** (from the fixed/source brain mask) is an **affine intensity
-  transform** applied consistently to both images. Similarity metrics used by deformable registration
-  (e.g. LNCC) are invariant to affine intensity rescaling; anatomical alignment — hence φ — is
-  unchanged in principle.
-- We apply the **same** μ, σ to `source` and `moving` so the pair remains on one intensity scale
-  for the network. Do **not** z-score `source` and `moving` with independent statistics.
-
-**Caveat:** we warp raw T1, then z-score (`moving_z = (warp(source) − μ) / σ`). This differs
-slightly from `warp(z-score(source))` near interpolation boundaries, but does not change the stored
-GT `u`. Downstream registration optimizes φ on the normalized pair it receives; that φ targets the
-same voxel-grid correspondence as `u`.
-
-**Do not** rescale or recompute `u` / φ after z-score.
-
-Pipeline order in `create_synth_data.py`:
-
-1. Warp **raw** T1 with TorchIO (+ affine); extract **`u`** from grid.
-2. QC on **raw** intensities (e.g. moving mean vs source in mask).
-3. Apply **masked z-score** to `source` and `moving` using μ, σ from **source** mask only; save
-   with unchanged **`u`**.
-
-### Transform defaults (physical units)
-
-See table in § Deformation classes and file nomenclature for class ↔ suffix mapping. Parameter
-ranges are **range-specific** (low / mid / high). Example **mid** range values:
-
-| Class | TorchIO | Key parameters (mid range) |
-| --- | --- | --- |
-| `none` | (identity) | — |
-| `rigid` | `RandomAffine` | `scales=1`, `degrees=±6°`, `translation=±4` **mm** |
-| `affine` | `RandomAffine` | `scales=0.97–1.03`, `degrees=±8°`, `translation=±4` **mm** |
-| `elastic` | `RandomElasticDeformation` | 7 control points, `max_displacement=±6` **mm** |
-| `affine_elastic` | Affine then elastic | Mid affine + mid elastic |
-
-### QC
-
-| Check | Default | Notes |
-| --- | --- | --- |
-| `MAX_U_INTERIOR_VOX` | 25 | Max ‖u‖ in mask ∩ interior margin |
-| `MAX_U_GLOBAL_VOX` | 60 | Max ‖u‖ full volume |
-| `MIN_U_MAX_INTERIOR_BY_CLASS` | per class | **Floor** on interior max ‖u‖ (reject near-identity warps) |
-| `MIN_U_MEAN_INTERIOR_BY_CLASS` | per class | **Floor** on interior mean ‖u‖ |
-| `MAX_U_NONE_VOX` | 0.5 | `none` class: interior max ‖u‖ must stay below this |
-| `MIN_MOVING_MEAN_RATIO` | 0.05 | On **raw** intensities before z-score |
-| `INTERIOR_MARGIN` | 10 voxels | Border excluded from interior QC |
-| `MAX_TRANSFORM_ATTEMPTS` | 20 | Resample transform if QC fails |
-
-Per-class interior floors (voxels):
-
-| Class | min max ‖u‖ | min mean ‖u‖ |
-| --- | ---: | ---: |
-| `none` | (max < 0.5) | — |
-| `rigid` | 1.5 | 0.5 |
-| `affine` | 2.0 | 0.7 |
-| `elastic` | 1.5 | 0.5 |
-| `affine_elastic` | 3.0 | 1.0 |
-
-Failed samples after all attempts are saved to `datasets/synth-data/torchio/hcp_qc_fail/{split}/` with
-`qc_passed=False` (not in the training set). List: `datasets/synth-data/torchio/hcp_qc_fail/qc_flagged_paths.txt`.
-
-### Padding artifact (moving display)
-
-After affine/rigid warps, vacated voxels are filled with `default_pad_value="minimum"` (dark).
-Masked z-score sets outside-brain voxels to 0. The **brain mask is not warped** with the image, so
-warped slices can show **black voids** where anatomy moved away — this is a display/padding
-artifact, not missing HCP data. Training NPZ keeps this convention; use `mask` (and optionally
-`--mask-moving` in `visualize_synth_data.py`) for QC figures.
-
-### Orientation (storage vs display)
-
-- **Stored volumes** stay in native **LAS** voxel array order (from NIfTI); no reorientation in
-  `create_synth_data.py`.
-- **`u`** is in the same voxel index space as `source` / `moving`.
-- Radiological axial display (`rot90`) is **visualization only** — see
-  `visualize_hcp_data.py` and `docs/hcp-dataset.md`.
-
-### Example commands
-
-```bash
-python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp --qc-fail-path datasets/synth-data/torchio/hcp_qc_fail --workers 8
-python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp --max-subjects 30 --workers 4
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --split Train --save-path assets/images/synth-data/torchio/hcp/hcp_synth_random3.png --mask-moving --no-show
-```
-
-### Planned next steps (HCP branch)
-
-- [ ] Phase II: UniGradICON on HCP synth pairs → `u_pred`, `error_map`
-- [ ] Phase III: 3D error-map U-Net (analogous to IO track)
-- [ ] `visualize_hcp_synth_data.py` for NPZ QC
+- `experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py` — batch error-map generation
+- `experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py` — QC figures
 
 ---
 
-## Phase I — IXI 2D triplets (legacy)
+## Phase 3 — Error-map U-Net training on HCP synth
 
-<!-- TODO: document affine/elastic defaults for old 2D path if still referenced -->
+**Goal:** Train a U-Net to **predict the error map** from registration inputs available at inference
+time: fixed image, moving image, and predicted displacement (or position map) from the registration
+model. Trained on Phase 2 outputs where the target error map is known from Phase 1 GT.
 
-### Example commands
+**Planned workflow:**
 
-<!-- TODO -->
+1. **Inputs:** channels derived from `source`, `moving`, and `u_pred` (normalized consistently with
+   Phase 2).
+2. **Target:** `error_map` from Phase 2 (voxel units).
+3. **Train / val / test:** same split convention as Phase 1 (`Train` / `Val` / `Test` folders).
+4. **Eval:** held-out metrics (e.g. MAE on error map, calibration plots) and QC overlays on sample
+   volumes.
 
----
+The U-Net acts as an **uncertainty proxy**: it learns where the registration model is likely to be
+wrong as a function of image appearance and predicted deformation, without re-running the heavy
+registration network at inference.
 
-## Phase II — UniGrad fivers (`create_unigrad_synth_data.py`)
+**Status:** planned. Existing `train_unigrad_synth_unet.py` / `eval_unigrad_synth_unet.py` implement
+the 2D slice pipeline; volume architecture and HCP data loaders will be added next.
 
-### NPZ schema
+**Scripts (target):**
 
-<!-- TODO: list keys, units (pixels), phi scaling from ICON -->
-
-### Example commands
-
-<!-- TODO -->
-
----
-
-## Training (`train_unigrad_synth_unet.py`)
-
-### Loss and metrics
-
-<!-- TODO: MSE default, smooth_weight, early stop, metrics.csv columns -->
-
-### Model architecture
-
-<!-- TODO: UNet2D, base channels, 4 → 1 -->
-
-### Example commands
-
-<!-- TODO -->
+- `experiments/regression/unigrad-synth/train_unigrad_synth_unet.py`
+- `experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py`
 
 ---
 
-## Evaluation (`eval_unigrad_synth_unet.py`)
+## Intensity normalization and displacement (cross-phase note)
 
-### Default outputs
-
-<!-- TODO: training_curves.png, test_metrics.json, QC PNGs -->
-
-### Example commands
-
-<!-- TODO -->
-
----
-
-## Error-map U-Net runs
-
-<!-- TODO: comparison table run1, run2, … -->
-
-### run1 — `error_unet_run1`
-
-<!-- TODO -->
+Masked z-score on `source` and `moving` does **not** change stored `u` or predicted displacement in
+voxel index space — intensities are rescaled; geometry is not. Phase 2 registration and Phase 3
+training both use the same normalized pair on the fixed voxel grid. See
+`docs/registration-concepts.md` for φ vs `u` and backward-warp details.
 
 ---
 
@@ -353,14 +110,12 @@ python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir dat
 
 | File | Role |
 | --- | --- |
-| `experiments/synth-data-gen/torchio/create_synth_data.py` | Phase I — HCP 3D synth NPZ |
-| `experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py` | Phase II fivers (IXI 2D) |
-| `experiments/synth-data-gen/torchio/modify_synth_data.py` | Triplet post-processing (IXI 2D) |
-| `experiments/synth-data-gen/torchio/visualize_synth_data.py` | Triplet QC |
-| `experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py` | Fiver QC |
-| `experiments/synth-data-gen/torchio/visualize_hcp_data.py` | HCP T1w QC |
-| `experiments/regression/unigrad-synth/train_unigrad_synth_unet.py` | Train 2D U-Net |
-| `experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py` | Eval + figures |
-| `scripts/download_hcp.sh` | HCP S3 download |
-| `docs/registration-concepts.md` | Registration vocabulary |
-| `docs/hcp-dataset.md` | HCP layout and download |
+| `experiments/synth-data-gen/torchio/create_synth_data.py` | Phase 1 — synth NPZ generation |
+| `experiments/synth-data-gen/torchio/visualize_synth_data.py` | Phase 1 — NPZ QC figures |
+| `experiments/synth-data-gen/torchio/visualize_hcp_data.py` | Raw HCP T1w QC |
+| `experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py` | Phase 2 — error-map generation (HCP adapt planned) |
+| `experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py` | Phase 2 — error-map QC |
+| `experiments/regression/unigrad-synth/train_unigrad_synth_unet.py` | Phase 3 — U-Net training (HCP adapt planned) |
+| `experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py` | Phase 3 — eval and figures |
+| `docs/hcp-dataset.md` | HCP download, layout, Phase 1 detail |
+| `docs/registration-concepts.md` | Registration / displacement / error-map concepts |

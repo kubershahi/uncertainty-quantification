@@ -1,24 +1,22 @@
-# HCP dataset — role, download, layout, and QC
+# HCP Dataset Details
 
 Notes for **Human Connectome Project (HCP) Young Adult (S1200)** structural T1w data used in this
-repo. HCP is the **real-data** track alongside **IXI 2D synth** (`experiments/synth-data-gen/torchio/`) and
-**IXI 3D IO** (`experiments/error-map-gen/unigrad-io/`). See `docs/registration-concepts.md` for registration
-vocabulary and `docs/unigrad-synth-experiment.md` for the IXI synth pipeline.
+repo. See `docs/registration-concepts.md` for registration vocabulary.
 
 ---
 
 ## Role in this project
 
-| Track | Data | Space | Ground truth |
-| --- | --- | --- | --- |
-| **Synth (IXI 2D)** | TorchIO triplets → UniGrad fivers | 2D slices, pixels | Known `phi_true` |
-| **IO (IXI 3D)** | UniGrad ICON instance optimization | 3D volumes, voxels | `phi_predio` vs `phi_pred` |
-| **HCP (this doc)** | Minimally preprocessed T1w NIfTI | **Native** 3D, LAS voxels | Synth `u` in `hcp_synth/` |
+HCP is the **real-anatomy** source for synthetic registration pairs: minimally preprocessed T1w
+volumes in **native subject space**, with known ground-truth displacement fields from TorchIO.
 
-**Why HCP (vs IXI for real data):**
+**Why HCP (vs datasets like IXI):**
 
 - ~0.7 mm isotropic T1, large healthy cohort, consistent acquisition protocol
-- **T1w** minimally preprocessed in **native subject space** (not MNI) — registration remains a meaningful problem
+- **T1w** minimally preprocessed in **native subject space** (not MNI) — registration remains a
+  meaningful inter-subject problem
+- Skull-stripped brain volumes and FreeSurfer masks ship with the release — useful for masking,
+  QC, and visualization
 - Public AWS mirror compatible with batch download on NRP
 
 **Why T1w only (for now):**
@@ -100,7 +98,7 @@ Per subject, under `datasets/hcp/<subject_id>/T1w/` — **original HCP filenames
 
 | File | Role in project |
 | --- | --- |
-| `T1w_acpc_dc_restore_brain.nii.gz` | Brain-extracted T1 — primary anatomy / future **fixed** or **moving** image |
+| `T1w_acpc_dc_restore_brain.nii.gz` | Brain-extracted T1 — primary anatomy / **fixed** or **moving** image |
 | `aparc+aseg.nii.gz` | FreeSurfer labels — QC, ROI evaluation, visualization |
 | `brainmask_fs.nii.gz` | Binary brain mask — restrict metrics / loss to brain voxels |
 
@@ -121,7 +119,7 @@ datasets/hcp/
 
 ---
 
-## QC visualization
+## Raw HCP QC visualization
 
 **Script:** `experiments/synth-data-gen/torchio/visualize_hcp_data.py`
 
@@ -138,30 +136,208 @@ python experiments/synth-data-gen/torchio/visualize_hcp_data.py --data-dir datas
 
 ---
 
-## HCP 3D synthetic data (Phase I)
+## HCP synthetic data generation (Phase I)
 
-**Script:** `experiments/synth-data-gen/torchio/create_synth_data.py`  
-**Output:** `datasets/synth-data/torchio/hcp/{Train,Val,Test}/<subject_id>_<suffix>.npz`
+Phase I builds **known-displacement registration triplets** from HCP T1w: fixed `source`, warped
+`moving`, and ground-truth displacement `u` (voxel units). Scripts live under
+`experiments/synth-data-gen/torchio/`.
 
-One warp per subject; balanced deformation classes (`none`, `rigid`, `affine`, `elastic`,
-`affine_elastic`); filenames `<subject_id>_<suffix>.npz` with suffixes `none`, `rig`, `aff`, `ela`,
-`aela`. Masked z-score intensities; ground-truth `u` in voxels. Class table:
-`docs/unigrad-synth-experiment.md` § *Deformation classes and file nomenclature*; pipeline detail:
-`docs/registration-concepts.md` § *3D synthetic deformation and displacement extraction*;
-experiment config: `docs/unigrad-synth-experiment.md`.
+| Script | Role |
+| --- | --- |
+| `create_synth_data.py` | Generate NPZ samples from HCP T1w |
+| `visualize_synth_data.py` | QC figures from NPZ output |
+
+**Dataset paths:**
+
+| Artifact | Path |
+| --- | --- |
+| Raw HCP | `datasets/hcp/` |
+| Full synth cohort | `datasets/synth-data/torchio/hcp/{Train,Val,Test}/` |
+| Dry-run synth | `datasets/synth-data/torchio/hcp_dryrun/` (flat) |
+| Subset run (e.g. 100 subjects) | `datasets/synth-data/torchio/hcp_100/` |
+| QC figures | `assets/images/synth-data/torchio/hcp/` |
+
+---
+
+### `create_synth_data.py` — generation logic
+
+**Input:** `datasets/hcp/<subject_id>/T1w/T1w_acpc_dc_restore_brain.nii.gz` +
+`brainmask_fs.nii.gz`
+
+**Output:**
+
+- **Full run:** `datasets/synth-data/torchio/hcp/{Train,Val,Test}/<subject_id>_<suffix>.npz`
+- **Dry run:** flat folder, `<subject_id>_<class>[_NN].npz`
+
+**Each NPZ contains:**
+
+| Key | Description |
+| --- | --- |
+| `source` | Fixed image (masked z-score, float32) |
+| `moving` | Deformed image (same normalization) |
+| `u` | Displacement field `(3, X, Y, Z)` in **voxels** |
+| `source_mask`, `moving_mask`, `identity_grid_mask` | Written for **visualization only**; not used for ‖u‖ stats |
+| `deformation_class` | One of `none`, `rigid`, `affine`, `elastic`, `affine_elastic` |
+| `subject_id` | HCP subject ID |
+
+TorchIO transforms run in physical space (mm) using the NIfTI affine; `u` is recovered in voxel
+index space via the identity-grid trick (backward warp).
+
+#### Deformation classes and filenames
+
+One warp per subject in full run. Class is encoded in the filename suffix:
+
+| Class | Suffix | Target share (full run) |
+| --- | --- | --- |
+| `none` | `none` | 5% |
+| `rigid` | `rig` | 20% |
+| `affine` | `aff` | 25% |
+| `elastic` | `ela` | 25% |
+| `affine_elastic` | `aela` | 25% |
+
+Single parameter envelope per class (no low/mid/high tiers). Rigid / affine / affine+elastic sit
+between previous mid and high settings; pure elastic uses a stronger envelope (~12 mm max
+displacement) for clearer deformation.
+
+#### Full run: splits and class assignment
+
+- **Split policy:** deterministic **75 / 10 / 15** Train / Val / Test by subject hash (`--seed`,
+  default 42). Before generation, the script prints split sizes and per-split class counts.
+- **Class assignment:** within each split, subjects are shuffled with a split-specific seed; class
+  quotas follow the target ratios above (largest-remainder rounding).
+
+Use `--max-subjects N` for a subset (e.g. 100 subjects → ~75 / 10 / 15 with the same ratios).
+
+#### Dry run
+
+`--dry-run [N]` (default N=5) writes **5 classes × N samples** to a **flat** output folder.
+Distinct subjects are used within and across classes when enough HCP subjects are available.
+Filenames use the full class name (e.g. `100206_rigid.npz`, `100206_affine_elastic_02.npz`).
+
+#### ‖u‖ cleanup (both modes)
+
+Applied in order:
+
+1. Zero OOB voxels using `identity_grid_mask`
+2. Zero a **12-voxel border** on each face
+3. Clip ‖u‖ at **p99.9** (percentile over **nonzero** voxels only)
+
+#### Stats written at generation time
+
+| Mode | CSV | Content |
+| --- | --- | --- |
+| Dry run | `dryrun_class_u_stats.csv` | Per class: per-sample min/Q1/mean/Q3/max, then **mean over samples** |
+| Full run | `split_class_u_stats.csv` | Per split × class: same aggregation over **all** samples in that bucket |
+
+Also writes `split_manifest.json` (full run) with split counts and deformation mix.
+
+#### Commands
 
 ```bash
-python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp --workers 8
+# Dry run (25 samples)
+python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp_dryrun --dry-run 5 --workers 16
+
+# Full cohort
+python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp --workers 16
+
+# Subset (100 subjects)
+python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp_100 --max-subjects 100 --workers 16
+```
+
+---
+
+### `visualize_synth_data.py` — QC figures
+
+**Input:** NPZ folder from `create_synth_data.py` (flat dry-run or `{Train,Val,Test}/` full cohort).
+
+**Figure layout:** columns = source (fixed), warped (moving), u vectors, ‖u‖; optional checkerboard
+(`--checkerboard`). Axial slices use **radiological** display (`rot90`). Row layout:
+`--run-view orthogonal` (axial / coronal / sagittal) or `montage` (three axial slices).
+
+**Titles:**
+
+- Main: `HCP Synthetic Data Plot ({No/Rigid/Affine/Elastic/Affine+Elastic} Transformation)`
+- Subtitle: `Subject <id> - Radiological-style display - Orthogonal/Montage View`
+- Footer: per-sample ‖u‖ stats (min, Q1, mean, Q3, max) for the plotted sample
+
+Class grouping for full-run selection uses the **filename suffix only** (no volume load).
+
+#### Dry run — `--selection per_class`
+
+One random sample per deformation class (5 classes). Writes:
+
+- One PNG per class under `--save-dir`
+- `chosen_sample_u_stats.csv` — ‖u‖ stats for the **plotted samples only**
+
+```bash
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
+```
+
+#### Full cohort — `--selection random` (default)
+
+For each split (`Train`, `Val`, `Test`):
+
+1. Group NPZs by class from filename suffix
+2. Pick **one random sample per class** (`--seed`, split-specific offset)
+3. Plot → `{save_dir}/{split}/{class}.png`
+
+**Total: up to 15 figures** (5 classes × 3 splits). Does **not** recompute cohort-wide stats
+(those live in `split_class_u_stats.csv` from creation).
+
+```bash
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection random --save-dir assets/images/synth-data/torchio/hcp/fullrun_random_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
+```
+
+#### Full cohort — `--selection min_median_max`
+
+`none` is excluded (‖u‖ ≈ 0 everywhere). For each split:
+
+1. Score every non-`none` sample by `--u-metric` (`mean` or `max` of ‖u‖ over the volume)
+2. Select **min**, **median**, and **max** across that split
+3. Plot → `{save_dir}/{split}/{min|median|max}.png`
+4. Subtitle adds rank label, e.g. `Minimum of u mean sample`
+
+**Total: 9 figures** (3 ranks × 3 splits).
+
+On first run, writes `{save_dir}/min_median_max_selection.csv` with columns
+`split`, `rank`, `u_metric`, `subject_id`, `file`, `deformation_class`, `u_score`.
+Reruns with the same `--u-metric` reuse cached picks and skip re-scoring (delete the CSV to force
+recompute).
+
+```bash
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/fullrun_mmm --no-show --run-view orthogonal --u-contours --checkerboard
 ```
 
 ---
 
 ## Planned downstream
 
-- [x] Synthetic deformations on HCP T1 (TorchIO 3D) — `create_synth_data.py`
-- [ ] UniGradICON on HCP synth pairs → predicted displacement, error map
-- [ ] 3D error-map U-Net training
-- [ ] `visualize_hcp_synth_data.py` for NPZ QC
+### Phase 1 — Synthetic data generation
+
+Build known-displacement registration triplets from HCP T1w using TorchIO: fixed `source`, warped
+`moving`, and ground-truth displacement `u` in voxel units. Includes dry-run sanity checks, full
+cohort generation with balanced deformation classes, and QC visualization.
+
+**Files:** `create_synth_data.py`, `visualize_synth_data.py`
+
+### Phase 2 — Error-map generation (medical image registration model)
+
+Run a pretrained registration model (UniGradICON) on each HCP synth pair to obtain a predicted
+displacement field `u_pred`. The **error map** is the voxel-wise difference between prediction and
+ground truth (e.g. ‖u_pred − u‖ or component-wise error), giving supervised targets for uncertainty
+quantification without requiring manual labels.
+
+**Files:** scripts under `experiments/error-map-gen/unigrad-synth/`
+
+### Phase 3 — Error-map U-Net training on HCP synth
+
+Train a U-Net to predict the error map from registration inputs (fixed image, moving image, and
+predicted displacement). Because ground-truth error is known from Phase 1, this is fully supervised
+regression on synthetic data before moving to real held-out anatomy.
+
+**Files:** training and eval scripts under `experiments/regression/unigrad-synth/`
+
+See `docs/unigrad-synth-experiment.md` for the end-to-end pipeline overview across all three phases.
 
 ---
 
@@ -171,8 +347,7 @@ python experiments/synth-data-gen/torchio/create_synth_data.py --input-path data
 | --- | --- |
 | `scripts/download_hcp.sh` | S3 download to `datasets/hcp/` |
 | `deploy/nautilus/scripts/hcp_subjects_test10.txt` | 10-subject smoke list |
-| `experiments/synth-data-gen/torchio/create_synth_data.py` | HCP 3D synth NPZ generation |
+| `experiments/synth-data-gen/torchio/create_synth_data.py` | HCP synth NPZ generation |
+| `experiments/synth-data-gen/torchio/visualize_synth_data.py` | NPZ QC figures |
+| `experiments/synth-data-gen/torchio/visualize_hcp_data.py` | Raw HCP T1/mask QC figure |
 | `docs/registration-concepts.md` | Registration / displacement / error-map concepts |
-| `experiments/synth-data-gen/torchio/visualize_hcp_data.py` | Random-sample QC figure |
-| `docs/unigrad-synth-experiment.md` | HCP synth pipeline detail |
-| `docs/unigrad-io-experiment.md` | IXI 3D IO + error-map U-Net track |
