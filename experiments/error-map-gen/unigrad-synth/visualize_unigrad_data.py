@@ -480,7 +480,7 @@ def _render_figure(
         5: r"Error Map ($\|u_{\mathrm{gt}} - u_{\mathrm{pred}}\|$)",
     }
     if show_cosine_similarity:
-        col_titles[7] = r"Cosine Similarity ($\cos\theta$; black = undefined)"
+        col_titles[7] = r"Cosine Similarity ($\cos\theta$)"
 
     cache: dict[Path, dict] = {} if sample_cache is None else sample_cache
     row_u_vmax: list[float] = []
@@ -650,9 +650,8 @@ def _render_figure(
             gs=gs,
             cbar_col=8,
             ref_ax=ref_ax,
-            label=r"$\cos\theta$ (black: undefined)",
+            label=r"$\cos\theta$ ($-1$ opposite, $0$ orthogonal, $+1$ aligned)",
             ticks=[-1.0, 0.0, 1.0],
-            ticklabels=["−1 opposite", "0 ortho (white)", "+1 aligned"],
         )
 
     title_x = 0.5 * (left + right)
