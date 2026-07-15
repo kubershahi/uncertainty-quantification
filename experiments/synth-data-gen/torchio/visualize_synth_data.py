@@ -245,6 +245,15 @@ def sample_u_stats(sample: dict) -> dict[str, float]:
     }
 
 
+def _format_u_gt_stats_note(stats: dict[str, float]) -> str:
+    """Footer line with mathtext subscript (not literal ``u_gt``)."""
+    return (
+        rf"$\|u_{{\mathrm{{gt}}}}\|$ voxels: min={stats['min']:.2f}  "
+        rf"Q1={stats['q1']:.2f}  mean={stats['mean']:.2f}  "
+        rf"Q3={stats['q3']:.2f}  max={stats['max']:.2f}"
+    )
+
+
 def scalar_u_score(u: np.ndarray, metric: str) -> float:
     """Scalar ‖u_gt‖ score over the full volume (for min/median/max selection)."""
     mag = displacement_magnitude(u.astype(np.float64)).ravel()
@@ -604,7 +613,6 @@ def _render_figure(
             axes[(row, col)] = fig.add_subplot(gs[row, col])
 
     im_u_last = None
-    ref_ax_u = None
     for row, (file_path, _rank_label, _) in enumerate(picked):
         sample = _cached_sample(file_path, cache)
         source = sample["source"]
@@ -679,8 +687,6 @@ def _render_figure(
             levels = np.linspace(0.15 * u_vmax, 0.95 * u_vmax, 6)
             ax_u.contour(u_mag_sl, levels=levels, colors="white", linewidths=0.5, alpha=0.7)
         _style_axis(ax_u)
-        if ref_ax_u is None:
-            ref_ax_u = ax_u
 
         if use_checkerboard:
             ax_c = axes[(row, 5)]
@@ -692,13 +698,17 @@ def _render_figure(
             for col, t in col_titles.items():
                 axes[(0, col)].set_title(t, fontsize=_SUBTITLE, fontweight="medium", pad=10)
 
-    if im_u_last is not None and ref_ax_u is not None:
+    # Center colorbar on the middle row; height = 1.5 × that panel.
+    mid_row = nrows // 2
+    ref_ax = axes[(mid_row, 0)]
+    fig.canvas.draw()
+    if im_u_last is not None:
         _add_midheight_colorbar(
             fig,
             im_u_last,
             gs=gs,
             cbar_col=4,
-            ref_ax=ref_ax_u,
+            ref_ax=ref_ax,
             label=r"$\|u_{\mathrm{gt}}\|$ (voxels)",
         )
 
@@ -714,7 +724,6 @@ def _render_figure(
             va="bottom",
             fontsize=_LABEL - 1,
             color="0.25",
-            family="monospace",
         )
 
     if save_path is not None:
@@ -815,10 +824,7 @@ def _render_single_sample_plot(
     if include_plot_u_stats:
         print(f"    Computing ‖u_gt‖ stats for plot: {fp.name}")
         u_stats = sample_u_stats(sample)
-        stats_note = (
-            f"‖u_gt‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
-            f"mean={u_stats['mean']:.2f}  Q3={u_stats['q3']:.2f}  max={u_stats['max']:.2f}"
-        )
+        stats_note = _format_u_gt_stats_note(u_stats)
     plane_rows, idx_rows, rank_rows = _views_for_sample(
         sample,
         z_slice_index=z_slice_index,
@@ -1011,10 +1017,7 @@ def visualize_per_class_combinations(
                 **u_stats,
             }
         )
-        stats_note = (
-            f"‖u_gt‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
-            f"mean={u_stats['mean']:.2f}  Q3={u_stats['q3']:.2f}  max={u_stats['max']:.2f}"
-        )
+        stats_note = _format_u_gt_stats_note(u_stats)
         if run_view == "orthogonal":
             x0 = sample["source"].shape[0] // 2
             y0 = sample["source"].shape[1] // 2
