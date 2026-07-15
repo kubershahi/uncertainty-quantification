@@ -26,13 +26,14 @@ Output NPZ keys
   - u_gt_igm             — input ``identity_grid_mask``
   - u_pred               — UniGradICON predicted displacement on the **moving** grid
                          (``(3, X, Y, Z)`` voxels): ``source(x + u_pred(x)) ≈ moving(x)``;
-                         zeroed where ``u_gt_igm`` is false and within 12-voxel face border
+                         zeroed where ``u_gt_igm`` is false, 12-voxel face border zeroed,
+                         then ‖u‖ clipped at p99.9 (nonzero voxels)
   - u_error_map          — ``‖u_gt - u_pred‖`` per voxel (float32, ``(X, Y, Z)``)
   - error_map_mask       — ``u_gt_igm & interior(12-voxel margin)`` (bool); use for U-Net loss
 
 Registration: ``net(source, moving)`` so ICON treats **moving** as the fixed/output grid —
 matching Phase I, where both ``u_gt`` and ``u_pred`` satisfy ``moving(x) ≈ source(x + u(x))``.
-``u_pred`` cleanup matches Phase I border/OOB handling (no p99.9 clip on predictions).
+``u_pred`` cleanup matches Phase I: OOB → border → p99.9 clip.
 
 Examples:
 python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --input-path datasets/synth-data/torchio/hcp --output-path datasets/error-map/unigrad-synth/hcp --device cuda
@@ -75,6 +76,7 @@ HCP_SYNTH_PASS_KEYS = (
 )
 FULL_SPLITS = ("Train", "Val", "Test")
 U_BOUNDARY_MARGIN = 12  # match create_synth_data.py
+U_CLIP_PERCENTILE = 99.9  # match create_synth_data.py
 
 
 def resolve_device(mode: str) -> torch.device:
@@ -160,6 +162,29 @@ def u_error_map_from_gt_pred(u_gt: np.ndarray, u_pred: np.ndarray) -> np.ndarray
     return np.sqrt(np.sum(diff * diff, axis=0)).astype(np.float32)
 
 
+def displacement_magnitude(u: np.ndarray) -> np.ndarray:
+    return np.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2])
+
+
+def clip_u_at_percentile(u: np.ndarray, percentile: float = U_CLIP_PERCENTILE) -> np.ndarray:
+    """Scale vectors with ‖u‖ above percentile down to that threshold (nonzero voxels only)."""
+    out = u.astype(np.float32, copy=True)
+    mag = displacement_magnitude(out.astype(np.float64))
+    positive = mag > 0.0
+    if not np.any(positive):
+        return out
+    thresh = float(np.percentile(mag[positive], percentile))
+    if thresh <= 0.0 or not np.isfinite(thresh):
+        return out
+    over = mag > thresh
+    if not np.any(over):
+        return out
+    scale = np.ones_like(mag, dtype=np.float64)
+    scale[over] = thresh / mag[over]
+    out *= scale.astype(np.float32)
+    return out
+
+
 def _interior_valid_mask(shape_xyz: tuple[int, int, int], margin: int) -> np.ndarray:
     x, y, z = shape_xyz
     mask = np.zeros((x, y, z), dtype=bool)
@@ -175,8 +200,9 @@ def cleanup_u_pred(
     u_gt_igm: np.ndarray,
     *,
     boundary_margin: int = U_BOUNDARY_MARGIN,
+    clip_percentile: float = U_CLIP_PERCENTILE,
 ) -> np.ndarray:
-    """Match Phase I ``u`` cleanup (without p99.9 clip): OOB mask then face border."""
+    """Match Phase I ``u`` cleanup: OOB mask → face border → p99.9 ‖u‖ clip."""
     out = u_pred.astype(np.float32, copy=True)
     igm = np.asarray(u_gt_igm, dtype=bool)
     if igm.shape != out.shape[1:]:
@@ -185,7 +211,7 @@ def cleanup_u_pred(
     shape_xyz = (int(out.shape[1]), int(out.shape[2]), int(out.shape[3]))
     keep = _interior_valid_mask(shape_xyz, boundary_margin)
     out[:, ~keep] = 0.0
-    return out
+    return clip_u_at_percentile(out, clip_percentile)
 
 
 def error_map_mask_from_igm(
