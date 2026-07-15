@@ -2,12 +2,13 @@
 Generate error-map NPZ from HCP TorchIO synthetic registration pairs.
 
 Reads ``Train|Val|Test/*.npz`` from ``create_synth_data.py``; runs UniGradICON
-(moving → fixed); writes augmented NPZ under ``--output-path/{Train,Val,Test}/``.
+(source → moving) so ``u_pred`` lives on the same **moving** grid as Phase I ``u``;
+writes augmented NPZ under ``--output-path/{Train,Val,Test}/``.
 
 Input NPZ keys (required from Phase I)
 --------------------------------------
-  - source             : fixed image (float32, ``(X, Y, Z)``); masked z-score
-  - moving             : warped image (float32, ``(X, Y, Z)``); same grid as source
+  - source             : original image (float32, ``(X, Y, Z)``); masked z-score
+  - moving             : warped image (float32, ``(X, Y, Z)``); same lattice as source
   - u                  : ground-truth displacement (float32, ``(3, X, Y, Z)`` voxels)
   - source_mask        : fixed brain mask (bool)
   - moving_mask        : warped brain mask (bool)
@@ -20,19 +21,22 @@ Output NPZ keys
 ---------------
   - source, moving, source_mask, moving_mask, source_affine, deformation_class, subject_id
                          — copied from input unchanged
-  - u_gt                 — input ``u`` (GT displacement on fixed grid, voxels)
+  - u_gt                 — input ``u`` (Phase I GT on the **moving** grid):
+                         ``moving(x) ≈ source(x + u_gt(x))``
   - u_gt_igm             — input ``identity_grid_mask``
-  - u_pred               — UniGradICON predicted displacement (``(3, X, Y, Z)`` voxels);
+  - u_pred               — UniGradICON predicted displacement on the **moving** grid
+                         (``(3, X, Y, Z)`` voxels): ``source(x + u_pred(x)) ≈ moving(x)``;
                          zeroed where ``u_gt_igm`` is false and within 12-voxel face border
   - u_error_map          — ``‖u_gt - u_pred‖`` per voxel (float32, ``(X, Y, Z)``)
   - error_map_mask       — ``u_gt_igm & interior(12-voxel margin)`` (bool); use for U-Net loss
 
-Registration: ``net(moving, source)``; displacement lives on the **fixed** (source) grid.
+Registration: ``net(source, moving)`` so ICON treats **moving** as the fixed/output grid —
+matching Phase I, where both ``u_gt`` and ``u_pred`` satisfy ``moving(x) ≈ source(x + u(x))``.
 ``u_pred`` cleanup matches Phase I border/OOB handling (no p99.9 clip on predictions).
 
 Examples:
 python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --input-path datasets/synth-data/torchio/hcp --output-path datasets/error-map/unigrad-synth/hcp --device cuda
-python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --input-path datasets/synth-data/torchio/hcp --output-path datasets/error-map/unigrad-synth/hcp --splits Train --max-per-split 15 --device cuda
+python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --input-path datasets/synth-data/torchio/hcp --output-path datasets/error-map/unigrad-synth/hcp --splits Train --max-per-split 15 --device cuda --overwrite
 """
 
 from __future__ import annotations
@@ -278,7 +282,8 @@ def run_hcp_error_map_generation(
                 del moving_5d, source_5d
 
                 with torch.no_grad():
-                    net(moving_175, source_175)
+                    # source → moving: phi lives on the moving grid (matches Phase I u_gt).
+                    net(source_175, moving_175)
                     phi_dhw = phi_vectorfield_to_volume_voxels(net, nz, nx, ny)
                 del moving_175, source_175
                 if device.type == "cuda":
@@ -318,7 +323,7 @@ python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --de
 
     p = argparse.ArgumentParser(
         description=(
-            "UniGradICON on HCP synth pairs: copy synth NPZ fields, add u_pred and u_error_map."
+            "UniGradICON source→moving on HCP synth pairs: add u_pred (moving grid) and u_error_map."
         ),
         epilog=examples,
         formatter_class=argparse.RawDescriptionHelpFormatter,

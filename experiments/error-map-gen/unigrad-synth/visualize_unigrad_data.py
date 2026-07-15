@@ -374,6 +374,35 @@ def _plane_row_label(plane: str, idx: int) -> str:
     return f"{plane} ({plane[0]}={idx})"
 
 
+def _add_midheight_colorbar(
+    fig: plt.Figure,
+    mappable,
+    *,
+    gs,
+    cbar_col: int,
+    ref_ax: plt.Axes,
+    label: str,
+    ticks: list[float] | None = None,
+) -> None:
+    """Short colorbar (~1.5× mid-row panel height), centered on ``ref_ax`` vertically."""
+    probe = fig.add_subplot(gs[0, cbar_col])
+    slot = probe.get_position()
+    probe.remove()
+
+    ref = ref_ax.get_position()
+    h = min(ref.height * 1.5, 0.40)
+    y0 = ref.y0 + 0.5 * ref.height - 0.5 * h
+    bar_w = min(max(slot.width * 0.50, 0.008), 0.012)
+    x0 = slot.x0 + 0.5 * (slot.width - bar_w)
+    cax = fig.add_axes([x0, y0, bar_w, h])
+    cbar = fig.colorbar(mappable, cax=cax)
+    cbar.set_label(label, fontsize=_LABEL - 1, labelpad=6, rotation=90)
+    cbar.ax.tick_params(labelsize=_LABEL - 2, pad=1)
+    if ticks is not None:
+        cbar.set_ticks(ticks)
+    cbar.ax.yaxis.set_label_coords(2.8, 0.5)
+
+
 def _views_for_sample(
     sample: dict,
     *,
@@ -424,12 +453,13 @@ def _render_figure(
         # 0..3 images, 4 u-cbar, 5 err, 6 err-cbar, 7 cos, 8 cos-cbar
         n_grid_cols = 9
         img_cols = (0, 1, 2, 3, 5, 7)
-        width_ratios = [1.0, 1.0, 1.0, 1.0, 0.07, 1.0, 0.07, 1.0, 0.07]
+        # Wider gaps for short mid colorbars + labels without overlapping next image.
+        width_ratios = [1.0, 1.0, 1.0, 1.0, 0.12, 1.0, 0.14, 1.0, 0.12]
         n_image_panels = 6
     else:
         n_grid_cols = 7
         img_cols = (0, 1, 2, 3, 5)
-        width_ratios = [1.0, 1.0, 1.0, 1.0, 0.07, 1.0, 0.07]
+        width_ratios = [1.0, 1.0, 1.0, 1.0, 0.12, 1.0, 0.14]
         n_image_panels = 5
 
     col_titles = {
@@ -580,19 +610,37 @@ def _render_figure(
             for col, t in col_titles.items():
                 axes[(0, col)].set_title(t, fontsize=_SUBTITLE, fontweight="medium", pad=10)
 
+    mid_row = nrows // 2
+    ref_ax = axes[(mid_row, 0)]
+    fig.canvas.draw()
     if im_u_last is not None:
-        cbar_u = fig.colorbar(im_u_last, cax=fig.add_subplot(gs[:, 4]))
-        cbar_u.set_label(r"$\|u\|$ (voxels)", fontsize=_LABEL)
-        cbar_u.ax.tick_params(labelsize=_LABEL - 1)
+        _add_midheight_colorbar(
+            fig,
+            im_u_last,
+            gs=gs,
+            cbar_col=4,
+            ref_ax=ref_ax,
+            label=r"$\|u\|$",
+        )
     if im_err_last is not None:
-        cbar_e = fig.colorbar(im_err_last, cax=fig.add_subplot(gs[:, 6]))
-        cbar_e.set_label(r"$\|u_{\mathrm{gt}}-u_{\mathrm{pred}}\|$ (voxels)", fontsize=_LABEL)
-        cbar_e.ax.tick_params(labelsize=_LABEL - 1)
+        _add_midheight_colorbar(
+            fig,
+            im_err_last,
+            gs=gs,
+            cbar_col=6,
+            ref_ax=ref_ax,
+            label=r"$\|u_{\mathrm{gt}}-u_{\mathrm{pred}}\|$",
+        )
     if show_cosine_similarity and im_cos_last is not None:
-        cbar_c = fig.colorbar(im_cos_last, cax=fig.add_subplot(gs[:, 8]))
-        cbar_c.set_label(r"$\cos\theta$  (+1 align, −1 opposite)", fontsize=_LABEL)
-        cbar_c.set_ticks([-1.0, -0.5, 0.0, 0.5, 1.0])
-        cbar_c.ax.tick_params(labelsize=_LABEL - 1)
+        _add_midheight_colorbar(
+            fig,
+            im_cos_last,
+            gs=gs,
+            cbar_col=8,
+            ref_ax=ref_ax,
+            label=r"$\cos\theta$",
+            ticks=[-1.0, 0.0, 1.0],
+        )
 
     title_x = 0.5 * (left + right)
     fig.suptitle(title, fontsize=_TITLE, fontweight="bold", x=title_x, y=0.98, ha="center")
