@@ -108,9 +108,9 @@ DRY_RUN_CLASSES = ("none", "rigid", "affine", "elastic", "affine_elastic")
 # Pure elastic: above previous high (9 mm) for clearer deformation.
 PARAM_RIGID = {"degrees": 8.0, "translation_mm": 5.0}
 PARAM_AFFINE = {"scales": (0.96, 1.04), "degrees": 10.0, "translation_mm": 5.5}
-PARAM_ELASTIC = {"max_disp_mm": 12.0}
+PARAM_ELASTIC = {"max_disp_mm": 15.0}
 # Milder elastic when composed with affine so the combo stays mid–high overall.
-PARAM_ELASTIC_IN_AFFINE = {"max_disp_mm": 8.0}
+PARAM_ELASTIC_IN_AFFINE = {"max_disp_mm": 9.0}
 
 ELASTIC_NUM_CONTROL_POINTS = 7
 
