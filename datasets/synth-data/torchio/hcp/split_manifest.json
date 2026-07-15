@@ -94,7 +94,7 @@
   "field_names": [
     "source",
     "moving",
-    "u",
+    "u_gt",
     "source_mask",
     "moving_mask",
     "identity_grid_mask",
