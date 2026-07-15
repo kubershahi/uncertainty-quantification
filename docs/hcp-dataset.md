@@ -251,9 +251,10 @@ python experiments/synth-data-gen/torchio/create_synth_data.py --input-path data
 
 **Input:** NPZ folder from `create_synth_data.py` (flat dry-run or `{Train,Val,Test}/` full cohort).
 
-**Figure layout:** columns = source (fixed), warped (moving), `u_gt` vectors, ‖u_gt‖; optional checkerboard
-(`--checkerboard`). Axial slices use **radiological** display (`rot90`). Row layout:
-`--run-view orthogonal` (axial / coronal / sagittal) or `montage` (three axial slices).
+**Figure layout:** columns = source (fixed), source + `u_gt` vectors, warped (moving), ‖u_gt‖
+(+ reserved colorbar); optional checkerboard (`--checkerboard`). Axial slices use **radiological**
+display (`rot90`). Row layout: `--run-view orthogonal` (axial / coronal / sagittal) or `montage`
+(three axial slices).
 
 **Titles:**
 
