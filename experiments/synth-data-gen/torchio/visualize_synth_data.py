@@ -2,8 +2,11 @@
 """
 Visualize HCP synthetic registration NPZ samples (``create_synth_data.py`` output).
 
-Columns: source, moving, u vectors, ``‖u‖``; optional checkerboard (``--checkerboard``).
+Columns: source, moving, u_gt vectors, ``‖u_gt‖``; optional checkerboard (``--checkerboard``).
 Axial display is radiological (``rot90``, posterior up).
+
+``u_gt`` is the registration displacement on the **source/fixed** lattice
+(``moving(x + u_gt(x)) ≈ source(x)``).
 
 Modes:
   - Dry-run folder (flat ``*.npz``): ``--selection per_class``
@@ -47,7 +50,7 @@ HCP_REQUIRED_KEYS = frozenset(
     {
         "source",
         "moving",
-        "u",
+        "u_gt",
         "source_mask",
         "moving_mask",
         "identity_grid_mask",
@@ -198,7 +201,7 @@ def load_sample(npz_path: Path) -> dict:
         return {
             "source": np.asarray(data["source"]),
             "moving": np.asarray(data["moving"]),
-            "u": np.asarray(data["u"]),
+            "u_gt": np.asarray(data["u_gt"]),
             "source_mask": np.asarray(data["source_mask"]),
             "moving_mask": np.asarray(data["moving_mask"]),
             "identity_grid_mask": np.asarray(data["identity_grid_mask"]),
@@ -230,8 +233,8 @@ def _cached_sample(path: Path, cache: dict[Path, dict]) -> dict:
 
 
 def sample_u_stats(sample: dict) -> dict[str, float]:
-    """‖u‖ min/Q1/mean/Q3/max over the full volume (all voxels)."""
-    mag = displacement_magnitude(sample["u"].astype(np.float64))
+    """‖u_gt‖ min/Q1/mean/Q3/max over the full volume (all voxels)."""
+    mag = displacement_magnitude(sample["u_gt"].astype(np.float64))
     vals = mag.ravel()
     return {
         "min": float(np.min(vals)),
@@ -243,7 +246,7 @@ def sample_u_stats(sample: dict) -> dict[str, float]:
 
 
 def scalar_u_score(u: np.ndarray, metric: str) -> float:
-    """Scalar ‖u‖ score over the full volume (for min/median/max selection)."""
+    """Scalar ‖u_gt‖ score over the full volume (for min/median/max selection)."""
     mag = displacement_magnitude(u.astype(np.float64)).ravel()
     if metric == "mean":
         return float(np.mean(mag))
@@ -262,7 +265,7 @@ def select_min_median_max_files(
     for fp in files:
         sample = load_sample(fp)
         scored.append(
-            (fp, scalar_u_score(sample["u"], u_metric))
+            (fp, scalar_u_score(sample["u_gt"], u_metric))
         )
     scored.sort(key=lambda x: x[1])
     n = len(scored)
@@ -499,8 +502,8 @@ def _render_figure(
 ) -> None:
     nrows = len(picked)
     ncols = 5 if use_checkerboard else 4
-    # source, moving, u vectors, ‖u‖, optional checkerboard
-    col_titles = ["Source (fixed)", "Warped (moving)", "u vectors", r"$\|u\|$"]
+    # source, moving, u_gt vectors, ‖u_gt‖, optional checkerboard
+    col_titles = ["Source (fixed)", "Warped (moving)", r"$u_{\mathrm{gt}}$ vectors", r"$\|u_{\mathrm{gt}}\|$"]
     if use_checkerboard:
         col_titles.append("Checkerboard")
 
@@ -514,11 +517,11 @@ def _render_figure(
         else:
             idx = plane_slice(sample["source"], plane, z_slice_index)[1]
         if plane == "axial":
-            u_sl = sample["u"][:, :, :, idx]
+            u_sl = sample["u_gt"][:, :, :, idx]
         elif plane == "coronal":
-            u_sl = sample["u"][:, :, idx, :]
+            u_sl = sample["u_gt"][:, :, idx, :]
         else:
-            u_sl = sample["u"][:, idx, :, :]
+            u_sl = sample["u_gt"][:, idx, :, :]
         mag = displacement_magnitude(u_sl.astype(np.float64)).ravel()
         row_u_vmax.append(max(float(np.percentile(mag, _U_COLOR_PERCENTILE)), 1e-6))
 
@@ -532,7 +535,7 @@ def _render_figure(
         sample = _cached_sample(file_path, cache)
         source = sample["source"]
         moving = sample["moving"]
-        u = sample["u"]
+        u = sample["u_gt"]
 
         plane = row_planes[row] if row_planes is not None else "axial"
         if row_slice_indices is not None:
@@ -615,7 +618,7 @@ def _render_figure(
     if im_u_last is not None:
         cbar_ax = fig.add_axes([0.92, 0.22, 0.018, 0.56])
         cbar = fig.colorbar(im_u_last, cax=cbar_ax)
-        cbar.set_label(r"$\|u\|$ (voxels)", fontsize=_LABEL)
+        cbar.set_label(r"$\|u_{\mathrm{gt}}\|$ (voxels)", fontsize=_LABEL)
         cbar.ax.tick_params(labelsize=_LABEL - 1)
 
     bottom = 0.10 if sample_stats_note else 0.08
@@ -734,10 +737,10 @@ def _render_single_sample_plot(
     stats_note = None
     u_stats: dict[str, float] = {}
     if include_plot_u_stats:
-        print(f"    Computing ‖u‖ stats for plot: {fp.name}")
+        print(f"    Computing ‖u_gt‖ stats for plot: {fp.name}")
         u_stats = sample_u_stats(sample)
         stats_note = (
-            f"‖u‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
+            f"‖u_gt‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
             f"mean={u_stats['mean']:.2f}  Q3={u_stats['q3']:.2f}  max={u_stats['max']:.2f}"
         )
     plane_rows, idx_rows, rank_rows = _views_for_sample(
@@ -848,7 +851,7 @@ def visualize_full_cohort(
                     fp for fp in files if deformation_class_from_filename(fp) != "none"
                 ]
                 print(
-                    f"  {sp}: scoring {u_metric} ‖u‖ on {len(eligible)} NPZs "
+                    f"  {sp}: scoring {u_metric} ‖u_gt‖ on {len(eligible)} NPZs "
                     f"(excluding none; {len(files) - len(eligible)} skipped)…"
                 )
                 picked = select_min_median_max_full_cohort_split(files, u_metric)
@@ -865,7 +868,7 @@ def visualize_full_cohort(
                     )
             for fp, rank, score in picked:
                 print(
-                    f"  {sp} / {rank}: {u_metric} ‖u‖={score:.3f} from {fp.name}"
+                    f"  {sp} / {rank}: {u_metric} ‖u_gt‖={score:.3f} from {fp.name}"
                 )
                 _render_single_sample_plot(
                     fp,
@@ -881,7 +884,7 @@ def visualize_full_cohort(
                 n_figs += 1
             print(
                 f"  {sp}: wrote {len(picked)} min/median/max plot(s) "
-                f"by {u_metric} ‖u‖"
+                f"by {u_metric} ‖u_gt‖"
             )
         else:
             raise ValueError(f"Full cohort does not support selection={selection!r}")
@@ -922,7 +925,7 @@ def visualize_per_class_combinations(
     for label, fp in groups:
         print(f"  {label}: loading {fp.name}")
         sample = load_sample(fp)
-        print(f"  {label}: computing ‖u‖ stats for plot")
+        print(f"  {label}: computing ‖u_gt‖ stats for plot")
         u_stats = sample_u_stats(sample)
         chosen_stats.append(
             {
@@ -933,7 +936,7 @@ def visualize_per_class_combinations(
             }
         )
         stats_note = (
-            f"‖u‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
+            f"‖u_gt‖ voxels: min={u_stats['min']:.2f}  Q1={u_stats['q1']:.2f}  "
             f"mean={u_stats['mean']:.2f}  Q3={u_stats['q3']:.2f}  max={u_stats['max']:.2f}"
         )
         if run_view == "orthogonal":
@@ -971,13 +974,13 @@ def visualize_per_class_combinations(
         )
     csv_path = save_dir / "chosen_sample_u_stats.csv"
     fieldnames = ["class", "file", "subject_id", "min", "q1", "mean", "q3", "max"]
-    print(f"Writing chosen-sample ‖u‖ stats → {csv_path}")
+    print(f"Writing chosen-sample ‖u_gt‖ stats → {csv_path}")
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in chosen_stats:
             writer.writerow({k: row.get(k, "") for k in fieldnames})
-    print(f"Wrote {csv_path} (‖u‖ stats for plotted samples only)")
+    print(f"Wrote {csv_path} (‖u_gt‖ stats for plotted samples only)")
     if no_show:
         plt.close("all")
     print(f"Done: {len(groups)} figures under {save_dir}")
@@ -1055,7 +1058,7 @@ def visualize_samples(
         examples_note = f"Rigid / affine / elastic examples (seed = {seed})"
     elif selection == "min_median_max":
         picked = select_min_median_max_files(files, u_metric)
-        examples_note = f"min / median / max ({u_metric} ‖u‖)"
+        examples_note = f"min / median / max ({u_metric} ‖u_gt‖)"
     else:
         raise ValueError(f"Unknown selection: {selection!r}")
 
@@ -1111,7 +1114,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default="mean",
         choices=["mean", "max"],
-        help="Scalar per volume for min/median/max selection (‖u‖).",
+        help="Scalar per volume for min/median/max selection (‖u_gt‖).",
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
@@ -1129,7 +1132,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--u-contours",
         action="store_true",
-        help="Overlay contour lines on ‖u‖ magnitude map.",
+        help="Overlay contour lines on ‖u_gt‖ magnitude map.",
     )
     p.add_argument(
         "--checkerboard",

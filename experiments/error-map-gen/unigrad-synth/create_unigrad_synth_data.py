@@ -2,17 +2,18 @@
 Generate error-map NPZ from HCP TorchIO synthetic registration pairs.
 
 Reads ``Train|Val|Test/*.npz`` from ``create_synth_data.py``; runs UniGradICON
-(source → moving) so ``u_pred`` lives on the same **moving** grid as Phase I ``u``;
+(moving → source) so ``u_pred`` lives on the same **source/fixed** grid as Phase I ``u_gt``;
 writes augmented NPZ under ``--output-path/{Train,Val,Test}/``.
 
 Input NPZ keys (required from Phase I)
 --------------------------------------
-  - source             : original image (float32, ``(X, Y, Z)``); masked z-score
+  - source             : fixed image (float32, ``(X, Y, Z)``); masked z-score
   - moving             : warped image (float32, ``(X, Y, Z)``); same lattice as source
-  - u                  : ground-truth displacement (float32, ``(3, X, Y, Z)`` voxels)
+  - u_gt               : GT registration displacement on **source** grid
+                         (float32, ``(3, X, Y, Z)``): ``moving(x + u_gt(x)) ≈ source(x)``
   - source_mask        : fixed brain mask (bool)
   - moving_mask        : warped brain mask (bool)
-  - identity_grid_mask : in-bounds backward-warp mask (bool); OOB voxels invalid for u
+  - identity_grid_mask : in-bounds mask for ``u_gt`` (bool)
   - source_affine      : NIfTI voxel → world (float32, ``(4, 4)``)
   - deformation_class  : ``none`` | ``rigid`` | ``affine`` | ``elastic`` | ``affine_elastic``
   - subject_id         : HCP subject ID (str scalar)
@@ -21,18 +22,17 @@ Output NPZ keys
 ---------------
   - source, moving, source_mask, moving_mask, source_affine, deformation_class, subject_id
                          — copied from input unchanged
-  - u_gt                 — input ``u`` (Phase I GT on the **moving** grid):
-                         ``moving(x) ≈ source(x + u_gt(x))``
+  - u_gt                 — copied from input (source-lattice GT)
   - u_gt_igm             — input ``identity_grid_mask``
-  - u_pred               — UniGradICON predicted displacement on the **moving** grid
-                         (``(3, X, Y, Z)`` voxels): ``source(x + u_pred(x)) ≈ moving(x)``;
+  - u_pred               — UniGradICON predicted displacement on the **source** grid
+                         (``(3, X, Y, Z)`` voxels): ``moving(x + u_pred(x)) ≈ source(x)``;
                          zeroed where ``u_gt_igm`` is false, 12-voxel face border zeroed,
                          then ‖u‖ clipped at p99.9 (nonzero voxels)
   - u_error_map          — ``‖u_gt - u_pred‖`` per voxel (float32, ``(X, Y, Z)``)
   - error_map_mask       — ``u_gt_igm & interior(12-voxel margin)`` (bool); use for U-Net loss
 
-Registration: ``net(source, moving)`` so ICON treats **moving** as the fixed/output grid —
-matching Phase I, where both ``u_gt`` and ``u_pred`` satisfy ``moving(x) ≈ source(x + u(x))``.
+Registration: ``net(moving, source)`` so both ``u_gt`` and ``u_pred`` share
+``moving(x + u(x)) ≈ source(x)`` on the source lattice.
 ``u_pred`` cleanup matches Phase I: OOB → border → p99.9 clip.
 
 Examples:
@@ -56,7 +56,7 @@ HCP_SYNTH_REQUIRED_KEYS = frozenset(
     {
         "source",
         "moving",
-        "u",
+        "u_gt",
         "source_mask",
         "moving_mask",
         "identity_grid_mask",
@@ -292,14 +292,14 @@ def run_hcp_error_map_generation(
                 sample = load_hcp_synth_npz(in_path)
                 source = sample["source"]
                 moving = sample["moving"]
-                u_gt = np.asarray(sample["u"], dtype=np.float32)
+                u_gt = np.asarray(sample["u_gt"], dtype=np.float32)
                 u_gt_igm = np.asarray(sample["identity_grid_mask"], dtype=bool)
 
                 nx, ny, nz = (int(source.shape[0]), int(source.shape[1]), int(source.shape[2]))
                 if moving.shape != source.shape:
                     raise ValueError(f"{fname}: moving {moving.shape} vs source {source.shape}")
                 if u_gt.shape != (3, nx, ny, nz):
-                    raise ValueError(f"{fname}: u {u_gt.shape} vs expected (3, {nx}, {ny}, {nz})")
+                    raise ValueError(f"{fname}: u_gt {u_gt.shape} vs expected (3, {nx}, {ny}, {nz})")
 
                 moving_5d = hcp_volume_xyz_to_torch5d(moving).to(device)
                 source_5d = hcp_volume_xyz_to_torch5d(source).to(device)
@@ -308,8 +308,8 @@ def run_hcp_error_map_generation(
                 del moving_5d, source_5d
 
                 with torch.no_grad():
-                    # source → moving: phi lives on the moving grid (matches Phase I u_gt).
-                    net(source_175, moving_175)
+                    # moving → source: phi / u_pred on the source (fixed) grid (matches Phase I u_gt).
+                    net(moving_175, source_175)
                     phi_dhw = phi_vectorfield_to_volume_voxels(net, nz, nx, ny)
                 del moving_175, source_175
                 if device.type == "cuda":
@@ -349,7 +349,7 @@ python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --de
 
     p = argparse.ArgumentParser(
         description=(
-            "UniGradICON source→moving on HCP synth pairs: add u_pred (moving grid) and u_error_map."
+            "UniGradICON moving→source on HCP synth pairs: add u_pred (source grid) and u_error_map."
         ),
         epilog=examples,
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -39,7 +39,7 @@ quantification** when dense GT is unavailable.
 | Track | Dim | Moving / fixed | GT displacement | Error map |
 | --- | ---: | --- | --- | --- |
 | **Synth (IXI 2D)** | 2D | `image` → `warped` | `phi_true` in `*_triplet.npz` | ‖φ_pred − φ_true‖ per pixel |
-| **Synth (HCP 3D)** | 3D | `source` → `moving` | `u` in `hcp_synth/*.npz` | *Planned* ‖u_pred − u‖ per voxel |
+| **Synth (HCP 3D)** | 3D | `source` → `moving` | `u_gt` in `hcp_synth/*.npz` (source lattice) | ‖u_gt − u_pred‖ per voxel (`create_unigrad_synth_data.py`) |
 | **IO** | 3D | `source` → `atlas` | `phi_predio` (IO-refined) | ‖φ_predio − φ_pred‖ per voxel |
 | **HCP raw** | 3D | T1w NIfTI | — | QC / future registration |
 
@@ -68,16 +68,20 @@ phi_pred, error_map (*_fiver.npz)
 U-Net regression                    ← train_unigrad_synth_unet.py
 ```
 
-### HCP 3D (current Phase I)
+### HCP 3D (current)
 
 ```text
 HCP T1w NIfTI (LAS, native space)
       ↓
-TorchIO warp + identity-grid u      ← create_synth_data.py
+TorchIO warp + identity-grid → u_back
       ↓
-source, moving (z-scored), u, mask  → datasets/synth-data/torchio/hcp/
+InvertDisplacementField → u_gt (source lattice)  ← create_synth_data.py
       ↓
-(planned) UniGradICON + error-map U-Net
+source, moving (z-scored), u_gt, masks  → datasets/synth-data/torchio/hcp/
+      ↓
+UniGradICON net(moving, source) → u_pred, ‖u_gt − u_pred‖  ← create_unigrad_synth_data.py
+      ↓
+(planned) error-map U-Net on HCP 3D
 ```
 
 **IO track** replaces TorchIO GT with ICON **instance optimization** on real 3D pairs; see
@@ -160,8 +164,8 @@ UniGradICON internals often expose something named like `phi_AB_vectorfield`. Af
 
 | Say | Mean |
 | --- | --- |
-| **u** / **u vectors** / displacement | Offsets on fixed grid; HCP keys `u`, `u_gt`, `u_pred` |
-| **‖u‖** | Magnitude of the displacement vector at each voxel |
+| **u** / **u vectors** / displacement | Offsets on fixed/source grid; HCP keys `u_gt`, `u_pred` |
+| **‖u‖** / **‖u_gt‖** / **‖u_pred‖** | Magnitude of the displacement vector at each voxel |
 | **φ** / **position map** | Absolute sample coordinates; ICON output before `− identity` |
 | **identity map / identity grid** | φ₀(x) = x — “do nothing” warp |
 | **Backward / pull warp** | For each fixed **x**, sample moving at **φ(x)** |
@@ -240,12 +244,12 @@ output voxel x  ──affine──►  world mm  ──T⁻¹ / B-spline──�
                                                                                         moving(x)
 ```
 
-### 2. Recovering the dense displacement field (u)
+### 2. Recovering the dense displacement field (`u_gt`)
 
 Because the transform is computed implicitly, TorchIO does **not** natively return a dense
-voxel-by-voxel displacement field **u** for training.
+registration map on the source lattice. Phase I recovers it in two steps.
 
-**The identity-grid trick**
+**Step A — Identity-grid trick → temporary `u_back` (moving lattice)**
 
 A companion 3-channel volume is warped alongside the MRI:
 
@@ -253,12 +257,22 @@ A companion 3-channel volume is warped alongside the MRI:
 | --- | --- |
 | **Initialization** | Build an *identity grid* with the same shape as the MRI. Channel 0/1/2 store raw voxel indices **i, j, k** at array position `[i, j, k]` (not tissue intensities). |
 | **Implicit warping** | Pass this grid through the **same** backward-warping pipeline as the MRI (same `source_affine`, same transform). The warp rearranges coordinate *values* as if they were intensities. |
-| **Vector subtraction** | The warped grid holds source indices **φ(x)** at each output position **x**. Displacement is **u(x) = φ(x) − x** (component-wise). |
+| **Vector subtraction** | At each position **x** on the **moving** lattice: temporary **u_back(x) = φ_back(x) − x**. This field satisfies `moving(x) ≈ source(x + u_back(x))`. |
 
-In this repo we store **u** in voxel units (`u_unit="vox"`). The position map is **φ(x) = x + u(x)**.
+**Step B — Invert → stored `u_gt` (source lattice)**
 
-The recovered **u** is a dense field in voxel index space, compatible with backward lookup and
-with spatial transformer layers (e.g. PyTorch `grid_sample` convention).
+SimpleITK `InvertDisplacementField` (unit spacing / voxel units) converts `u_back` to **`u_gt`** on
+the shared **source/fixed** grid so that:
+
+```text
+moving(x + u_gt(x)) ≈ source(x)
+```
+
+That matches UniGradICON `net(moving, source)` → `u_pred`, so `‖u_gt − u_pred‖` is a valid
+error map.
+
+In this repo we store **`u_gt`** in voxel units. Cleanup: OOB via `identity_grid_mask` → 12-voxel
+border → p99.9 clip on ‖u_gt‖.
 
 **Code reference**
 
@@ -268,7 +282,8 @@ subject = Subject(
     grid = ScalarImage(tensor=identity_grid, affine=source_affine),
 )
 transformed = transform(subject)
-u = transformed.grid - identity_grid
+u_back = transformed.grid - identity_grid
+u_gt, in_bounds = invert_displacement_to_source_grid(u_back)  # SimpleITK InvertDisplacementField
 ```
 
 ---
@@ -285,37 +300,38 @@ Geometry and intensity are **separate**:
 
 ### Phase I (synth generation)
 
-`u` comes from the **identity-grid trick**, not from intensity values. In `create_synth_data.py`:
+`u_gt` comes from identity-grid → invert, not from intensity values. In `create_synth_data.py`:
 
-1. Warp **raw** T1; extract **u** from the coordinate grid.
+1. Warp **raw** T1; extract temporary `u_back` from the coordinate grid; invert to **`u_gt`**.
 2. QC on raw intensities.
-3. Masked z-score **source** and **moving** with shared μ, σ from the source brain mask; save **u**
-   unchanged.
+3. Masked z-score **source** and **moving** with shared μ, σ from the source brain mask; save
+   **`u_gt`** unchanged by intensity ops (cleanup is geometric only).
 
-Z-score rescales scalar values per voxel. It does **not** move voxel indices, so it cannot alter **u**.
+Z-score rescales scalar values per voxel. It does **not** move voxel indices, so it cannot alter
+**`u_gt`**.
 
-### Phase II (downstream registration → `phi_pred`)
+### Phase II (downstream registration → `u_pred`)
 
-UniGradICON (and similar models) predict **φ** or **u** in **voxel index space** from normalized
-image pairs. Masked z-score with **shared** μ, σ:
+UniGradICON predicts **φ** / **u** in **voxel index space** from normalized image pairs via
+`net(moving, source)`. Masked z-score with **shared** μ, σ:
 
 - Puts intensities in a stable range for the network.
 - Is an affine intensity transform; deformable registration targets **spatial** alignment, which is
   invariant to affine intensity rescaling in principle (e.g. LNCC).
-- Does **not** change the voxel grid or the geometric correspondence that **φ** describes.
+- Does **not** change the voxel grid or the geometric correspondence that **u_pred** describes.
 
 Use the **same** μ, σ for `source` and `moving`. Independent z-score per volume would change
 relative appearance and is not used here.
 
 **Summary:** z-score affects **what the network reads** (intensity); it does not redefine **where**
-voxels map. Stored GT **u**, and downstream **phi_pred**, both describe geometry on the fixed voxel
+voxels map. Stored **`u_gt`** and **`u_pred`** both describe geometry on the source/fixed voxel
 grid.
 
 ---
 
 ## Ground truth and error map (this project)
 
-### Synth (2D)
+### Synth (2D, legacy IXI)
 
 | Field | Meaning |
 | --- | --- |
@@ -324,7 +340,18 @@ grid.
 | `phi_diff` | φ_pred − φ_true (component-wise) |
 | `error_map` | Per-pixel ‖φ_pred − φ_true‖₂ (scalar magnitude) |
 
-Stored in `*_fiver.npz` under `Train|Val|Test/` (`create_unigrad_synth_data.py`).
+Stored in `*_fiver.npz` under `Train|Val|Test/` (legacy 2D path).
+
+### Synth (HCP 3D)
+
+| Field | Meaning |
+| --- | --- |
+| `u_gt` | TorchIO GT after invert; source lattice; **voxels** |
+| `u_pred` | UniGradICON `net(moving, source)`; same lattice; **voxels** |
+| `u_error_map` | Per-voxel ‖u_gt − u_pred‖₂ |
+| `error_map_mask` | Valid voxels for U-Net loss (`u_gt_igm` ∩ interior margin) |
+
+Stored under `datasets/error-map/unigrad-synth/hcp/` (`create_unigrad_synth_data.py`).
 
 ### IO (3D)
 
@@ -367,13 +394,13 @@ IO iteration count is chosen via `sweep_io_iterations.py` before building `datas
 | Context | Displacement / error units |
 | --- | --- |
 | IXI 2D synth | **pixels** on the slice grid |
-| HCP 3D synth | **voxels** (`u` in `hcp_synth/*.npz`; TorchIO params in mm) |
+| HCP 3D synth | **voxels** (`u_gt` / `u_pred` in HCP NPZs; TorchIO params in mm) |
 | IXI 3D IO | **voxels** in volume index space |
 
 **Masks:**
 
 - IXI 2D synth: `valid_mask` — interior margin away from slice boundary
-- HCP 3D synth: `mask` from `brainmask_fs`; interior margin in QC (`INTERIOR_MARGIN`)
+- HCP 3D synth: `source_mask` / `moving_mask` from `brainmask_fs`; `identity_grid_mask` for valid `u_gt`
 - IO: `valid_mask` — shared atlas foreground (`atlas_valid_mask.npz`)
 - HCP raw: `brainmask_fs.nii.gz` for download QC (`visualize_hcp_data.py`)
 
@@ -385,11 +412,14 @@ IO iteration count is chosen via `sweep_io_iterations.py` before building `datas
 
 **`*_triplet.npz` (IXI 2D):** `image`, `warped`, `phi` (2, H, W), optional `valid_mask`, `qc_passed`
 
-**`hcp_synth/*.npz` (HCP 3D):** `source`, `moving`, `u` (3, X, Y, Z), `mask`, `source_affine`,
-`source_spacing`, `u_unit`, `deformation_class` (`none` | `rigid` | `affine` | `elastic` |
-`affine_elastic`), `subject_id`, `qc_passed`. Filenames: `<subject_id>_<suffix>.npz` where suffix
-is `none`, `rig`, `aff`, `ela`, or `aela`. See `docs/unigrad-synth-experiment.md` § Deformation
-classes and file nomenclature.
+**`hcp_synth/*.npz` (HCP 3D Phase I):** `source`, `moving`, `u_gt` `(3, X, Y, Z)`,
+`source_mask`, `moving_mask`, `identity_grid_mask`, `source_affine`, `deformation_class`
+(`none` | `rigid` | `affine` | `elastic` | `affine_elastic`), `subject_id`. Filenames:
+`<subject_id>_<suffix>.npz` where suffix is `none`, `rig`, `aff`, `ela`, or `aela`. See
+`docs/hcp-dataset.md` and `docs/unigrad-synth-experiment.md`.
+
+**`unigrad-synth/hcp/*.npz` (HCP 3D Phase II):** Phase I keys plus `u_gt_igm`, `u_pred`,
+`u_error_map`, `error_map_mask`.
 
 **`*_fiver.npz` (Phase II synth):** `image`, `warped`, `phi_true`, `phi_pred`, `phi_diff`, `error_map`, `valid_mask`, `qc_passed`
 

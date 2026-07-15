@@ -139,8 +139,8 @@ python experiments/synth-data-gen/torchio/visualize_hcp_data.py --data-dir datas
 ## HCP synthetic data generation (Phase I)
 
 Phase I builds **known-displacement registration triplets** from HCP T1w: fixed `source`, warped
-`moving`, and ground-truth displacement `u` (voxel units). Scripts live under
-`experiments/synth-data-gen/torchio/`.
+`moving`, and ground-truth displacement `u_gt` (voxel units) on the **source/fixed** lattice.
+Scripts live under `experiments/synth-data-gen/torchio/`.
 
 | Script | Role |
 | --- | --- |
@@ -175,13 +175,14 @@ Phase I builds **known-displacement registration triplets** from HCP T1w: fixed 
 | --- | --- |
 | `source` | Fixed image (masked z-score, float32) |
 | `moving` | Deformed image (same normalization) |
-| `u` | Displacement field `(3, X, Y, Z)` in **voxels** |
-| `source_mask`, `moving_mask`, `identity_grid_mask` | Written for **visualization only**; not used for ‖u‖ stats |
+| `u_gt` | Registration displacement `(3, X, Y, Z)` in **voxels** on the **source/fixed** lattice: `moving(x + u_gt(x)) ≈ source(x)` |
+| `source_mask`, `moving_mask`, `identity_grid_mask` | Masks for viz / Phase II; `identity_grid_mask` marks valid `u_gt` voxels |
 | `deformation_class` | One of `none`, `rigid`, `affine`, `elastic`, `affine_elastic` |
 | `subject_id` | HCP subject ID |
 
-TorchIO transforms run in physical space (mm) using the NIfTI affine; `u` is recovered in voxel
-index space via the identity-grid trick (backward warp).
+TorchIO transforms run in physical space (mm) using the NIfTI affine. The identity-grid trick
+first yields a temporary backward field `u_back` (`moving(x) ≈ source(x + u_back(x))`); SimpleITK
+`InvertDisplacementField` (voxel units) converts it to stored **`u_gt`** on the shared source grid.
 
 #### Deformation classes and filenames
 
@@ -214,13 +215,13 @@ Use `--max-subjects N` for a subset (e.g. 100 subjects → ~75 / 10 / 15 with th
 Distinct subjects are used within and across classes when enough HCP subjects are available.
 Filenames use the full class name (e.g. `100206_rigid.npz`, `100206_affine_elastic_02.npz`).
 
-#### ‖u‖ cleanup (both modes)
+#### ‖u_gt‖ cleanup (both modes)
 
-Applied in order:
+Applied in order after inversion:
 
-1. Zero OOB voxels using `identity_grid_mask`
+1. Zero invalid voxels using `identity_grid_mask` (in-bounds for `x + u_gt(x)`, intersected with warp validity)
 2. Zero a **12-voxel border** on each face
-3. Clip ‖u‖ at **p99.9** (percentile over **nonzero** voxels only)
+3. Clip ‖u_gt‖ at **p99.9** (percentile over **nonzero** voxels only)
 
 #### Stats written at generation time
 
@@ -250,7 +251,7 @@ python experiments/synth-data-gen/torchio/create_synth_data.py --input-path data
 
 **Input:** NPZ folder from `create_synth_data.py` (flat dry-run or `{Train,Val,Test}/` full cohort).
 
-**Figure layout:** columns = source (fixed), warped (moving), u vectors, ‖u‖; optional checkerboard
+**Figure layout:** columns = source (fixed), warped (moving), `u_gt` vectors, ‖u_gt‖; optional checkerboard
 (`--checkerboard`). Axial slices use **radiological** display (`rot90`). Row layout:
 `--run-view orthogonal` (axial / coronal / sagittal) or `montage` (three axial slices).
 
@@ -258,7 +259,7 @@ python experiments/synth-data-gen/torchio/create_synth_data.py --input-path data
 
 - Main: `HCP Synthetic Data Plot ({No/Rigid/Affine/Elastic/Affine+Elastic} Transformation)`
 - Subtitle: `Subject <id> - Radiological-style display - Orthogonal/Montage View`
-- Footer: per-sample ‖u‖ stats (min, Q1, mean, Q3, max) for the plotted sample
+- Footer: per-sample ‖u_gt‖ stats (min, Q1, mean, Q3, max) for the plotted sample
 
 Class grouping for full-run selection uses the **filename suffix only** (no volume load).
 
@@ -267,7 +268,7 @@ Class grouping for full-run selection uses the **filename suffix only** (no volu
 One random sample per deformation class (5 classes). Writes:
 
 - One PNG per class under `--save-dir`
-- `chosen_sample_u_stats.csv` — ‖u‖ stats for the **plotted samples only**
+- `chosen_sample_u_stats.csv` — ‖u_gt‖ stats for the **plotted samples only**
 
 ```bash
 python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp_dryrun --selection per_class --save-dir assets/images/synth-data/torchio/hcp/dryrun_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
@@ -290,9 +291,9 @@ python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir dat
 
 #### Full cohort — `--selection min_median_max`
 
-`none` is excluded (‖u‖ ≈ 0 everywhere). For each split:
+`none` is excluded (‖u_gt‖ ≈ 0 everywhere). For each split:
 
-1. Score every non-`none` sample by `--u-metric` (`mean` or `max` of ‖u‖ over the volume)
+1. Score every non-`none` sample by `--u-metric` (`mean` or `max` of ‖u_gt‖ over the volume)
 2. Select **min**, **median**, and **max** across that split
 3. Plot → `{save_dir}/{split}/{min|median|max}.png`
 4. Subtitle adds rank label, e.g. `Minimum of u mean sample`
@@ -315,16 +316,16 @@ python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir dat
 ### Phase 1 — Synthetic data generation
 
 Build known-displacement registration triplets from HCP T1w using TorchIO: fixed `source`, warped
-`moving`, and ground-truth displacement `u` in voxel units. Includes dry-run sanity checks, full
-cohort generation with balanced deformation classes, and QC visualization.
+`moving`, and ground-truth displacement **`u_gt`** on the source/fixed lattice
+(`moving(x + u_gt(x)) ≈ source(x)`). Includes dry-run sanity checks, full cohort generation with
+balanced deformation classes, and QC visualization.
 
 **Files:** `create_synth_data.py`, `visualize_synth_data.py`
 
 ### Phase 2 — Error-map generation (medical image registration model)
 
-Run a pretrained registration model (UniGradICON) on each HCP synth pair to obtain a predicted
-displacement field `u_pred`. The **error map** is the voxel-wise difference between prediction and
-ground truth (e.g. ‖u_pred − u‖ or component-wise error), giving supervised targets for uncertainty
+Run UniGradICON as `net(moving, source)` to obtain `u_pred` on the same source lattice as `u_gt`.
+The **error map** is ‖u_gt − u_pred‖ (voxel-wise), giving supervised targets for uncertainty
 quantification without requiring manual labels.
 
 **Files:** scripts under `experiments/error-map-gen/unigrad-synth/`
