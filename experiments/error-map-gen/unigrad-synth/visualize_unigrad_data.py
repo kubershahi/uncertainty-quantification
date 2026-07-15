@@ -2,7 +2,8 @@
 """
 Visualize HCP UniGrad synth error-map NPZ (``create_unigrad_synth_data.py`` output).
 
-Columns: Source (fixed), Warped (moving), ``‖u_gt‖``, ``‖u_pred‖``, error map.
+Columns: Source (fixed), Warped (moving), ``‖u_gt‖``, ``‖u_pred‖``, error map;
+optional ``--cosine-similarity`` adds cosine(u_gt, u_pred) after the error map.
 Axial display is radiological (``rot90``).
 
 Modes (match ``visualize_synth_data.py`` output names):
@@ -17,7 +18,7 @@ Modes (match ``visualize_synth_data.py`` output names):
 
 Examples:
 python experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py --data-dir datasets/error-map/unigrad-synth/hcp --selection random --save-dir assets/images/error-map/unigrad-synth/hcp/fullrun_random_orthogonal --no-show --run-view orthogonal
-python experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py --data-dir datasets/error-map/unigrad-synth/hcp --selection min_median_max --save-dir assets/images/error-map/unigrad-synth/hcp/fullrun_mmm_orthogonal --no-show --run-view orthogonal
+python experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py --data-dir datasets/error-map/unigrad-synth/hcp --selection min_median_max --save-dir assets/images/error-map/unigrad-synth/hcp/fullrun_mmm_orthogonal --no-show --run-view orthogonal --cosine-similarity
 python experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py --data-dir datasets/error-map/unigrad-synth/hcp --split Train --selection random --save-dir assets/images/error-map/unigrad-synth/hcp/fullrun_train --no-show
 """
 
@@ -153,6 +154,51 @@ def magnitude_plane_slice(u: np.ndarray, plane: str, index: int) -> np.ndarray:
         return displacement_magnitude(u[:, x, :, :].astype(np.float64))
     raise ValueError(f"Unknown plane: {plane}")
 
+
+def u_plane_vectors(u: np.ndarray, plane: str, index: int) -> np.ndarray:
+    """Return displacement vectors ``(3, H, W)`` for one plane."""
+    if plane == "axial":
+        z = max(0, min(int(index), u.shape[3] - 1))
+        return u[:, :, :, z].astype(np.float64)
+    if plane == "coronal":
+        y = max(0, min(int(index), u.shape[2] - 1))
+        return u[:, :, y, :].astype(np.float64)
+    if plane == "sagittal":
+        x = max(0, min(int(index), u.shape[1] - 1))
+        return u[:, x, :, :].astype(np.float64)
+    raise ValueError(f"Unknown plane: {plane}")
+
+
+def cosine_similarity_map(
+    u_a: np.ndarray,
+    u_b: np.ndarray,
+    *,
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """
+    Per-voxel cosine similarity in ``[-1, 1]``.
+
+    Voxels where either vector has ‖u‖ ≤ ``eps`` are set to NaN (direction undefined).
+    Accepts ``(3, ...)`` arrays (full volume or a plane).
+    """
+    a = u_a.astype(np.float64, copy=False)
+    b = u_b.astype(np.float64, copy=False)
+    if a.shape != b.shape or a.shape[0] != 3:
+        raise ValueError(f"expected matching (3, ...) arrays, got {a.shape} vs {b.shape}")
+    dot = np.sum(a * b, axis=0)
+    na = np.sqrt(np.sum(a * a, axis=0))
+    nb = np.sqrt(np.sum(b * b, axis=0))
+    valid = (na > eps) & (nb > eps)
+    cos = np.full(dot.shape, np.nan, dtype=np.float64)
+    cos[valid] = np.clip(dot[valid] / (na[valid] * nb[valid]), -1.0, 1.0)
+    return cos
+
+
+def cosine_plane_slice(u_gt: np.ndarray, u_pred: np.ndarray, plane: str, index: int) -> np.ndarray:
+    return cosine_similarity_map(
+        u_plane_vectors(u_gt, plane, index),
+        u_plane_vectors(u_pred, plane, index),
+    )
 
 def load_sample(npz_path: Path) -> dict:
     with np.load(npz_path) as data:
@@ -362,16 +408,39 @@ def _render_figure(
     row_h: float = 3.0,
     announce_save: bool = True,
     sample_cache: dict[Path, dict] | None = None,
+    show_cosine_similarity: bool = False,
 ) -> None:
+    """
+    Column layout (left → right):
+
+      Source | Warped | ‖u_gt‖ | ‖u_pred‖ | [‖u‖ cbar] | Error Map | [error cbar]
+      [| Cosine | cosine cbar]   ← only if ``show_cosine_similarity``
+    """
+    from matplotlib.colors import Normalize
+    from matplotlib.gridspec import GridSpec
+
     nrows = len(picked)
-    ncols = 5
-    col_titles = [
-        "Source (fixed)",
-        "Warped (moving)",
-        r"$\|u_{\mathrm{gt}}\|$",
-        r"$\|u_{\mathrm{pred}}\|$",
-        "error map",
-    ]
+    if show_cosine_similarity:
+        # 0..3 images, 4 u-cbar, 5 err, 6 err-cbar, 7 cos, 8 cos-cbar
+        n_grid_cols = 9
+        img_cols = (0, 1, 2, 3, 5, 7)
+        width_ratios = [1.0, 1.0, 1.0, 1.0, 0.07, 1.0, 0.07, 1.0, 0.07]
+        n_image_panels = 6
+    else:
+        n_grid_cols = 7
+        img_cols = (0, 1, 2, 3, 5)
+        width_ratios = [1.0, 1.0, 1.0, 1.0, 0.07, 1.0, 0.07]
+        n_image_panels = 5
+
+    col_titles = {
+        0: "Source (fixed)",
+        1: "Warped (moving)",
+        2: r"$\|u_{\mathrm{gt}}\|$",
+        3: r"$\|u_{\mathrm{pred}}\|$",
+        5: r"Error Map ($\|u_{\mathrm{gt}} - u_{\mathrm{pred}}\|$)",
+    }
+    if show_cosine_similarity:
+        col_titles[7] = r"Cosine Similarity ($\cos\theta$)"
 
     cache: dict[Path, dict] = {} if sample_cache is None else sample_cache
     row_u_vmax: list[float] = []
@@ -396,12 +465,36 @@ def _render_figure(
         row_err_vmax.append(err_cap)
 
     plt.rcParams.update({"font.family": _FONT, "figure.dpi": _DPI, "savefig.dpi": _DPI})
-    fig_w = 3.0 * ncols + 2.4
+    fig_w = 3.0 * n_image_panels + 1.8
     fig_h = row_h * nrows + 1.9
-    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    bottom = 0.12 if sample_stats_note else 0.08
+    left, right = 0.18, 0.98
+    gs = GridSpec(
+        nrows,
+        n_grid_cols,
+        figure=fig,
+        width_ratios=width_ratios,
+        left=left,
+        right=right,
+        top=0.86,
+        bottom=bottom,
+        wspace=0.22,
+        hspace=0.34,
+    )
+
+    axes: dict[tuple[int, int], plt.Axes] = {}
+    for row in range(nrows):
+        for col in img_cols:
+            axes[(row, col)] = fig.add_subplot(gs[row, col])
+
+    cos_cmap = plt.get_cmap("coolwarm").copy()
+    cos_cmap.set_bad(color="0.85")
+    cos_norm = Normalize(vmin=-1.0, vmax=1.0)
 
     im_u_last = None
     im_err_last = None
+    im_cos_last = None
     for row, (file_path, _rank_label, _) in enumerate(picked):
         sample = _cached_sample(file_path, cache)
         source = sample["source"]
@@ -427,7 +520,7 @@ def _render_figure(
         u_vmax = row_u_vmax[row]
         err_vmax = row_err_vmax[row]
 
-        ax_src = axes[row, 0]
+        ax_src = axes[(row, 0)]
         ax_src.imshow(
             src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3
         )
@@ -441,25 +534,25 @@ def _render_figure(
             labelpad=18,
         )
 
-        ax_mov = axes[row, 1]
+        ax_mov = axes[(row, 1)]
         ax_mov.imshow(
             mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3
         )
         _style_axis(ax_mov)
 
-        ax_gt = axes[row, 2]
+        ax_gt = axes[(row, 2)]
         im_u_last = ax_gt.imshow(
             mag_gt, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
         )
         _style_axis(ax_gt)
 
-        ax_pr = axes[row, 3]
+        ax_pr = axes[(row, 3)]
         ax_pr.imshow(
             mag_pr, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
         )
         _style_axis(ax_pr)
 
-        ax_e = axes[row, 4]
+        ax_e = axes[(row, 5)]
         im_err_last = ax_e.imshow(
             err_disp,
             cmap="hot",
@@ -470,24 +563,37 @@ def _render_figure(
         )
         _style_axis(ax_e)
 
+        if show_cosine_similarity:
+            cos_sl = orient_axial(cosine_plane_slice(u_gt, u_pred, plane, idx))
+            cos_masked = np.ma.masked_invalid(cos_sl)
+            ax_c = axes[(row, 7)]
+            im_cos_last = ax_c.imshow(
+                cos_masked,
+                cmap=cos_cmap,
+                norm=cos_norm,
+                origin="upper",
+                interpolation="nearest",
+            )
+            _style_axis(ax_c)
+
         if row == 0:
-            for col, t in enumerate(col_titles):
-                axes[0, col].set_title(t, fontsize=_SUBTITLE, fontweight="medium", pad=10)
+            for col, t in col_titles.items():
+                axes[(0, col)].set_title(t, fontsize=_SUBTITLE, fontweight="medium", pad=10)
 
     if im_u_last is not None:
-        cbar_u_ax = fig.add_axes([0.905, 0.28, 0.014, 0.48])
-        cbar_u = fig.colorbar(im_u_last, cax=cbar_u_ax)
+        cbar_u = fig.colorbar(im_u_last, cax=fig.add_subplot(gs[:, 4]))
         cbar_u.set_label(r"$\|u\|$ (voxels)", fontsize=_LABEL)
         cbar_u.ax.tick_params(labelsize=_LABEL - 1)
     if im_err_last is not None:
-        cbar_e_ax = fig.add_axes([0.955, 0.28, 0.014, 0.48])
-        cbar_e = fig.colorbar(im_err_last, cax=cbar_e_ax)
-        cbar_e.set_label(r"error (voxels)", fontsize=_LABEL)
+        cbar_e = fig.colorbar(im_err_last, cax=fig.add_subplot(gs[:, 6]))
+        cbar_e.set_label(r"$\|u_{\mathrm{gt}}-u_{\mathrm{pred}}\|$ (voxels)", fontsize=_LABEL)
         cbar_e.ax.tick_params(labelsize=_LABEL - 1)
+    if show_cosine_similarity and im_cos_last is not None:
+        cbar_c = fig.colorbar(im_cos_last, cax=fig.add_subplot(gs[:, 8]))
+        cbar_c.set_label(r"$\cos\theta$  (+1 align, −1 opposite)", fontsize=_LABEL)
+        cbar_c.set_ticks([-1.0, -0.5, 0.0, 0.5, 1.0])
+        cbar_c.ax.tick_params(labelsize=_LABEL - 1)
 
-    bottom = 0.12 if sample_stats_note else 0.08
-    left, right = 0.22, 0.88
-    fig.subplots_adjust(left=left, right=right, top=0.86, bottom=bottom, wspace=0.26, hspace=0.34)
     title_x = 0.5 * (left + right)
     fig.suptitle(title, fontsize=_TITLE, fontweight="bold", x=title_x, y=0.98, ha="center")
     fig.text(title_x, 0.935, subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
@@ -524,6 +630,7 @@ def _render_single_sample_plot(
     montage_z_step: int,
     run_view: str,
     subtitle_extra: str | None = None,
+    show_cosine_similarity: bool = False,
 ) -> None:
     sample = load_sample(fp)
     gt_stats = sample_u_mag_stats(sample["u_gt"])
@@ -556,6 +663,7 @@ def _render_single_sample_plot(
         row_h=3.0,
         announce_save=False,
         sample_cache={fp: sample},
+        show_cosine_similarity=show_cosine_similarity,
     )
 
 
@@ -571,6 +679,7 @@ def visualize_full_cohort(
     montage_z_step: int,
     run_view: str,
     mmm_selection_csv: Path,
+    show_cosine_similarity: bool = False,
 ) -> None:
     splits = resolve_full_splits(input_dir, split)
     save_dir = Path(save_dir)
@@ -578,7 +687,7 @@ def visualize_full_cohort(
     n_figs = 0
     print(
         f"UniGrad error-map viz: selection={selection}  splits={', '.join(splits)}  "
-        f"view={run_view}  → {save_dir}"
+        f"view={run_view}  cosine={show_cosine_similarity}  → {save_dir}"
     )
 
     for sp in splits:
@@ -611,6 +720,7 @@ def visualize_full_cohort(
                     z_slice_index=z_slice_index,
                     montage_z_step=montage_z_step,
                     run_view=run_view,
+                    show_cosine_similarity=show_cosine_similarity,
                 )
                 n_figs += 1
             print(f"  {sp}: wrote {len(groups)} class plot(s)")
@@ -630,6 +740,7 @@ def visualize_full_cohort(
                     montage_z_step=montage_z_step,
                     run_view=run_view,
                     subtitle_extra=_mmm_rank_subtitle(rank, "mean"),
+                    show_cosine_similarity=show_cosine_similarity,
                 )
                 n_figs += 1
             print(f"  {sp}: wrote {len(picked)} min/median/max plot(s)")
@@ -708,6 +819,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=Path("assets/images/error-map/unigrad-synth/hcp/fullrun_random_orthogonal"),
         help="Output directory (creates {split}/*.png).",
     )
+    p.add_argument(
+        "--cosine-similarity",
+        action="store_true",
+        help=(
+            "Append cosine similarity map cosθ(u_gt, u_pred) after the error map "
+            "(+1 aligned, −1 opposite; NaN where either ‖u‖≈0)."
+        ),
+    )
     p.add_argument("--no-show", action="store_true")
     return p.parse_args(argv)
 
@@ -734,6 +853,7 @@ def main(argv: list[str] | None = None) -> int:
         montage_z_step=args.montage_z_step,
         run_view=args.run_view,
         mmm_selection_csv=args.mmm_selection_csv,
+        show_cosine_similarity=args.cosine_similarity,
     )
     return 0
 
