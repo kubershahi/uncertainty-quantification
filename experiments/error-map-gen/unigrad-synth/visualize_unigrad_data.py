@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
 """
-Plot UniGradICON *_fiver.npz samples (fixed, warped, ‖φ_true‖, ‖φ_pred‖, error map).
+Visualize HCP UniGrad synth error-map NPZ (``create_unigrad_synth_data.py`` output).
 
-Default: pick three files with **min / median / max** of a ranking scalar (default: **mean
-error_map**). Use ``--selection random`` for random files.
+Columns: Source (fixed), Warped (moving), ``‖u_gt‖``, ``‖u_pred‖``, error map.
+Axial display is radiological (``rot90``).
+
+Modes (match ``visualize_synth_data.py`` output names):
+  - ``--selection random`` → one random sample per class per split
+    (``{save-dir}/{split}/{class}.png``)
+  - ``--selection min_median_max`` → min / median / max per split from the
+    Phase-I selection CSV (mean ‖u‖; no re-scoring). Default CSV:
+    ``assets/images/synth-data/torchio/hcp/fullrun_mmm_orthogonal/min_median_max_selection.csv``
+    Writes ``{save-dir}/{split}/{min|median|max}.png``
+
+``--run-view orthogonal|montage`` controls row layout (``--montage-z-step`` for montage).
 
 Examples:
-python visualize_unigrad_data.py --split Train --save-path ./assets/images/ixi_unigrad_train_minmedmax.png --no-show --selection random --num-samples 3
-python visualize_unigrad_data.py --split Train --save-path ./assets/images/ixi_unigrad_train_minmedmax.png --no-show  --rank-by max_error
+python experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py --data-dir datasets/error-map/unigrad-synth/hcp --selection random --save-dir assets/images/error-map/unigrad-synth/hcp/fullrun_random_orthogonal --no-show --run-view orthogonal
+python experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py --data-dir datasets/error-map/unigrad-synth/hcp --selection min_median_max --save-dir assets/images/error-map/unigrad-synth/hcp/fullrun_mmm_orthogonal --no-show --run-view orthogonal
+python experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py --data-dir datasets/error-map/unigrad-synth/hcp --split Train --selection random --save-dir assets/images/error-map/unigrad-synth/hcp/fullrun_train --no-show
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import random
 import sys
 from pathlib import Path
@@ -20,223 +32,483 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-REQUIRED_KEYS = frozenset(
-    {"image", "warped", "phi_true", "phi_pred", "phi_diff", "error_map"}
+HCP_UNIGRAD_GLOB = "*.npz"
+HCP_UNIGRAD_REQUIRED_KEYS = frozenset(
+    {
+        "source",
+        "moving",
+        "u_gt",
+        "u_pred",
+        "u_error_map",
+        "deformation_class",
+        "subject_id",
+    }
 )
-SPLITS = ("Train", "Val", "Test", "Atlas")
-FIVER_GLOB = "*_fiver.npz"
+
+DEFORM_CLASSES = ("none", "rigid", "affine", "elastic", "affine_elastic")
+FULL_SPLITS = ("Train", "Val", "Test")
+
+DEFORM_TITLE_LABELS: dict[str, str] = {
+    "none": "No",
+    "rigid": "Rigid",
+    "affine": "Affine",
+    "elastic": "Elastic",
+    "affine_elastic": "Affine+Elastic",
+}
+
+DEFORM_SUFFIX = {
+    "none": "none",
+    "rigid": "rig",
+    "affine": "aff",
+    "elastic": "ela",
+    "affine_elastic": "aela",
+}
+SUFFIX_TO_CLASS = {suffix: cls for cls, suffix in DEFORM_SUFFIX.items()}
+
+MMM_SELECTION_CSV = "min_median_max_selection.csv"
+MMM_RANK_ORDER = ("min", "median", "max")
+DEFAULT_MMM_CSV = Path(
+    "assets/images/synth-data/torchio/hcp/fullrun_mmm_orthogonal/min_median_max_selection.csv"
+)
+
+_DPI = 150
+_FONT = "DejaVu Sans"
+_TITLE = 12
+_SUBTITLE = 10
+_LABEL = 9
+_U_COLOR_PERCENTILE = 99.0
+_ERR_COLOR_PERCENTILE = 99.0
 
 
-def phi_magnitude(phi: np.ndarray) -> np.ndarray:
-    return np.sqrt(phi[0] * phi[0] + phi[1] * phi[1])
+def displacement_magnitude(u: np.ndarray) -> np.ndarray:
+    return np.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2])
 
 
-def _unpack_qc_passed(raw) -> tuple[bool | None, str | None]:
+def _unpack_scalar_str(raw) -> str:
     a = np.asarray(raw)
-    if a.size != 1:
-        return None, f"qc_passed must be a single value, got shape {a.shape}"
-    v = a.reshape(-1)[0]
-    try:
-        return bool(v), None
-    except (ValueError, TypeError) as e:
-        return None, f"qc_passed not bool-convertible: {e}"
+    if a.size == 0:
+        return ""
+    return str(a.reshape(-1)[0])
 
 
-def collect_fivers(input_dir: Path, split: str, pattern: str) -> list[Path]:
-    split_dir = input_dir / split
-    if not split_dir.exists():
-        raise FileNotFoundError(f"Split directory does not exist: {split_dir}")
-    return sorted(split_dir.glob(pattern))
+def resolve_npz_dir(input_dir: Path, split: str | None) -> Path:
+    if split:
+        split_dir = input_dir / split
+        if split_dir.is_dir():
+            return split_dir
+    return input_dir
 
 
-def load_fiver(npz_path: Path) -> dict:
-    """Load fiver arrays; optional valid_mask / qc_passed in ``extra``."""
-    extra: dict = {}
+def collect_npz_files(input_dir: Path, split: str | None) -> list[Path]:
+    data_dir = resolve_npz_dir(input_dir, split)
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Data directory does not exist: {data_dir}")
+    files = sorted(data_dir.glob(HCP_UNIGRAD_GLOB))
+    if not files and split:
+        files = sorted(input_dir.glob(HCP_UNIGRAD_GLOB))
+    return files
+
+
+def default_slice_index(vol: np.ndarray) -> int:
+    return int(vol.shape[2] // 2)
+
+
+def axial_slice(vol: np.ndarray, slice_index: int | None) -> tuple[np.ndarray, int]:
+    z = default_slice_index(vol) if slice_index is None else int(slice_index)
+    z = max(0, min(z, vol.shape[2] - 1))
+    return vol[:, :, z], z
+
+
+def orient_axial(sl: np.ndarray) -> np.ndarray:
+    """Radiological axial display (CCW 90°)."""
+    return np.rot90(sl)
+
+
+def plane_slice(vol: np.ndarray, plane: str, index: int | None) -> tuple[np.ndarray, int]:
+    if plane == "axial":
+        z = default_slice_index(vol) if index is None else int(index)
+        z = max(0, min(z, vol.shape[2] - 1))
+        return vol[:, :, z], z
+    if plane == "coronal":
+        y = int(vol.shape[1] // 2) if index is None else int(index)
+        y = max(0, min(y, vol.shape[1] - 1))
+        return vol[:, y, :], y
+    if plane == "sagittal":
+        x = int(vol.shape[0] // 2) if index is None else int(index)
+        x = max(0, min(x, vol.shape[0] - 1))
+        return vol[x, :, :], x
+    raise ValueError(f"Unknown plane: {plane}")
+
+
+def magnitude_plane_slice(u: np.ndarray, plane: str, index: int) -> np.ndarray:
+    """Magnitude of a 3-channel displacement on one plane."""
+    if plane == "axial":
+        z = max(0, min(int(index), u.shape[3] - 1))
+        return displacement_magnitude(u[:, :, :, z].astype(np.float64))
+    if plane == "coronal":
+        y = max(0, min(int(index), u.shape[2] - 1))
+        return displacement_magnitude(u[:, :, y, :].astype(np.float64))
+    if plane == "sagittal":
+        x = max(0, min(int(index), u.shape[1] - 1))
+        return displacement_magnitude(u[:, x, :, :].astype(np.float64))
+    raise ValueError(f"Unknown plane: {plane}")
+
+
+def load_sample(npz_path: Path) -> dict:
     with np.load(npz_path) as data:
-        missing = REQUIRED_KEYS - set(data.files)
+        missing = HCP_UNIGRAD_REQUIRED_KEYS - set(data.files)
         if missing:
             raise KeyError(f"{npz_path.name} missing {sorted(missing)}")
-        out = {
-            "image": np.asarray(data["image"]),
-            "warped": np.asarray(data["warped"]),
-            "phi_true": np.asarray(data["phi_true"]),
-            "phi_pred": np.asarray(data["phi_pred"]),
-            "phi_diff": np.asarray(data["phi_diff"]),
-            "error_map": np.asarray(data["error_map"]),
+        return {
+            "source": np.asarray(data["source"]),
+            "moving": np.asarray(data["moving"]),
+            "u_gt": np.asarray(data["u_gt"], dtype=np.float32),
+            "u_pred": np.asarray(data["u_pred"], dtype=np.float32),
+            "u_error_map": np.asarray(data["u_error_map"], dtype=np.float32),
+            "deformation_class": _unpack_scalar_str(data["deformation_class"]),
+            "subject_id": _unpack_scalar_str(data["subject_id"]),
         }
-        if "valid_mask" in data.files:
-            extra["valid_mask"] = np.asarray(data["valid_mask"])
-        if "qc_passed" in data.files:
-            qc_val, qc_err = _unpack_qc_passed(data["qc_passed"])
-            if qc_err:
-                raise ValueError(f"{npz_path.name}: {qc_err}")
-            extra["qc_passed"] = qc_val
-    return {**out, **{"_extra": extra}}
 
 
-def _rank_scalar(blob: dict, rank_by: str) -> float:
-    err = blob["error_map"].astype(np.float64)
-    pt = blob["phi_true"].astype(np.float64)
-    pp = blob["phi_pred"].astype(np.float64)
-    if rank_by == "mean_error":
-        return float(np.mean(err))
-    if rank_by == "max_error":
-        return float(np.max(err))
-    if rank_by == "mean_phi_true":
-        return float(np.mean(phi_magnitude(pt)))
-    if rank_by == "mean_phi_pred":
-        return float(np.mean(phi_magnitude(pp)))
-    if rank_by == "mean_phi_diff":
-        return float(np.mean(phi_magnitude(blob["phi_diff"].astype(np.float64))))
-    raise ValueError(f"unknown rank_by: {rank_by!r}")
+def deformation_class_from_filename(npz_path: Path) -> str:
+    stem = npz_path.stem
+    if "_" not in stem:
+        raise ValueError(f"Cannot parse deformation class from filename: {npz_path.name}")
+    suffix = stem.rsplit("_", 1)[-1]
+    if suffix in SUFFIX_TO_CLASS:
+        return SUFFIX_TO_CLASS[suffix]
+    if suffix.isdigit():
+        stem = stem.rsplit("_", 1)[0]
+    for cls in sorted(DEFORM_CLASSES, key=len, reverse=True):
+        if stem.endswith(f"_{cls}"):
+            return cls
+    raise ValueError(f"Cannot parse deformation class from filename: {npz_path.name}")
 
 
-def select_min_median_max(
-    files: list[Path],
-    rank_by: str,
-) -> list[tuple[Path, str, float]]:
-    if not files:
-        return []
-    scored: list[tuple[Path, float]] = []
+def _cached_sample(path: Path, cache: dict[Path, dict]) -> dict:
+    if path not in cache:
+        cache[path] = load_sample(path)
+    return cache[path]
+
+
+def sample_u_mag_stats(u: np.ndarray) -> dict[str, float]:
+    mag = displacement_magnitude(u.astype(np.float64)).ravel()
+    return {
+        "min": float(np.min(mag)),
+        "q1": float(np.percentile(mag, 25)),
+        "mean": float(np.mean(mag)),
+        "q3": float(np.percentile(mag, 75)),
+        "max": float(np.max(mag)),
+    }
+
+
+def _format_u_stats_line(name: str, stats: dict[str, float]) -> str:
+    return (
+        f"{name} voxels: min={stats['min']:.2f}  Q1={stats['q1']:.2f}  "
+        f"mean={stats['mean']:.2f}  Q3={stats['q3']:.2f}  max={stats['max']:.2f}"
+    )
+
+
+def is_full_cohort_dir(input_dir: Path) -> bool:
+    return any((input_dir / sp).is_dir() for sp in FULL_SPLITS)
+
+
+def resolve_full_splits(input_dir: Path, split: str | None) -> list[str]:
+    if split:
+        if not (input_dir / split).is_dir():
+            raise FileNotFoundError(f"Split directory not found: {input_dir / split}")
+        return [split]
+    found = [sp for sp in FULL_SPLITS if (input_dir / sp).is_dir()]
+    if not found:
+        raise FileNotFoundError(
+            f"No Train/Val/Test folders under {input_dir}."
+        )
+    return found
+
+
+def group_class_examples_optional(
+    files: list[Path], seed: int
+) -> tuple[list[tuple[str, Path]], list[str]]:
+    pools: dict[str, list[Path]] = {cls: [] for cls in DEFORM_CLASSES}
     for fp in files:
-        d = load_fiver(fp)
-        d.pop("_extra", None)
-        scored.append((fp, _rank_scalar(d, rank_by)))
-    scored.sort(key=lambda x: x[1])
-    n = len(scored)
-    if n == 1:
-        return [(scored[0][0], "min", scored[0][1])]
-    if n == 2:
-        return [
-            (scored[0][0], "min", scored[0][1]),
-            (scored[1][0], "max", scored[1][1]),
-        ]
-    i_min, i_med, i_max = 0, n // 2, n - 1
-    return [
-        (scored[i_min][0], "min", scored[i_min][1]),
-        (scored[i_med][0], "median", scored[i_med][1]),
-        (scored[i_max][0], "max", scored[i_max][1]),
-    ]
+        cls = deformation_class_from_filename(fp)
+        if cls in pools:
+            pools[str(cls)].append(fp)
+    rng = random.Random(seed)
+    groups: list[tuple[str, Path]] = []
+    missing: list[str] = []
+    for cls in DEFORM_CLASSES:
+        pool = pools[cls]
+        if not pool:
+            missing.append(cls)
+            continue
+        groups.append((cls, rng.choice(pool)))
+    return groups, missing
 
 
-def visualize_fivers(
+def _resolve_split_npz(input_dir: Path, split: str, file_name: str) -> Path | None:
+    fp = input_dir / split / file_name
+    if fp.is_file():
+        return fp
+    fp = resolve_npz_dir(input_dir, split) / file_name
+    return fp if fp.is_file() else None
+
+
+def load_mmm_picks_from_csv(
+    csv_path: Path,
     input_dir: Path,
     split: str,
-    pattern: str,
+    *,
+    u_metric: str = "mean",
+) -> list[tuple[Path, str, float]]:
+    """Reuse Phase-I min/median/max picks (mean ‖u‖) for plotting error-map NPZ."""
+    if not csv_path.is_file():
+        raise FileNotFoundError(
+            f"min/median/max selection CSV not found: {csv_path}\n"
+            "Pass --mmm-selection-csv pointing at Phase-I "
+            "fullrun_mmm_orthogonal/min_median_max_selection.csv"
+        )
+    rows: list[dict[str, str]] = []
+    with open(csv_path, encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("u_metric") == u_metric and row.get("split") == split:
+                rows.append(row)
+    if not rows:
+        raise ValueError(
+            f"No rows for split={split!r} u_metric={u_metric!r} in {csv_path}"
+        )
+    rank_index = {rank: i for i, rank in enumerate(MMM_RANK_ORDER)}
+    rows.sort(key=lambda r: rank_index.get(r["rank"], 99))
+    picked: list[tuple[Path, str, float]] = []
+    for row in rows:
+        fp = _resolve_split_npz(input_dir, split, row["file"])
+        if fp is None:
+            raise FileNotFoundError(
+                f"CSV pick missing under error-map data: {split}/{row['file']} "
+                f"(looked in {input_dir}). Run create_unigrad_synth_data.py first."
+            )
+        picked.append((fp, row["rank"], float(row["u_score"])))
+    return picked
+
+
+def _mmm_rank_subtitle(rank: str, u_metric: str = "mean") -> str:
+    rank_label = {"min": "Minimum", "median": "Median", "max": "Maximum"}[rank]
+    return f"{rank_label} of u {u_metric} sample"
+
+
+def _style_axis(ax: plt.Axes) -> None:
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.8)
+        spine.set_color("0.35")
+
+
+def _class_plot_title(deformation_class: str) -> str:
+    label = DEFORM_TITLE_LABELS.get(
+        deformation_class, deformation_class.replace("_", "+").title()
+    )
+    return f"Unigrad Synthetic Error Map Plot ({label} Transformation)"
+
+
+def _view_label(run_view: str) -> str:
+    return "Orthogonal View" if run_view == "orthogonal" else "Montage View"
+
+
+def _plot_subtitle(subject_id: str, run_view: str, extra: str | None = None) -> str:
+    base = (
+        f"Subject {subject_id} - Radiological-style display - {_view_label(run_view)}"
+    )
+    if extra:
+        return f"{base} · {extra}"
+    return base
+
+
+def _plane_row_label(plane: str, idx: int) -> str:
+    return f"{plane} ({plane[0]}={idx})"
+
+
+def _views_for_sample(
+    sample: dict,
+    *,
+    z_slice_index: int | None,
+    montage_z_step: int,
+    run_view: str,
+) -> tuple[list[str], list[int]]:
+    if run_view == "orthogonal":
+        x0 = sample["source"].shape[0] // 2
+        y0 = sample["source"].shape[1] // 2
+        z0 = axial_slice(sample["source"], z_slice_index)[1]
+        return (["axial", "coronal", "sagittal"], [z0, y0, x0])
+    z0 = axial_slice(sample["source"], z_slice_index)[1]
+    z_offsets = [-int(montage_z_step), 0, int(montage_z_step)]
+    idx_rows = [
+        max(0, min(sample["source"].shape[2] - 1, z0 + dz)) for dz in z_offsets
+    ]
+    return (["axial", "axial", "axial"], idx_rows)
+
+
+def _render_figure(
+    picked: list[tuple[Path, str, float]],
+    *,
     save_path: Path | None,
     no_show: bool,
-    *,
-    selection: str = "min_median_max",
-    rank_by: str = "mean_error",
-    num_samples: int = 3,
-    seed: int = 42,
-    err_vmax: float | None = None,
-    err_percentile: float = 99.0,
-    phi_vmax: float | None = None,
-    phi_percentile: float = 99.0,
+    title: str,
+    subtitle: str,
+    z_slice_index: int | None,
+    row_planes: list[str] | None = None,
+    row_slice_indices: list[int] | None = None,
+    sample_stats_note: str | None = None,
+    row_h: float = 3.0,
+    announce_save: bool = True,
+    sample_cache: dict[Path, dict] | None = None,
 ) -> None:
-    files = collect_fivers(input_dir, split, pattern)
-    if not files:
-        raise FileNotFoundError(
-            f"No files in '{input_dir / split}' matching '{pattern}'."
-        )
-
-    if selection == "random":
-        rng = random.Random(seed)
-        n = min(num_samples, len(files))
-        picked: list[tuple[Path, str, float]] = []
-        for p in rng.sample(files, n):
-            d = load_fiver(p)
-            d.pop("_extra", None)
-            picked.append((p, "", float("nan")))
-        title_suffix = f"random {n} of {len(files)} (seed={seed})"
-    elif selection == "min_median_max":
-        picked = select_min_median_max(files, rank_by)
-        title_suffix = f"min/median/max by {rank_by} ({len(picked)} of {len(files)} files)"
-    else:
-        raise ValueError(f"Unknown selection: {selection!r}")
-
     nrows = len(picked)
-    # Shared color limits from picked samples only
-    err_stack: list[np.ndarray] = []
-    pt_stack: list[np.ndarray] = []
-    pp_stack: list[np.ndarray] = []
-    for fp, _, _ in picked:
-        d = load_fiver(fp)
-        d.pop("_extra", None)
-        err_stack.append(d["error_map"].ravel())
-        pt_stack.append(phi_magnitude(d["phi_true"]).ravel())
-        pp_stack.append(phi_magnitude(d["phi_pred"]).ravel())
-    err_v = err_vmax
-    if err_v is None:
-        err_v = float(np.percentile(np.concatenate(err_stack), err_percentile))
-        if err_v <= 0:
-            err_v = 1e-6
-    phi_v = phi_vmax
-    if phi_v is None:
-        pt_p = float(np.percentile(np.concatenate(pt_stack), phi_percentile))
-        pp_p = float(np.percentile(np.concatenate(pp_stack), phi_percentile))
-        phi_v = max(pt_p, pp_p, 1e-6)
+    ncols = 5
+    col_titles = [
+        "Source (fixed)",
+        "Warped (moving)",
+        r"$\|u_{\mathrm{gt}}\|$",
+        r"$\|u_{\mathrm{pred}}\|$",
+        "error map",
+    ]
 
-    fig, axes = plt.subplots(nrows, 5, figsize=(18, 3.2 * nrows))
-    axes = np.atleast_2d(axes)
-
-    for row, (file_path, rank_label, score) in enumerate(picked):
-        d = load_fiver(file_path)
-        extra = d.pop("_extra", {})
-        image = d["image"]
-        warped = d["warped"]
-        phi_true = d["phi_true"]
-        phi_pred = d["phi_pred"]
-        error_map = d["error_map"]
-        mag_t = phi_magnitude(phi_true.astype(np.float64))
-        mag_p = phi_magnitude(phi_pred.astype(np.float64))
-
-        qc_note = ""
-        if "qc_passed" in extra:
-            qc_note = f" qc_passed={extra['qc_passed']}"
-        rank_note = ""
-        if selection == "min_median_max" and rank_label and np.isfinite(score):
-            rank_note = f" [{rank_label} {rank_by}={score:.4f}]"
-
-        stem = file_path.stem
-        stem_title = stem if len(stem) <= 44 else f"{stem[:41]}…"
-
-        axes[row, 0].imshow(image, cmap="gray")
-        axes[row, 0].set_title(
-            f"Fixed: {stem_title}{qc_note}{rank_note}", fontsize=8
+    cache: dict[Path, dict] = {} if sample_cache is None else sample_cache
+    row_u_vmax: list[float] = []
+    row_err_vmax: list[float] = []
+    for row, (fp, _, _) in enumerate(picked):
+        sample = _cached_sample(fp, cache)
+        plane = row_planes[row] if row_planes is not None else "axial"
+        if row_slice_indices is not None:
+            idx = int(row_slice_indices[row])
+        else:
+            idx = plane_slice(sample["source"], plane, z_slice_index)[1]
+        mag_gt = magnitude_plane_slice(sample["u_gt"], plane, idx).ravel()
+        mag_pr = magnitude_plane_slice(sample["u_pred"], plane, idx).ravel()
+        err_sl, _ = plane_slice(sample["u_error_map"], plane, idx)
+        u_cap = max(
+            float(np.percentile(mag_gt, _U_COLOR_PERCENTILE)),
+            float(np.percentile(mag_pr, _U_COLOR_PERCENTILE)),
+            1e-6,
         )
-        axes[row, 0].axis("off")
+        err_cap = max(float(np.percentile(err_sl.ravel(), _ERR_COLOR_PERCENTILE)), 1e-6)
+        row_u_vmax.append(u_cap)
+        row_err_vmax.append(err_cap)
 
-        axes[row, 1].imshow(warped, cmap="gray")
-        axes[row, 1].set_title("Warped", fontsize=9)
-        axes[row, 1].axis("off")
+    plt.rcParams.update({"font.family": _FONT, "figure.dpi": _DPI, "savefig.dpi": _DPI})
+    fig_w = 3.0 * ncols + 2.4
+    fig_h = row_h * nrows + 1.9
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
 
-        im_pt = axes[row, 2].imshow(mag_t, cmap="hot", vmin=0.0, vmax=phi_v)
-        axes[row, 2].set_title("‖φ_true‖", fontsize=9)
-        axes[row, 2].axis("off")
-        fig.colorbar(im_pt, ax=axes[row, 2], fraction=0.046, pad=0.02)
+    im_u_last = None
+    im_err_last = None
+    for row, (file_path, _rank_label, _) in enumerate(picked):
+        sample = _cached_sample(file_path, cache)
+        source = sample["source"]
+        moving = sample["moving"]
+        u_gt = sample["u_gt"]
+        u_pred = sample["u_pred"]
+        err = sample["u_error_map"]
 
-        im_pp = axes[row, 3].imshow(mag_p, cmap="hot", vmin=0.0, vmax=phi_v)
-        axes[row, 3].set_title("‖φ_pred‖", fontsize=9)
-        axes[row, 3].axis("off")
-        fig.colorbar(im_pp, ax=axes[row, 3], fraction=0.046, pad=0.02)
+        plane = row_planes[row] if row_planes is not None else "axial"
+        if row_slice_indices is not None:
+            idx = int(row_slice_indices[row])
+        else:
+            idx = plane_slice(source, plane, z_slice_index)[1]
 
-        im_e = axes[row, 4].imshow(error_map, cmap="hot", vmin=0.0, vmax=err_v)
-        axes[row, 4].set_title("‖φ_true − φ_pred‖ (px)", fontsize=9)
-        axes[row, 4].axis("off")
-        fig.colorbar(im_e, ax=axes[row, 4], fraction=0.046, pad=0.02)
+        src_sl, _ = plane_slice(source, plane, idx)
+        mov_sl, _ = plane_slice(moving, plane, idx)
+        err_sl, _ = plane_slice(err, plane, idx)
+        mag_gt = orient_axial(magnitude_plane_slice(u_gt, plane, idx))
+        mag_pr = orient_axial(magnitude_plane_slice(u_pred, plane, idx))
+        src_disp = orient_axial(src_sl)
+        mov_disp = orient_axial(mov_sl)
+        err_disp = orient_axial(err_sl)
+        u_vmax = row_u_vmax[row]
+        err_vmax = row_err_vmax[row]
 
-        axes[row, 0].set_ylabel(file_path.stem[:28], fontsize=7, rotation=90)
+        ax_src = axes[row, 0]
+        ax_src.imshow(
+            src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3
+        )
+        _style_axis(ax_src)
+        ax_src.set_ylabel(
+            _plane_row_label(plane, idx),
+            fontsize=_LABEL,
+            rotation=90,
+            ha="center",
+            va="center",
+            labelpad=18,
+        )
 
-    fig.suptitle(f"UniGrad fivers — {split} ({title_suffix})", fontsize=12)
-    fig.tight_layout()
+        ax_mov = axes[row, 1]
+        ax_mov.imshow(
+            mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3
+        )
+        _style_axis(ax_mov)
+
+        ax_gt = axes[row, 2]
+        im_u_last = ax_gt.imshow(
+            mag_gt, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
+        )
+        _style_axis(ax_gt)
+
+        ax_pr = axes[row, 3]
+        ax_pr.imshow(
+            mag_pr, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
+        )
+        _style_axis(ax_pr)
+
+        ax_e = axes[row, 4]
+        im_err_last = ax_e.imshow(
+            err_disp,
+            cmap="hot",
+            vmin=0.0,
+            vmax=err_vmax,
+            origin="upper",
+            interpolation="nearest",
+        )
+        _style_axis(ax_e)
+
+        if row == 0:
+            for col, t in enumerate(col_titles):
+                axes[0, col].set_title(t, fontsize=_SUBTITLE, fontweight="medium", pad=10)
+
+    if im_u_last is not None:
+        cbar_u_ax = fig.add_axes([0.905, 0.28, 0.014, 0.48])
+        cbar_u = fig.colorbar(im_u_last, cax=cbar_u_ax)
+        cbar_u.set_label(r"$\|u\|$ (voxels)", fontsize=_LABEL)
+        cbar_u.ax.tick_params(labelsize=_LABEL - 1)
+    if im_err_last is not None:
+        cbar_e_ax = fig.add_axes([0.955, 0.28, 0.014, 0.48])
+        cbar_e = fig.colorbar(im_err_last, cax=cbar_e_ax)
+        cbar_e.set_label(r"error (voxels)", fontsize=_LABEL)
+        cbar_e.ax.tick_params(labelsize=_LABEL - 1)
+
+    bottom = 0.12 if sample_stats_note else 0.08
+    left, right = 0.22, 0.88
+    fig.subplots_adjust(left=left, right=right, top=0.86, bottom=bottom, wspace=0.26, hspace=0.34)
+    title_x = 0.5 * (left + right)
+    fig.suptitle(title, fontsize=_TITLE, fontweight="bold", x=title_x, y=0.98, ha="center")
+    fig.text(title_x, 0.935, subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
+    if sample_stats_note:
+        fig.text(
+            title_x,
+            0.02,
+            sample_stats_note,
+            ha="center",
+            va="bottom",
+            fontsize=_LABEL - 1,
+            color="0.25",
+            family="monospace",
+        )
 
     if save_path is not None:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"Saved figure: {save_path}")
+        fig.savefig(save_path, dpi=_DPI, bbox_inches="tight", facecolor="white")
+        if announce_save:
+            print(f"Saved figure: {save_path}")
 
     if no_show:
         plt.close(fig)
@@ -244,47 +516,198 @@ def visualize_fivers(
         plt.show()
 
 
+def _render_single_sample_plot(
+    fp: Path,
+    *,
+    save_path: Path,
+    z_slice_index: int | None,
+    montage_z_step: int,
+    run_view: str,
+    subtitle_extra: str | None = None,
+) -> None:
+    sample = load_sample(fp)
+    gt_stats = sample_u_mag_stats(sample["u_gt"])
+    pr_stats = sample_u_mag_stats(sample["u_pred"])
+    stats_note = (
+        _format_u_stats_line(r"‖u_gt‖", gt_stats)
+        + "\n"
+        + _format_u_stats_line(r"‖u_pred‖", pr_stats)
+    )
+    plane_rows, idx_rows = _views_for_sample(
+        sample,
+        z_slice_index=z_slice_index,
+        montage_z_step=montage_z_step,
+        run_view=run_view,
+    )
+    subject_id = sample.get("subject_id") or fp.stem.split("_")[0]
+    deform_cls = str(sample.get("deformation_class") or deformation_class_from_filename(fp))
+    picked = [(fp, r, float("nan")) for r in plane_rows]
+    print(f"    Plotting → {save_path}")
+    _render_figure(
+        picked,
+        save_path=save_path,
+        no_show=True,
+        title=_class_plot_title(deform_cls),
+        subtitle=_plot_subtitle(str(subject_id), run_view, subtitle_extra),
+        z_slice_index=z_slice_index,
+        row_planes=plane_rows,
+        row_slice_indices=idx_rows,
+        sample_stats_note=stats_note,
+        row_h=3.0,
+        announce_save=False,
+        sample_cache={fp: sample},
+    )
+
+
+def visualize_full_cohort(
+    input_dir: Path,
+    split: str | None,
+    save_dir: Path,
+    no_show: bool,
+    *,
+    selection: str,
+    seed: int,
+    z_slice_index: int | None,
+    montage_z_step: int,
+    run_view: str,
+    mmm_selection_csv: Path,
+) -> None:
+    splits = resolve_full_splits(input_dir, split)
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    n_figs = 0
+    print(
+        f"UniGrad error-map viz: selection={selection}  splits={', '.join(splits)}  "
+        f"view={run_view}  → {save_dir}"
+    )
+
+    for sp in splits:
+        files = collect_npz_files(input_dir, sp)
+        if not files:
+            print(f"Warning: no NPZ in {sp}; skipping.", file=sys.stderr)
+            continue
+        out_split = save_dir / sp
+        out_split.mkdir(parents=True, exist_ok=True)
+
+        if selection == "random":
+            print(
+                f"  {sp}: grouping {len(files)} NPZs by class "
+                f"(filename suffix only)…"
+            )
+            groups, missing = group_class_examples_optional(
+                files, seed=seed + hash(sp) % 10007
+            )
+            if missing:
+                print(
+                    f"Warning: {sp} missing class(es) {', '.join(missing)}; "
+                    "plotting available classes only.",
+                    file=sys.stderr,
+                )
+            for label, fp in groups:
+                print(f"  {sp} / {label}: plotting {fp.name}")
+                _render_single_sample_plot(
+                    fp,
+                    save_path=out_split / f"{label}.png",
+                    z_slice_index=z_slice_index,
+                    montage_z_step=montage_z_step,
+                    run_view=run_view,
+                )
+                n_figs += 1
+            print(f"  {sp}: wrote {len(groups)} class plot(s)")
+        elif selection == "min_median_max":
+            print(f"  {sp}: loading Phase-I mean ‖u‖ picks from {mmm_selection_csv}")
+            picked = load_mmm_picks_from_csv(
+                mmm_selection_csv, input_dir, sp, u_metric="mean"
+            )
+            for fp, rank, score in picked:
+                print(
+                    f"  {sp} / {rank}: mean ‖u‖={score:.3f} from {fp.name} (cached)"
+                )
+                _render_single_sample_plot(
+                    fp,
+                    save_path=out_split / f"{rank}.png",
+                    z_slice_index=z_slice_index,
+                    montage_z_step=montage_z_step,
+                    run_view=run_view,
+                    subtitle_extra=_mmm_rank_subtitle(rank, "mean"),
+                )
+                n_figs += 1
+            print(f"  {sp}: wrote {len(picked)} min/median/max plot(s)")
+        else:
+            raise ValueError(f"Unknown selection: {selection!r}")
+
+    if no_show:
+        plt.close("all")
+    print(f"Done: {n_figs} figures under {save_dir}")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Visualize UniGradICON *_fiver.npz (min/median/max error or random).",
+        description=(
+            "Visualize UniGrad HCP error-map NPZ (random or min/median/max from Phase-I CSV)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     p.add_argument(
         "--data-dir",
-        "--input-dir",
         type=Path,
-        default=Path("./datasets/error-map/unigrad-synth/ixi_2d_fiver"),
-        dest="data_dir",
-        help="Root with Train/Val/Test/Atlas subfolders.",
+        default=Path("datasets/error-map/unigrad-synth/hcp"),
+        help="Error-map root with Train/Val/Test/*.npz.",
     )
-    p.add_argument("--split", type=str, default="Train", choices=list(SPLITS))
+    p.add_argument(
+        "--split",
+        type=str,
+        default=None,
+        choices=list(FULL_SPLITS),
+        help="Optional single split; default = all present splits.",
+    )
     p.add_argument(
         "--selection",
         type=str,
-        default="min_median_max",
-        choices=["min_median_max", "random"],
+        default="random",
+        choices=["random", "min_median_max"],
+        help=(
+            "random (one-per-class per split) or min_median_max "
+            "(reuse Phase-I mean ‖u‖ selection CSV)."
+        ),
     )
     p.add_argument(
-        "--rank-by",
-        type=str,
-        default="mean_error",
-        choices=[
-            "mean_error",
-            "max_error",
-            "mean_phi_true",
-            "mean_phi_pred",
-            "mean_phi_diff",
-        ],
-        help="Scalar per file for min/median/max selection only (ignored when --selection random).",
+        "--mmm-selection-csv",
+        type=Path,
+        default=DEFAULT_MMM_CSV,
+        help=(
+            "Phase-I min_median_max_selection.csv (mean ‖u‖ picks). "
+            f"Default: {DEFAULT_MMM_CSV}"
+        ),
     )
-    p.add_argument("--num-samples", type=int, default=3)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--err-vmax", type=float, default=None)
-    p.add_argument("--err-percentile", type=float, default=99.0)
-    p.add_argument("--phi-vmax", type=float, default=None)
-    p.add_argument("--phi-percentile", type=float, default=99.0)
-    p.add_argument("--save-path", type=Path, default=None)
+    p.add_argument(
+        "--z-slice",
+        type=int,
+        default=None,
+        dest="z_slice_index",
+        help="Axial slice index (default mid-volume).",
+    )
+    p.add_argument(
+        "--montage-z-step",
+        type=int,
+        default=10,
+        help="Axial offset for --run-view montage (default 10).",
+    )
+    p.add_argument(
+        "--run-view",
+        type=str,
+        default="orthogonal",
+        choices=["orthogonal", "montage"],
+        help="Row layout: orthogonal planes (default) or 3-slice axial montage.",
+    )
+    p.add_argument(
+        "--save-dir",
+        type=Path,
+        default=Path("assets/images/error-map/unigrad-synth/hcp/fullrun_random_orthogonal"),
+        help="Output directory (creates {split}/*.png).",
+    )
     p.add_argument("--no-show", action="store_true")
     return p.parse_args(argv)
 
@@ -294,20 +717,23 @@ def main(argv: list[str] | None = None) -> int:
     if not args.data_dir.is_dir():
         print(f"ERROR: data dir not found: {args.data_dir}", file=sys.stderr)
         return 2
-    visualize_fivers(
+    if not is_full_cohort_dir(args.data_dir):
+        print(
+            f"ERROR: expected Train/Val/Test under {args.data_dir}",
+            file=sys.stderr,
+        )
+        return 2
+    visualize_full_cohort(
         input_dir=args.data_dir,
         split=args.split,
-        pattern=FIVER_GLOB,
-        save_path=args.save_path,
+        save_dir=args.save_dir,
         no_show=args.no_show,
         selection=args.selection,
-        rank_by=args.rank_by,
-        num_samples=args.num_samples,
         seed=args.seed,
-        err_vmax=args.err_vmax,
-        err_percentile=args.err_percentile,
-        phi_vmax=args.phi_vmax,
-        phi_percentile=args.phi_percentile,
+        z_slice_index=args.z_slice_index,
+        montage_z_step=args.montage_z_step,
+        run_view=args.run_view,
+        mmm_selection_csv=args.mmm_selection_csv,
     )
     return 0
 
