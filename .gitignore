@@ -32,10 +32,10 @@ env/
 
 
 # Large project directories (keep folder structure only)
-!datasets/.gitkeep
-!models/.gitkeep
 /datasets/**
 /models/**
+!datasets/.gitkeep
+!models/.gitkeep
 
 # NIfTI / pickle outputs
 *.nii
