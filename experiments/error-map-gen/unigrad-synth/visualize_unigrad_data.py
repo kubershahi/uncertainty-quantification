@@ -6,6 +6,10 @@ Columns: Source (fixed), Warped (moving), ``‖u_gt‖``, ``‖u_pred‖``, erro
 optional ``--cosine-similarity`` adds cosine(u_gt, u_pred) after the error map.
 Axial display is radiological (``rot90``).
 
+``u_gt`` and ``u_pred`` both live on the **source/fixed** lattice with
+``moving(x + u(x)) ≈ source(x)``. When ICON is accurate, cosine(u_gt, u_pred)
+trends toward **+1** (not −1).
+
 Modes (match ``visualize_synth_data.py`` output names):
   - ``--selection random`` → one random sample per class per split
     (``{save-dir}/{split}/{class}.png``)

@@ -13,20 +13,25 @@ Output layout:
 Each output npz contains:
   - source  : fixed/source image (float32 volume, masked z-score from brain mask)
   - moving  : deformed image (float32 volume, same normalization as source)
-  - u       : displacement field (float32, shape (3, X, Y, Z), voxel units);
+  - u_gt    : registration displacement on the **source/fixed** lattice
+              (float32, shape (3, X, Y, Z), voxel units);
+              ``moving(x + u_gt(x)) ≈ source(x)``.
+              Recovered by identity-grid ``u_back`` then SimpleITK field inversion;
               OOB zeroed via identity_grid_mask, then 12-voxel border zeroed, then p99.9 clip
   - source_mask    : fixed brain mask (bool; for visualization only)
   - moving_mask    : source_mask warped with the same transform (bool; viz only)
-  - identity_grid_mask : in-bounds mask for the displacement field (bool; viz only)
+  - identity_grid_mask : in-bounds mask for ``u_gt`` (bool; viz / Phase II cleanup)
   - source_affine
   - deformation_class : one of {none, rigid, affine, elastic, affine_elastic}
   - subject_id
 
 Note: ``source_mask`` / ``moving_mask`` / ``identity_grid_mask`` are written for
-visualization only. They are not mixed together and are not used for ‖u‖ stats.
+visualization (and Phase II masking). They are not mixed together and are not used for ‖u_gt‖
+stats aggregation beyond OOB zeroing.
 
-TorchIO transforms run in physical space (mm) using the NIfTI affine; ``u`` is recovered
-in voxel index space via the identity-grid trick (backward warp).
+TorchIO transforms run in physical space (mm) using the NIfTI affine. Identity-grid warp
+yields a temporary backward field on the moving lattice; we invert it to ``u_gt`` in voxel
+index space on the shared source/moving grid.
 
 Split policy (full run):
   - deterministic 70/15/15 by subject hash (Train/Val/Test)
@@ -62,6 +67,7 @@ from pathlib import Path
 
 import nibabel as nib
 import numpy as np
+import SimpleITK as sitk
 import torch
 import torchio as tio
 from tqdm import tqdm
@@ -331,6 +337,64 @@ def _build_identity_grid(shape_xyz: tuple[int, int, int]) -> torch.Tensor:
     return torch.stack([cx, cy, cz], dim=0).float()
 
 
+def invert_displacement_to_source_grid(
+    u_back: np.ndarray,
+    *,
+    maximum_iterations: int = 30,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Invert a dense backward displacement field to a source-lattice registration map.
+
+    ``u_back`` (3, X, Y, Z) satisfies ``moving(x) ≈ source(x + u_back(x))`` (moving lattice).
+    Returned ``u_gt`` satisfies ``moving(x + u_gt(x)) ≈ source(x)`` (same shared XYZ grid).
+
+    Inversion runs in voxel units (SITK unit spacing) via ``InvertDisplacementField``.
+    Also returns an in-bounds mask for ``x + u_gt(x)``.
+    """
+    if u_back.ndim != 4 or u_back.shape[0] != 3:
+        raise ValueError(f"expected u_back (3, X, Y, Z), got {u_back.shape}")
+    _, nx, ny, nz = u_back.shape
+    # SITK array layout (Z, Y, X, 3); components stay in voxel index space.
+    arr = np.stack(
+        [np.transpose(u_back[c].astype(np.float64, copy=False), (2, 1, 0)) for c in range(3)],
+        axis=-1,
+    )
+    img = sitk.GetImageFromArray(arr, isVector=True)
+    img.SetSpacing((1.0, 1.0, 1.0))
+    img.SetOrigin((0.0, 0.0, 0.0))
+    inv_img = sitk.InvertDisplacementField(
+        img,
+        maximumNumberOfIterations=int(maximum_iterations),
+        maxErrorToleranceThreshold=0.01,
+        meanErrorToleranceThreshold=0.0001,
+        enforceBoundaryCondition=True,
+    )
+    inv_arr = sitk.GetArrayFromImage(inv_img)
+    u_gt = np.stack(
+        [np.transpose(inv_arr[..., c], (2, 1, 0)) for c in range(3)],
+        axis=0,
+    ).astype(np.float32)
+
+    ix = np.arange(nx, dtype=np.float64)[:, None, None]
+    iy = np.arange(ny, dtype=np.float64)[None, :, None]
+    iz = np.arange(nz, dtype=np.float64)[None, None, :]
+    sx = ix + u_gt[0].astype(np.float64)
+    sy = iy + u_gt[1].astype(np.float64)
+    sz = iz + u_gt[2].astype(np.float64)
+    valid = (
+        (sx >= 0.0)
+        & (sx <= float(nx - 1))
+        & (sy >= 0.0)
+        & (sy <= float(ny - 1))
+        & (sz >= 0.0)
+        & (sz <= float(nz - 1))
+        & np.isfinite(sx)
+        & np.isfinite(sy)
+        & np.isfinite(sz)
+    )
+    return u_gt, valid.astype(bool)
+
+
 def process_one_subject(task: Task, *, pin_threads: bool) -> SampleStats:
     if pin_threads:
         _pin_worker_cpu_threads()
@@ -356,15 +420,19 @@ def process_one_subject(task: Task, *, pin_threads: bool) -> SampleStats:
     transformed = transform(subject)
     moving = transformed.mri.data.squeeze(0).numpy()
     moving_mask_bin = transformed.brain_mask.data.squeeze(0).numpy() > 0.5
-    cand_valid_mask = transformed.valid_mask.data.squeeze(0).numpy()
-    u = (
+    # Backward displacement on shared lattice: moving(x) ≈ source(x + u_back(x))
+    u_back = (
         transformed.grid.data.squeeze(0).numpy() - identity_grid.numpy()
     ).astype(np.float32)
-    # identity_grid_mask False → OOB; zero those displacements (‖u‖ = 0).
-    identity_grid_mask_bin = cand_valid_mask > 0.99
-    u[:, ~identity_grid_mask_bin] = 0.0
-    u = zero_u_boundary(u, U_BOUNDARY_MARGIN)
-    u = clip_u_at_percentile(u, U_CLIP_PERCENTILE)
+    u_back_valid = transformed.valid_mask.data.squeeze(0).numpy() > 0.99
+    u_back[:, ~u_back_valid] = 0.0
+
+    u_gt, u_gt_in_bounds = invert_displacement_to_source_grid(u_back)
+    # Valid for registration map on source lattice (also drop source of OOB backward map).
+    identity_grid_mask_bin = u_gt_in_bounds & u_back_valid
+    u_gt[:, ~identity_grid_mask_bin] = 0.0
+    u_gt = zero_u_boundary(u_gt, U_BOUNDARY_MARGIN)
+    u_gt = clip_u_at_percentile(u_gt, U_CLIP_PERCENTILE)
 
     source_z, moving_z, _, _ = zscore_brain_pair(
         source, moving, source_mask_bin, moving_mask_bin
@@ -375,7 +443,7 @@ def process_one_subject(task: Task, *, pin_threads: bool) -> SampleStats:
         task.out_path,
         source=source_z,
         moving=moving_z,
-        u=u.astype(np.float32),
+        u_gt=u_gt.astype(np.float32),
         source_mask=source_mask_bin.astype(bool),
         moving_mask=moving_mask_bin.astype(bool),
         identity_grid_mask=identity_grid_mask_bin.astype(bool),
@@ -514,7 +582,7 @@ def compute_class_u_stats_table(
         per_sample: list[dict[str, float]] = []
         for fp in by_class[cls]:
             with np.load(fp) as z:
-                vals = displacement_magnitude(np.asarray(z["u"], dtype=np.float64)).ravel()
+                vals = displacement_magnitude(np.asarray(z["u_gt"], dtype=np.float64)).ravel()
             per_sample.append(
                 {
                     "min": float(np.min(vals)),
@@ -602,7 +670,7 @@ def compute_split_class_u_stats_table(
             for fp in paths:
                 with np.load(fp) as z:
                     vals = displacement_magnitude(
-                        np.asarray(z["u"], dtype=np.float64)
+                        np.asarray(z["u_gt"], dtype=np.float64)
                     ).ravel()
                 per_sample.append(
                     {
@@ -729,7 +797,7 @@ def create_synthetic_data(
             f"elastic={PARAM_ELASTIC}, affine_elastic_elastic={PARAM_ELASTIC_IN_AFFINE}"
         )
         print(
-            f"u cleanup: identity_grid_mask OOB → {U_BOUNDARY_MARGIN}-voxel border → "
+            f"u_gt: invert(u_back) → identity_grid_mask OOB → {U_BOUNDARY_MARGIN}-voxel border → "
             f"p{U_CLIP_PERCENTILE:g} clip"
         )
         tasks = build_dry_run_tasks(
@@ -788,7 +856,7 @@ def create_synthetic_data(
                 mix = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
                 print(f"  {sp} classes: {mix}")
         print(
-            f"u cleanup: identity_grid_mask OOB → {U_BOUNDARY_MARGIN}-voxel border → "
+            f"u_gt: invert(u_back) → identity_grid_mask OOB → {U_BOUNDARY_MARGIN}-voxel border → "
             f"p{U_CLIP_PERCENTILE:g} clip"
         )
 
@@ -828,7 +896,7 @@ def create_synthetic_data(
         "field_names": [
             "source",
             "moving",
-            "u",
+            "u_gt",
             "source_mask",
             "moving_mask",
             "identity_grid_mask",
