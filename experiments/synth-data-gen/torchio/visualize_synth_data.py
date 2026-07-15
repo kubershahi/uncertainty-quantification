@@ -28,10 +28,10 @@ python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir dat
 python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection random --save-dir assets/images/synth-data/torchio/hcp/fullrun_random_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
 
 # Full cohort: min/median/max per split by mean ‖u‖, excluding none (9 plots)
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/fullrun_mmm --no-show --run-view orthogonal --u-contours --checkerboard
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --selection min_median_max --u-metric mean --save-dir assets/images/synth-data/torchio/hcp/fullrun_mmm_orthogonal --no-show --run-view orthogonal --u-contours --checkerboard
 
 # Single split only
-python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --split Train --selection random --save-dir assets/images/synth-data/torchio/hcp/fullrun_train --no-show
+python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir datasets/synth-data/torchio/hcp --split Train --selection random --save-dir assets/images/synth-data/torchio/hcp/fullrun_train_orthogonal --no-show
 """
 
 from __future__ import annotations
@@ -136,16 +136,32 @@ def axial_slice(vol: np.ndarray, slice_index: int | None) -> tuple[np.ndarray, i
 
 
 def orient_axial(sl: np.ndarray) -> np.ndarray:
-    """Radiological axial display (CCW 90°): anterior up, posterior down."""
+    """Radiological display (CCW 90°): same ``np.rot90`` for every orthogonal plane."""
     return np.rot90(sl)
 
 
 def orient_axial_u_inplane(u_inplane: np.ndarray) -> np.ndarray:
-    """Rotate in-plane displacement to match ``orient_axial`` on the slice."""
+    """
+    Map in-plane ``u`` to Matplotlib quiver ``(U, V)`` after ``orient_axial``.
+
+    ``u_inplane[0]`` / ``u_inplane[1]`` are displacements along the raw
+    ``plane_slice`` axes (axis 0 / axis 1) before ``np.rot90``.
+
+    ``np.rot90`` sends voxel ``(i, j)`` → display ``(row, col) = (n1 - 1 - j, i)``.
+    A displacement ``(di, dj)`` therefore becomes
+    ``(d_row, d_col) = (-dj, di)`` in display data coordinates.
+
+    Quiver: ``U`` = +column (right), ``V`` = +row in data coords. With
+    ``imshow(..., origin="upper")`` the y-axis is inverted, so +``V`` points
+    down the screen — the same direction as +``d_row``. Hence:
+
+        U = rot90(u0)          # horizontal / rightward
+        V = rot90(-u1)         # = -u_vertical after the same rot90 placement
+    """
     u0, u1 = u_inplane[0], u_inplane[1]
-    u0_r = np.rot90(u1)
-    u1_r = np.rot90(-u0)
-    return np.stack([u0_r, u1_r], axis=0)
+    uu = np.rot90(u0)
+    vv = np.rot90(-u1)
+    return np.stack([uu, vv], axis=0)
 
 
 def plane_slice(vol: np.ndarray, plane: str, index: int | None) -> tuple[np.ndarray, int]:
@@ -166,7 +182,12 @@ def plane_slice(vol: np.ndarray, plane: str, index: int | None) -> tuple[np.ndar
 
 
 def plane_u_inplane_slice(u: np.ndarray, plane: str, index: int) -> np.ndarray:
-    """In-plane displacement (2,H,W) for requested plane."""
+    """
+    In-plane displacement ``(2, …)`` matching ``plane_slice`` axis order.
+
+    Channel 0 = offset along the slice's axis 0; channel 1 = along axis 1.
+    Pass through ``orient_axial_u_inplane`` before quiver (same ``rot90`` as the image).
+    """
     if plane == "axial":
         z = max(0, min(int(index), u.shape[3] - 1))
         return np.stack([u[0, :, :, z], u[1, :, :, z]], axis=0)
@@ -651,6 +672,7 @@ def _render_figure(
         )
 
         # u_gt lives on the source lattice → quiver over source.
+        # uu/vv are already in display (col, row) coords from orient_axial_u_inplane.
         ax_q = axes[(row, 1)]
         ax_q.imshow(src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
         step = max(14, quiver_stride + 6)
