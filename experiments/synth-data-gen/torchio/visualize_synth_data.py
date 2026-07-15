@@ -2,8 +2,8 @@
 """
 Visualize HCP synthetic registration NPZ samples (``create_synth_data.py`` output).
 
-Columns: source, moving, u_gt vectors, ``‖u_gt‖``; optional checkerboard (``--checkerboard``).
-Axial display is radiological (``rot90``, posterior up).
+Columns: source, source + ``u_gt`` vectors, moving (warped), ``‖u_gt‖`` (+ colorbar);
+optional checkerboard (``--checkerboard``). Axial display is radiological (``rot90``).
 
 ``u_gt`` is the registration displacement on the **source/fixed** lattice
 (``moving(x + u_gt(x)) ≈ source(x)``).
@@ -482,6 +482,37 @@ def _plane_row_label(plane: str, idx: int) -> str:
     return f"{plane} ({plane[0]}={idx})"
 
 
+def _add_midheight_colorbar(
+    fig: plt.Figure,
+    mappable,
+    *,
+    gs,
+    cbar_col: int,
+    ref_ax: plt.Axes,
+    label: str,
+) -> None:
+    """
+    Short colorbar (~1.5× mid-row panel height), centered on ``ref_ax``.
+
+    The colorbar sits on the **left** of its reserved column so the vertical
+    label stays inside the gap and does not overlap the next image panel.
+    """
+    probe = fig.add_subplot(gs[0, cbar_col])
+    slot = probe.get_position()
+    probe.remove()
+
+    ref = ref_ax.get_position()
+    h = min(ref.height * 1.5, 0.40)
+    y0 = ref.y0 + 0.5 * ref.height - 0.5 * h
+    bar_w = min(max(slot.width * 0.22, 0.008), 0.011)
+    x0 = slot.x0 + 0.05 * slot.width
+    cax = fig.add_axes([x0, y0, bar_w, h])
+    cbar = fig.colorbar(mappable, cax=cax)
+    cbar.set_label(label, fontsize=_LABEL - 1, labelpad=8, rotation=90)
+    cbar.ax.tick_params(labelsize=_LABEL - 2, pad=2)
+    cbar.ax.yaxis.set_label_coords(3.6, 0.5)
+
+
 def _render_figure(
     picked: list[tuple[Path, str, float]],
     *,
@@ -500,12 +531,35 @@ def _render_figure(
     announce_save: bool = True,
     sample_cache: dict[Path, dict] | None = None,
 ) -> None:
+    """
+    Column layout (left → right):
+
+      Source | Source + u_gt vectors | Warped (moving) | ‖u_gt‖ | [‖u‖ cbar]
+      [| Checkerboard]
+    """
+    from matplotlib.gridspec import GridSpec
+
     nrows = len(picked)
-    ncols = 5 if use_checkerboard else 4
-    # source, moving, u_gt vectors, ‖u_gt‖, optional checkerboard
-    col_titles = ["Source (fixed)", "Warped (moving)", r"$u_{\mathrm{gt}}$ vectors", r"$\|u_{\mathrm{gt}}\|$"]
+    # Image cols: 0 source, 1 vectors-on-source, 2 moving, 3 ‖u‖; 4 reserved cbar.
     if use_checkerboard:
-        col_titles.append("Checkerboard")
+        n_grid_cols = 6
+        img_cols = (0, 1, 2, 3, 5)
+        width_ratios = [1.0, 1.0, 1.0, 1.0, 0.32, 1.0]
+        n_image_panels = 5
+    else:
+        n_grid_cols = 5
+        img_cols = (0, 1, 2, 3)
+        width_ratios = [1.0, 1.0, 1.0, 1.0, 0.32]
+        n_image_panels = 4
+
+    col_titles = {
+        0: "Source (fixed)",
+        1: r"Source + $u_{\mathrm{gt}}$ vectors",
+        2: "Warped (moving)",
+        3: r"$\|u_{\mathrm{gt}}\|$",
+    }
+    if use_checkerboard:
+        col_titles[5] = "Checkerboard"
 
     cache: dict[Path, dict] = {} if sample_cache is None else sample_cache
     row_u_vmax: list[float] = []
@@ -526,11 +580,31 @@ def _render_figure(
         row_u_vmax.append(max(float(np.percentile(mag, _U_COLOR_PERCENTILE)), 1e-6))
 
     plt.rcParams.update({"font.family": _FONT, "figure.dpi": _DPI, "savefig.dpi": _DPI})
-    fig_w = 3.0 * ncols + 1.6
-    fig_h = row_h * nrows + 1.6
-    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
+    fig_w = 3.0 * n_image_panels + 2.4
+    fig_h = row_h * nrows + 1.8
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    bottom = 0.12 if sample_stats_note else 0.08
+    left, right = 0.16, 0.99
+    gs = GridSpec(
+        nrows,
+        n_grid_cols,
+        figure=fig,
+        width_ratios=width_ratios,
+        left=left,
+        right=right,
+        top=0.86,
+        bottom=bottom,
+        wspace=0.30,
+        hspace=0.34,
+    )
+
+    axes: dict[tuple[int, int], plt.Axes] = {}
+    for row in range(nrows):
+        for col in img_cols:
+            axes[(row, col)] = fig.add_subplot(gs[row, col])
 
     im_u_last = None
+    ref_ax_u = None
     for row, (file_path, _rank_label, _) in enumerate(picked):
         sample = _cached_sample(file_path, cache)
         source = sample["source"]
@@ -556,7 +630,7 @@ def _render_figure(
         mov_disp = orient_axial(mov_sl)
         u_vmax = row_u_vmax[row]
 
-        ax_src = axes[row, 0]
+        ax_src = axes[(row, 0)]
         ax_src.imshow(src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
         _style_axis(ax_src)
         ax_src.set_ylabel(
@@ -568,12 +642,9 @@ def _render_figure(
             labelpad=18,
         )
 
-        ax_mov = axes[row, 1]
-        ax_mov.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
-        _style_axis(ax_mov)
-
-        ax_q = axes[row, 2]
-        ax_q.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
+        # u_gt lives on the source lattice → quiver over source.
+        ax_q = axes[(row, 1)]
+        ax_q.imshow(src_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
         step = max(14, quiver_stride + 6)
         uu = u_inplane[0, ::step, ::step]
         vv = u_inplane[1, ::step, ::step]
@@ -596,7 +667,11 @@ def _render_figure(
         )
         _style_axis(ax_q)
 
-        ax_u = axes[row, 3]
+        ax_mov = axes[(row, 2)]
+        ax_mov.imshow(mov_disp, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
+        _style_axis(ax_mov)
+
+        ax_u = axes[(row, 3)]
         im_u_last = ax_u.imshow(
             u_mag_sl, cmap="hot", vmin=0.0, vmax=u_vmax, origin="upper", interpolation="nearest"
         )
@@ -604,27 +679,29 @@ def _render_figure(
             levels = np.linspace(0.15 * u_vmax, 0.95 * u_vmax, 6)
             ax_u.contour(u_mag_sl, levels=levels, colors="white", linewidths=0.5, alpha=0.7)
         _style_axis(ax_u)
+        if ref_ax_u is None:
+            ref_ax_u = ax_u
 
         if use_checkerboard:
-            ax_c = axes[row, 4]
+            ax_c = axes[(row, 5)]
             cb = checkerboard_mix(src_disp, mov_disp)
             ax_c.imshow(cb, cmap="gray", origin="upper", interpolation="nearest", vmin=-3, vmax=3)
             _style_axis(ax_c)
 
         if row == 0:
-            for col, t in enumerate(col_titles):
-                axes[0, col].set_title(t, fontsize=_SUBTITLE, fontweight="medium", pad=10)
+            for col, t in col_titles.items():
+                axes[(0, col)].set_title(t, fontsize=_SUBTITLE, fontweight="medium", pad=10)
 
-    if im_u_last is not None:
-        cbar_ax = fig.add_axes([0.92, 0.22, 0.018, 0.56])
-        cbar = fig.colorbar(im_u_last, cax=cbar_ax)
-        cbar.set_label(r"$\|u_{\mathrm{gt}}\|$ (voxels)", fontsize=_LABEL)
-        cbar.ax.tick_params(labelsize=_LABEL - 1)
+    if im_u_last is not None and ref_ax_u is not None:
+        _add_midheight_colorbar(
+            fig,
+            im_u_last,
+            gs=gs,
+            cbar_col=4,
+            ref_ax=ref_ax_u,
+            label=r"$\|u_{\mathrm{gt}}\|$ (voxels)",
+        )
 
-    bottom = 0.10 if sample_stats_note else 0.08
-    left, right = 0.24, 0.90
-    fig.subplots_adjust(left=left, right=right, top=0.86, bottom=bottom, wspace=0.26, hspace=0.34)
-    # Center over the image grid (not full figure), so bbox_inches="tight" stays balanced.
     title_x = 0.5 * (left + right)
     fig.suptitle(title, fontsize=_TITLE, fontweight="bold", x=title_x, y=0.98, ha="center")
     fig.text(title_x, 0.935, subtitle, ha="center", va="top", fontsize=_LABEL, color="black")
@@ -651,7 +728,6 @@ def _render_figure(
         plt.close(fig)
     else:
         plt.show()
-
 
 def is_full_cohort_dir(input_dir: Path) -> bool:
     return any((input_dir / sp).is_dir() for sp in FULL_SPLITS)
@@ -1138,7 +1214,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--checkerboard",
         action="store_true",
         help=(
-            "Add checkerboard column: alternating tiles of source and moving "
+            "Add optional checkerboard column after ‖u_gt‖ / colorbar: "
+            "alternating tiles of source and moving "
             "(highlights local mismatch at tile edges)."
         ),
     )
