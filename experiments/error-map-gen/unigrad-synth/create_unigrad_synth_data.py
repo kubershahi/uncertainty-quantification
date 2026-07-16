@@ -35,6 +35,9 @@ Registration: ``net(moving, source)`` so both ``u_gt`` and ``u_pred`` share
 ``moving(x + u(x)) ≈ source(x)`` on the source lattice.
 ``u_pred`` cleanup matches Phase I: OOB → border → p99.9 clip.
 
+Throughput: default ``np.savez`` (use ``--compress`` for zlib), prefetch next NPZ on a
+background thread while the current sample runs, no per-sample ``empty_cache``.
+
 Examples:
 python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --input-path datasets/synth-data/torchio/hcp --output-path datasets/error-map/unigrad-synth/hcp --device cuda
 python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --input-path datasets/synth-data/torchio/hcp --output-path datasets/error-map/unigrad-synth/hcp --splits Train --max-per-split 15 --device cuda --overwrite
@@ -44,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -244,6 +248,7 @@ def run_hcp_error_map_generation(
     max_per_split: int | None = None,
     device: torch.device | None = None,
     overwrite: bool = False,
+    compress: bool = False,
 ) -> None:
     if device is None:
         device = resolve_device("auto")
@@ -251,8 +256,8 @@ def run_hcp_error_map_generation(
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    split_files: dict[str, list[str]] = {}
-    total = 0
+    # Flat job list so we can prefetch the next NPZ while the current one runs on GPU.
+    jobs: list[tuple[str, str, Path, Path]] = []
     for split in splits:
         in_dir = input_root / split
         if not in_dir.is_dir():
@@ -266,72 +271,79 @@ def run_hcp_error_map_generation(
         if not overwrite:
             done = {f for f in os.listdir(out_dir) if f.endswith(".npz")}
             files = [f for f in files if f not in done]
-        split_files[split] = files
         print(f"{split}: {len(files)} sample(s) to process")
-        total += len(files)
+        for fname in files:
+            jobs.append((split, fname, in_dir / fname, out_dir / fname))
 
+    total = len(jobs)
     if total == 0:
         print("Nothing to process.")
         return
 
-    print(f"Loading UniGradICON on {device} ({total} volume(s))...")
+    save_fn = np.savez_compressed if compress else np.savez
+    print(
+        f"Loading UniGradICON on {device} ({total} volume(s)); "
+        f"save={'compressed' if compress else 'uncompressed'}; prefetch=on"
+    )
     net = get_unigradicon().to(device)
     net.eval()
 
     n_done = 0
-    with tqdm(total=total, desc="UniGradICON HCP synth", dynamic_ncols=True) as pbar:
-        for split in splits:
-            files = split_files.get(split, [])
-            if not files:
-                continue
-            in_dir = input_root / split
-            out_dir = output_root / split
-            for fname in files:
-                pbar.set_postfix_str(f"{n_done + 1}/{total} {split}/{fname}", refresh=True)
-                in_path = in_dir / fname
-                sample = load_hcp_synth_npz(in_path)
-                source = sample["source"]
-                moving = sample["moving"]
-                u_gt = np.asarray(sample["u_gt"], dtype=np.float32)
-                u_gt_igm = np.asarray(sample["identity_grid_mask"], dtype=bool)
+    with (
+        ThreadPoolExecutor(max_workers=1) as pool,
+        tqdm(total=total, desc="UniGradICON HCP synth", dynamic_ncols=True) as pbar,
+    ):
+        next_fut: Future | None = pool.submit(load_hcp_synth_npz, jobs[0][2])
+        for i, (split, fname, _in_path, out_path) in enumerate(jobs):
+            pbar.set_postfix_str(f"{n_done + 1}/{total} {split}/{fname}", refresh=True)
+            assert next_fut is not None
+            sample = next_fut.result()
+            next_fut = (
+                pool.submit(load_hcp_synth_npz, jobs[i + 1][2])
+                if i + 1 < total
+                else None
+            )
 
-                nx, ny, nz = (int(source.shape[0]), int(source.shape[1]), int(source.shape[2]))
-                if moving.shape != source.shape:
-                    raise ValueError(f"{fname}: moving {moving.shape} vs source {source.shape}")
-                if u_gt.shape != (3, nx, ny, nz):
-                    raise ValueError(f"{fname}: u_gt {u_gt.shape} vs expected (3, {nx}, {ny}, {nz})")
+            source = sample["source"]
+            moving = sample["moving"]
+            u_gt = np.asarray(sample["u_gt"], dtype=np.float32)
+            u_gt_igm = np.asarray(sample["identity_grid_mask"], dtype=bool)
 
-                moving_5d = hcp_volume_xyz_to_torch5d(moving).to(device)
-                source_5d = hcp_volume_xyz_to_torch5d(source).to(device)
-                moving_175 = preprocess_volume_for_unigrad(moving_5d)
-                source_175 = preprocess_volume_for_unigrad(source_5d)
-                del moving_5d, source_5d
+            nx, ny, nz = (int(source.shape[0]), int(source.shape[1]), int(source.shape[2]))
+            if moving.shape != source.shape:
+                raise ValueError(f"{fname}: moving {moving.shape} vs source {source.shape}")
+            if u_gt.shape != (3, nx, ny, nz):
+                raise ValueError(f"{fname}: u_gt {u_gt.shape} vs expected (3, {nx}, {ny}, {nz})")
 
-                with torch.no_grad():
-                    # moving → source: phi / u_pred on the source (fixed) grid (matches Phase I u_gt).
-                    net(moving_175, source_175)
-                    phi_dhw = phi_vectorfield_to_volume_voxels(net, nz, nx, ny)
-                del moving_175, source_175
-                if device.type == "cuda":
-                    torch.cuda.empty_cache()
+            moving_5d = hcp_volume_xyz_to_torch5d(moving).to(device)
+            source_5d = hcp_volume_xyz_to_torch5d(source).to(device)
+            moving_175 = preprocess_volume_for_unigrad(moving_5d)
+            source_175 = preprocess_volume_for_unigrad(source_5d)
+            del moving_5d, source_5d
 
-                u_pred = phi_dhw_to_u_xyz(phi_dhw)
-                u_pred = cleanup_u_pred(u_pred, u_gt_igm)
-                u_err = u_error_map_from_gt_pred(u_gt, u_pred)
-                err_mask = error_map_mask_from_igm(u_gt_igm, (nx, ny, nz))
+            with torch.no_grad():
+                # moving → source: phi / u_pred on the source (fixed) grid (matches Phase I u_gt).
+                net(moving_175, source_175)
+                phi_dhw = phi_vectorfield_to_volume_voxels(net, nz, nx, ny)
+            del moving_175, source_175
 
-                out_payload: dict[str, np.ndarray] = {}
-                for key in HCP_SYNTH_PASS_KEYS:
-                    out_payload[key] = sample[key]
-                out_payload["u_gt"] = u_gt
-                out_payload["u_gt_igm"] = u_gt_igm
-                out_payload["u_pred"] = u_pred
-                out_payload["u_error_map"] = u_err
-                out_payload["error_map_mask"] = err_mask
+            u_pred = phi_dhw_to_u_xyz(phi_dhw)
+            u_pred = cleanup_u_pred(u_pred, u_gt_igm)
+            u_err = u_error_map_from_gt_pred(u_gt, u_pred)
+            err_mask = error_map_mask_from_igm(u_gt_igm, (nx, ny, nz))
 
-                np.savez_compressed(out_dir / fname, **out_payload)
-                n_done += 1
-                pbar.update(1)
+            out_payload: dict[str, np.ndarray] = {}
+            for key in HCP_SYNTH_PASS_KEYS:
+                out_payload[key] = sample[key]
+            out_payload["u_gt"] = u_gt
+            out_payload["u_gt_igm"] = u_gt_igm
+            out_payload["u_pred"] = u_pred
+            out_payload["u_error_map"] = u_err
+            out_payload["error_map_mask"] = err_mask
+
+            save_fn(out_path, **out_payload)
+            n_done += 1
+            pbar.update(1)
 
     print(f"Done: wrote {n_done} NPZ(s) under {output_root.resolve()}")
     print(
@@ -391,6 +403,11 @@ python experiments/error-map-gen/unigrad-synth/create_unigrad_synth_data.py --de
         action="store_true",
         help="Recompute even if output NPZ already exists.",
     )
+    p.add_argument(
+        "--compress",
+        action="store_true",
+        help="Use np.savez_compressed (slower writes, smaller files). Default: uncompressed np.savez.",
+    )
     return p.parse_args()
 
 
@@ -405,4 +422,5 @@ if __name__ == "__main__":
         max_per_split=args.max_per_split,
         device=device,
         overwrite=args.overwrite,
+        compress=args.compress,
     )
