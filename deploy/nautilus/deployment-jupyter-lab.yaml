@@ -50,6 +50,8 @@ spec:
                                   - key: nvidia.com/gpu.product
                                     operator: In
                                     values:
+                                        - NVIDIA-L40
+                                        - NVIDIA-L40S
                                         - NVIDIA-A10
                                         - NVIDIA-A100-80GB-PCIe
                                         - NVIDIA-A100-PCIE-40GB
@@ -60,8 +62,6 @@ spec:
                                         - NVIDIA-GH200-480GB
                                         - NVIDIA-H200-NVL
                                         - NVIDIA-L4
-                                        - NVIDIA-L40
-                                        - NVIDIA-L40S
                                         - NVIDIA-RTX-4000-Ada-Generation
                                         - NVIDIA-RTX-5000-Ada-Generation
                                         - NVIDIA-RTX-A4000
@@ -83,9 +83,9 @@ spec:
                           export HOME=/files/home/root
                           mkdir -p "$HOME"
                           export DEBIAN_FRONTEND=noninteractive
-                          command -v git >/dev/null && command -v ssh-keygen >/dev/null && command -v tmux >/dev/null || {
+                          command -v git >/dev/null && command -v ssh-keygen >/dev/null && command -v tmux >/dev/null && command -v nano >/dev/null || {
                             apt-get update -qq &&
-                            apt-get install -y -qq --no-install-recommends git ca-certificates openssh-client tmux &&
+                            apt-get install -y -qq --no-install-recommends git ca-certificates openssh-client tmux nano &&
                             rm -rf /var/lib/apt/lists/*;
                           }
                           SCRIPT=/files/repo/uncertainty-quantification/deploy/nautilus/scripts/start-jupyter-lab.sh
