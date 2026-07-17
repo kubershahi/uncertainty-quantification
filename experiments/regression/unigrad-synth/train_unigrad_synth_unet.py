@@ -21,10 +21,10 @@ Fixed in code: ``Train``/``Val`` splits; AMP on when CUDA available (``--no-amp`
 ``torch.compile`` on by default (``--no-compile`` to disable; falls back if unsupported).
 
 Example:
-python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --out-dir assets/runs/regression/unigrad-synth/3d/error_unet_run1 --wandb --wandb-run-name unigradsynth_unet_run1
+python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --out-dir assets/runs/regression/unigrad-synth/error_unet_run1 --wandb --wandb-run-name unigradsynth_unet_run1
 
 Example (ablation, masked u_pred):
-python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --out-dir assets/runs/regression/unigrad-synth/3d/error_unet_run1_masked --mask-u-pred
+python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --out-dir assets/runs/regression/unigrad-synth/error_unet_run1_masked --mask-u-pred
 """
 
 from __future__ import annotations
@@ -538,7 +538,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("assets/runs/regression/unigrad-synth/3d/error_unet_run1"),
+        default=Path("assets/runs/regression/unigrad-synth/error_unet_run1"),
     )
     p.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     p.add_argument("--batch-size", type=int, default=1)
