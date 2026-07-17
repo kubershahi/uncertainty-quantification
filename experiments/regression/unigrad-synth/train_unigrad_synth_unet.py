@@ -17,12 +17,14 @@ Logging: per-epoch CSV (``metrics.csv``, plotted by the eval script) plus option
 Weights & Biases (``--wandb``). Best checkpoint by validation masked MAE.
 
 Optimizer AdamW; ``ReduceLROnPlateau`` on val MAE; optional early stopping.
+Fixed in code: ``Train``/``Val`` splits; AMP on when CUDA available (``--no-amp`` to disable);
+``torch.compile`` on by default (``--no-compile`` to disable; falls back if unsupported).
 
 Example:
 python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --batch-size 1 --out-dir assets/runs/regression/unigrad-synth/3d/error_unet_run1
 
-Example (ablation, masked u_pred + wandb):
-python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --batch-size 1 --mask-u-pred --wandb --wandb-project unc-quan --wandb-run-name error_unet_run1_masked --out-dir assets/runs/regression/unigrad-synth/3d/error_unet_run1_masked
+Example (ablation + wandb):
+python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --mask-u-pred --wandb --wandb-project unc-quan --wandb-run-name error_unet_run1_masked --out-dir assets/runs/regression/unigrad-synth/3d/error_unet_run1_masked
 """
 
 from __future__ import annotations
@@ -54,6 +56,10 @@ HCP_REQUIRED_KEYS = frozenset(
 )
 DEFAULT_EPOCHS = 50
 DEFAULT_EARLY_STOP_PATIENCE = 10
+TRAIN_SPLIT = "Train"
+VAL_SPLIT = "Val"
+U_SCALE = 64.0
+BASE_CHANNELS = 32
 IN_CHANNELS = 5  # source, moving, u_pred_x, u_pred_y, u_pred_z
 SPATIAL_MULTIPLE = 16  # 4× MaxPool3d(2) in UNet3D
 
@@ -343,6 +349,19 @@ def checkpoint_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     return eager_module(model).state_dict()
 
 
+def maybe_compile_model(model: nn.Module, *, enabled: bool) -> tuple[nn.Module, bool]:
+    """Try ``torch.compile`` when ``enabled``; return (model, compile_applied)."""
+    if not enabled:
+        return model, False
+    try:
+        compiled = torch.compile(model)  # type: ignore[assignment]
+        print("Using torch.compile(UNet3D)")
+        return compiled, True
+    except Exception as exc:
+        print(f"WARNING: torch.compile failed ({exc}); using eager mode.", file=sys.stderr)
+        return model, False
+
+
 def make_dataloader(
     ds: Dataset,
     *,
@@ -449,18 +468,12 @@ def init_wandb(args: argparse.Namespace, meta: dict) -> object | None:
         raise ImportError("wandb is required for --wandb (pip install wandb)") from e
 
     run_name = args.wandb_run_name or Path(args.out_dir).name
-    init_kwargs: dict = {
-        "project": args.wandb_project,
-        "name": run_name,
-        "config": meta,
-        "dir": str(Path(args.out_dir).resolve()),
-    }
-    if args.wandb_entity:
-        init_kwargs["entity"] = args.wandb_entity
-    tags = [t.strip() for t in args.wandb_tags.split(",") if t.strip()]
-    if tags:
-        init_kwargs["tags"] = tags
-    return wandb.init(**init_kwargs)
+    return wandb.init(
+        project=args.wandb_project,
+        name=run_name,
+        config=meta,
+        dir=str(Path(args.out_dir).resolve()),
+    )
 
 
 def log_wandb_epoch(
@@ -520,16 +533,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-dir",
         type=Path,
         default=Path("datasets/error-map/unigrad-synth/hcp"),
-        help="Root with Train/Val/Test/*.npz (Phase II HCP error-map NPZ).",
+        help="Phase II NPZ root (Train/Val/Test subfolders).",
     )
-    p.add_argument("--train-split", type=str, default="Train")
-    p.add_argument("--val-split", type=str, default="Val")
+    p.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path("assets/runs/regression/unigrad-synth/3d/error_unet_run1"),
+    )
     p.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-5)
-    p.add_argument("--base-channels", type=int, default=32)
-    p.add_argument("--u-scale", type=float, default=64.0, help="Divide u_pred_{x,y,z} by this scale.")
+    p.add_argument("--base-channels", type=int, default=BASE_CHANNELS)
+    p.add_argument("--u-scale", type=float, default=U_SCALE, help="Divide u_pred_{x,y,z} by this scale.")
     p.add_argument(
         "--image-norm",
         type=str,
@@ -542,26 +558,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--mask-u-pred",
         action="store_true",
-        help="Ablation: zero u_pred_{x,y,z} outside source_mask before the U-Net (default: off).",
-    )
-    p.add_argument(
-        "--num-workers",
-        type=int,
-        default=-1,
-        help="DataLoader workers (-1 = 4 on CUDA, 0 on CPU).",
+        help="Ablation: zero u_pred outside source_mask before the U-Net (default: off).",
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
-        "--out-dir",
-        type=Path,
-        default=Path("assets/runs/regression/unigrad-synth/3d/error_unet_run1"),
+        "--no-amp",
+        action="store_true",
+        help="Disable mixed precision (AMP is on by default when CUDA is available).",
     )
-    p.add_argument("--no-amp", action="store_true")
-    p.add_argument("--compile", action="store_true", help="torch.compile(UNet3D) when supported.")
+    p.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="torch.compile(UNet3D) when supported (default: on; --no-compile to disable).",
+    )
     p.add_argument("--no-progress", action="store_true")
-    p.add_argument("--max-train-files", type=int, default=None, metavar="N")
-    p.add_argument("--max-val-files", type=int, default=None, metavar="N")
-    # LR schedule + early stopping (mirrors unigrad-io trainer)
     p.add_argument(
         "--lr-scheduler",
         type=str,
@@ -579,12 +590,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Stop after this many epochs without val-MAE improvement (0 = off).",
     )
     p.add_argument("--early-stop-min-delta", type=float, default=0.005)
-    # Weights & Biases
     p.add_argument("--wandb", action="store_true", help="Log metrics to Weights & Biases.")
     p.add_argument("--wandb-project", type=str, default="unigrad-synth-hcp")
-    p.add_argument("--wandb-entity", type=str, default=None)
-    p.add_argument("--wandb-run-name", type=str, default=None)
-    p.add_argument("--wandb-tags", type=str, default="")
+    p.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="W&B run name (default: out-dir folder name).",
+    )
     return p.parse_args(argv)
 
 
@@ -592,20 +605,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.u_scale <= 0:
         raise ValueError("--u-scale must be positive.")
+    if args.base_channels <= 0:
+        raise ValueError("--base-channels must be positive.")
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda" and not args.no_amp
     scaler = make_grad_scaler(use_amp)
-    if args.num_workers < 0:
-        args.num_workers = 4 if device.type == "cuda" else 0
+    num_workers = 4 if device.type == "cuda" else 0
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
     show_p = not args.no_progress
 
     train_ds = HCPErrorMapDataset(
         args.data_dir,
-        args.train_split,
+        TRAIN_SPLIT,
         u_scale=args.u_scale,
         mask_u_pred=args.mask_u_pred,
         image_norm=args.image_norm,
@@ -613,32 +627,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     val_ds = HCPErrorMapDataset(
         args.data_dir,
-        args.val_split,
+        VAL_SPLIT,
         u_scale=args.u_scale,
         mask_u_pred=args.mask_u_pred,
         image_norm=args.image_norm,
         quantile_high=args.quantile_high,
     )
-    if args.max_train_files is not None and args.max_train_files > 0:
-        train_ds.paths = train_ds.paths[: int(args.max_train_files)]
-    if args.max_val_files is not None and args.max_val_files > 0:
-        val_ds.paths = val_ds.paths[: int(args.max_val_files)]
 
     pin = device.type == "cuda"
     train_loader = make_dataloader(
-        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=pin
+        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin
     )
     val_loader = make_dataloader(
-        val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=pin
+        val_ds, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin
     )
 
     model = UNet3D(in_channels=IN_CHANNELS, base=args.base_channels).to(device)
-    if args.compile:
-        try:
-            model = torch.compile(model)  # type: ignore[assignment]
-            print("Using torch.compile(UNet3D)")
-        except Exception as exc:
-            print(f"WARNING: torch.compile failed ({exc}); using eager mode.", file=sys.stderr)
+    model, compile_applied = maybe_compile_model(model, enabled=args.compile)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None = None
     if args.lr_scheduler == "plateau":
@@ -658,8 +663,8 @@ def main(argv: list[str] | None = None) -> int:
         "mask_u_pred": bool(args.mask_u_pred),
         "loss": args.loss,
         "data_dir": str(args.data_dir.resolve()),
-        "train_split": args.train_split,
-        "val_split": args.val_split,
+        "train_split": TRAIN_SPLIT,
+        "val_split": VAL_SPLIT,
         "train_files": len(train_ds),
         "val_files": len(val_ds),
         "u_scale": args.u_scale,
@@ -671,6 +676,9 @@ def main(argv: list[str] | None = None) -> int:
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "optimizer": "AdamW",
+        "amp": use_amp,
+        "compile": args.compile,
+        "compile_applied": compile_applied,
         "lr_scheduler": args.lr_scheduler,
         "lr_patience": args.lr_patience,
         "lr_factor": args.lr_factor,
@@ -678,8 +686,7 @@ def main(argv: list[str] | None = None) -> int:
         "early_stop_patience": args.early_stop_patience,
         "early_stop_min_delta": args.early_stop_min_delta,
         "device": str(device),
-        "num_workers": args.num_workers,
-        "compile": args.compile,
+        "num_workers": num_workers,
         "best_metric": "val_mae",
         "metrics_csv": "metrics.csv",
         "wandb": args.wandb,
