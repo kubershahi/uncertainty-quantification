@@ -16,6 +16,9 @@ context). When set, ``u_pred_{x,y,z}`` are zeroed outside ``source_mask`` before
 Logging: per-epoch CSV (``metrics.csv``, plotted by the eval script) plus optional
 Weights & Biases (``--wandb``). Best checkpoint by validation masked MAE.
 
+Validation defaults: first val at epoch 5, then every 5 epochs (and always on the last
+epoch). Non-val epochs log ``nan`` for val columns and still write train loss.
+
 Optimizer AdamW; ``ReduceLROnPlateau`` on val MAE; optional early stopping.
 Fixed in code: ``Train``/``Val`` splits; AMP on when CUDA available (``--no-amp`` to disable);
 ``torch.compile`` on by default (``--no-compile`` to disable; falls back if unsupported).
@@ -55,13 +58,22 @@ HCP_REQUIRED_KEYS = frozenset(
     }
 )
 DEFAULT_EPOCHS = 50
-DEFAULT_EARLY_STOP_PATIENCE = 10
+DEFAULT_EARLY_STOP_PATIENCE = 3
+DEFAULT_VAL_EVERY = 5
+DEFAULT_VAL_START_EPOCH = 5
 TRAIN_SPLIT = "Train"
 VAL_SPLIT = "Val"
 U_SCALE = 64.0
-BASE_CHANNELS = 32
+BASE_CHANNELS = 16
 IN_CHANNELS = 5  # source, moving, u_pred_x, u_pred_y, u_pred_z
 SPATIAL_MULTIPLE = 16  # 4× MaxPool3d(2) in UNet3D
+
+
+def should_run_val(epoch: int, *, epochs: int, val_every: int, val_start_epoch: int) -> bool:
+    """True on the last epoch, or when epoch >= start and divisible by val_every."""
+    if epoch < val_start_epoch:
+        return False
+    return (epoch % val_every == 0) or (epoch == epochs)
 
 
 def pad_spatial_to_multiple(
@@ -574,6 +586,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--no-progress", action="store_true")
     p.add_argument(
+        "--val-every",
+        type=int,
+        default=DEFAULT_VAL_EVERY,
+        help="Run validation every N epochs after --val-start-epoch (default: 5).",
+    )
+    p.add_argument(
+        "--val-start-epoch",
+        type=int,
+        default=DEFAULT_VAL_START_EPOCH,
+        help="First epoch to validate (default: 5). Always validates on the last epoch.",
+    )
+    p.add_argument(
         "--lr-scheduler",
         type=str,
         default="plateau",
@@ -587,7 +611,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--early-stop-patience",
         type=int,
         default=DEFAULT_EARLY_STOP_PATIENCE,
-        help="Stop after this many epochs without val-MAE improvement (0 = off).",
+        help="Stop after this many val checks without val-MAE improvement (0 = off). "
+        "With default val every 5 epochs, patience 3 ≈ 15 train epochs without improvement.",
     )
     p.add_argument("--early-stop-min-delta", type=float, default=0.005)
     p.add_argument("--wandb", action="store_true", help="Log metrics to Weights & Biases.")
@@ -607,6 +632,10 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--u-scale must be positive.")
     if args.base_channels <= 0:
         raise ValueError("--base-channels must be positive.")
+    if args.val_every < 1:
+        raise ValueError("--val-every must be >= 1")
+    if args.val_start_epoch < 1:
+        raise ValueError("--val-start-epoch must be >= 1")
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -685,6 +714,8 @@ def main(argv: list[str] | None = None) -> int:
         "min_lr": args.min_lr,
         "early_stop_patience": args.early_stop_patience,
         "early_stop_min_delta": args.early_stop_min_delta,
+        "val_every": args.val_every,
+        "val_start_epoch": args.val_start_epoch,
         "device": str(device),
         "num_workers": num_workers,
         "best_metric": "val_mae",
@@ -705,12 +736,14 @@ def main(argv: list[str] | None = None) -> int:
     best_val_mae = float("inf")
     best_epoch = 0
     epochs_without_improve = 0
+    last_val_m = {"mae": float("nan"), "rmse": float("nan"), "pearson_r": float("nan")}
     best_path = args.out_dir / "best_model.pt"
     t0 = time.time()
 
     print(
         f"Train {len(train_ds)} / Val {len(val_ds)} on {device} | "
-        f"in_ch={IN_CHANNELS} | mask_u_pred={args.mask_u_pred} | loss={args.loss}"
+        f"in_ch={IN_CHANNELS} | mask_u_pred={args.mask_u_pred} | loss={args.loss} | "
+        f"val from epoch {args.val_start_epoch} every {args.val_every}"
     )
 
     for epoch in range(1, args.epochs + 1):
@@ -726,16 +759,31 @@ def main(argv: list[str] | None = None) -> int:
             epoch=epoch,
             total_epochs=args.epochs,
         )
-        val_m = evaluate(
-            model,
-            val_loader,
-            device,
-            use_amp=use_amp,
-            show_progress=show_p,
-            desc=f"val {epoch}/{args.epochs}",
+        run_val = should_run_val(
+            epoch,
+            epochs=args.epochs,
+            val_every=args.val_every,
+            val_start_epoch=args.val_start_epoch,
         )
-        if scheduler is not None:
-            scheduler.step(val_m["mae"])
+        if run_val:
+            val_m = evaluate(
+                model,
+                val_loader,
+                device,
+                use_amp=use_amp,
+                show_progress=show_p,
+                desc=f"val {epoch}/{args.epochs}",
+            )
+            last_val_m = val_m
+            if scheduler is not None:
+                scheduler.step(val_m["mae"])
+        else:
+            val_m = last_val_m
+            if epoch < args.val_start_epoch:
+                print(f"  (warmup: no val before epoch {args.val_start_epoch})")
+            elif show_p and np.isfinite(val_m["mae"]):
+                print(f"  (skipped val; last val_mae={val_m['mae']:.6f})")
+
         lr_now = float(opt.param_groups[0]["lr"])
         dt = time.time() - t0
         print(
@@ -747,25 +795,27 @@ def main(argv: list[str] | None = None) -> int:
             csv.writer(f).writerow(
                 [epoch, tr_loss, val_m["mae"], val_m["rmse"], val_m["pearson_r"], lr_now, dt]
             )
-        improved = val_m["mae"] < best_val_mae - args.early_stop_min_delta
-        if improved:
-            best_val_mae = val_m["mae"]
-            best_epoch = epoch
-            epochs_without_improve = 0
-            torch.save(
-                {
-                    "model_state": checkpoint_state_dict(model),
-                    "epoch": epoch,
-                    "val_mae": val_m["mae"],
-                    "val_rmse": val_m["rmse"],
-                    "val_pearson_r": val_m["pearson_r"],
-                    "config": meta,
-                },
-                best_path,
-            )
-            print(f"  saved best (val_mae={best_val_mae:.6f}) -> {best_path}")
-        else:
-            epochs_without_improve += 1
+
+        if run_val and np.isfinite(val_m["mae"]):
+            improved = val_m["mae"] < best_val_mae - args.early_stop_min_delta
+            if improved:
+                best_val_mae = val_m["mae"]
+                best_epoch = epoch
+                epochs_without_improve = 0
+                torch.save(
+                    {
+                        "model_state": checkpoint_state_dict(model),
+                        "epoch": epoch,
+                        "val_mae": val_m["mae"],
+                        "val_rmse": val_m["rmse"],
+                        "val_pearson_r": val_m["pearson_r"],
+                        "config": meta,
+                    },
+                    best_path,
+                )
+                print(f"  saved best (val_mae={best_val_mae:.6f}) -> {best_path}")
+            else:
+                epochs_without_improve += 1
 
         log_wandb_epoch(
             wandb_run,
@@ -777,10 +827,14 @@ def main(argv: list[str] | None = None) -> int:
             best_val_mae=best_val_mae,
         )
 
-        if args.early_stop_patience > 0 and epochs_without_improve >= args.early_stop_patience:
+        if (
+            run_val
+            and args.early_stop_patience > 0
+            and epochs_without_improve >= args.early_stop_patience
+        ):
             print(
                 f"Early stopping: no val MAE improvement > {args.early_stop_min_delta} "
-                f"for {args.early_stop_patience} epoch(s) "
+                f"for {args.early_stop_patience} val check(s) "
                 f"(best epoch {best_epoch}, val_mae={best_val_mae:.6f})."
             )
             break

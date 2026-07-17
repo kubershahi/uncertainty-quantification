@@ -115,7 +115,37 @@ datasets/hcp/
         └── brainmask_fs.nii.gz
 ```
 
-**Scale:** full download ≈ 1200 subjects × 3 files (~1113+ objects on disk depending on completeness).
+**Scale:** full download ≈ 1200 subjects × 3 files. The current full synth cohort uses **1113**
+subjects that have complete T1w + brainmask on disk (see split table below).
+
+---
+
+## Volume geometry
+
+HCP T1w brains are **~0.7 mm isotropic** in **native subject space** (LAS). Exact `(X, Y, Z)`
+varies slightly by subject; a typical skull-stripped volume is on the order of
+**~260 × 311 × 260** voxels.
+
+Synth NPZs keep that native grid: `source`, `moving`, and `u_gt` all share the same `(X, Y, Z)`.
+Displacement units in the NPZ are **voxels** (TorchIO warps are parameterized in mm via the NIfTI
+affine, then converted to voxel `u_gt`).
+
+---
+
+## Full cohort split counts (seed 42)
+
+From `datasets/synth-data/torchio/hcp/split_manifest.json`:
+
+| Split | Subjects / NPZs | Share |
+| --- | ---: | ---: |
+| **Train** | **857** | ~77% |
+| **Val** | **109** | ~10% |
+| **Test** | **147** | ~13% |
+| **Total** | **1113** | 100% |
+
+Policy target is **75 / 10 / 15**; realized counts use hash assignment + largest-remainder class
+quotas. Per-split deformation mix is recorded in `split_manifest.json` /
+`split_class_u_stats.csv`.
 
 ---
 
@@ -136,10 +166,10 @@ python experiments/synth-data-gen/torchio/visualize_hcp_data.py --data-dir datas
 
 ---
 
-## HCP synthetic data generation (Phase I)
+## HCP synthetic data generation
 
-Phase I builds **known-displacement registration triplets** from HCP T1w: fixed `source`, warped
-`moving`, and ground-truth displacement `u_gt` (voxel units) on the **source/fixed** lattice.
+Build **known-displacement registration triplets** from HCP T1w: fixed `source`, warped `moving`,
+and ground-truth displacement `u_gt` (voxel units) on the **source/fixed** lattice.
 Scripts live under `experiments/synth-data-gen/torchio/`.
 
 | Script | Role |
@@ -173,8 +203,8 @@ Scripts live under `experiments/synth-data-gen/torchio/`.
 
 | Key | Description |
 | --- | --- |
-| `source` | Fixed image (masked z-score, float32) |
-| `moving` | Deformed image (same normalization) |
+| `source` | Fixed image (masked z-score, float32) `(X, Y, Z)` |
+| `moving` | Deformed image (same normalization) `(X, Y, Z)` |
 | `u_gt` | Registration displacement `(3, X, Y, Z)` in **voxels** on the **source/fixed** lattice: `moving(x + u_gt(x)) ≈ source(x)` |
 | `source_mask`, `moving_mask`, `identity_grid_mask` | Masks for viz / Phase II; `identity_grid_mask` marks valid `u_gt` voxels |
 | `deformation_class` | One of `none`, `rigid`, `affine`, `elastic`, `affine_elastic` |
@@ -203,7 +233,8 @@ displacement) for clearer deformation.
 #### Full run: splits and class assignment
 
 - **Split policy:** deterministic **75 / 10 / 15** Train / Val / Test by subject hash (`--seed`,
-  default 42). Before generation, the script prints split sizes and per-split class counts.
+  default 42). Realized counts for the current full cohort: **857 / 109 / 147** (1113 total).
+  Before generation, the script prints split sizes and per-split class counts.
 - **Class assignment:** within each split, subjects are shuffled with a split-specific seed; class
   quotas follow the target ratios above (largest-remainder rounding).
 
@@ -314,32 +345,8 @@ python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir dat
 
 ## Planned downstream
 
-### Phase 1 — Synthetic data generation
-
-Build known-displacement registration triplets from HCP T1w using TorchIO: fixed `source`, warped
-`moving`, and ground-truth displacement **`u_gt`** on the source/fixed lattice
-(`moving(x + u_gt(x)) ≈ source(x)`). Includes dry-run sanity checks, full cohort generation with
-balanced deformation classes, and QC visualization.
-
-**Files:** `create_synth_data.py`, `visualize_synth_data.py`
-
-### Phase 2 — Error-map generation (medical image registration model)
-
-Run UniGradICON as `net(moving, source)` to obtain `u_pred` on the same source lattice as `u_gt`.
-The **error map** is ‖u_gt − u_pred‖ (voxel-wise), giving supervised targets for uncertainty
-quantification without requiring manual labels.
-
-**Files:** scripts under `experiments/error-map-gen/unigrad-synth/`
-
-### Phase 3 — Error-map U-Net training on HCP synth
-
-Train a U-Net to predict the error map from registration inputs (fixed image, moving image, and
-predicted displacement). Because ground-truth error is known from Phase 1, this is fully supervised
-regression on synthetic data before moving to real held-out anatomy.
-
-**Files:** training and eval scripts under `experiments/regression/unigrad-synth/`
-
-See `docs/unigrad-synth-experiment.md` for the end-to-end pipeline overview across all three phases.
+Error-map generation (UniGradICON) and error-map U-Net training build on this synth cohort. See
+`docs/unigrad-synth-experiment.md` and `docs/registration-concepts.md`.
 
 ---
 
