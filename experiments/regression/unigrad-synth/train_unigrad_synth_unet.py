@@ -21,10 +21,10 @@ Fixed in code: ``Train``/``Val`` splits; AMP on when CUDA available (``--no-amp`
 ``torch.compile`` on by default (``--no-compile`` to disable; falls back if unsupported).
 
 Example:
-python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --batch-size 1 --out-dir assets/runs/regression/unigrad-synth/3d/error_unet_run1
+python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --out-dir assets/runs/regression/unigrad-synth/3d/error_unet_run1 --wandb --wandb-run-name unigradsynth_unet_run1
 
-Example (ablation + wandb):
-python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --mask-u-pred --wandb --wandb-project unc-quan --wandb-run-name error_unet_run1_masked --out-dir assets/runs/regression/unigrad-synth/3d/error_unet_run1_masked
+Example (ablation, masked u_pred):
+python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --out-dir assets/runs/regression/unigrad-synth/3d/error_unet_run1_masked --mask-u-pred
 """
 
 from __future__ import annotations
@@ -591,7 +591,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--early-stop-min-delta", type=float, default=0.005)
     p.add_argument("--wandb", action="store_true", help="Log metrics to Weights & Biases.")
-    p.add_argument("--wandb-project", type=str, default="unigrad-synth-hcp")
+    p.add_argument("--wandb-project", type=str, default="unc-quan")
     p.add_argument(
         "--wandb-run-name",
         type=str,
