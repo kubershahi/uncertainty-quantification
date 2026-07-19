@@ -168,7 +168,7 @@ python experiments/synth-data-gen/torchio/visualize_hcp_data.py --data-dir datas
 
 ## HCP synthetic data generation
 
-Build **known-displacement registration triplets** from HCP T1w: fixed `source`, warped `moving`,
+Build **known-displacement registration samples** from HCP T1w: fixed `source`, warped `moving`,
 and ground-truth displacement `u_gt` (voxel units) on the **source/fixed** lattice.
 Scripts live under `experiments/synth-data-gen/torchio/`.
 

@@ -135,7 +135,7 @@ Before:
 ```python
 with torch.no_grad():
     net(source, target)
-phi_px = phi_vectorfield_to_slice_pixels(net, orig_h, orig_w)
+phi = phi_vectorfield_to_volume_voxels(net, orig_d, orig_h, orig_w)
 ```
 
 The `net(...)` does not build a graph (good). But `net.phi_AB_vectorfield`
@@ -150,11 +150,11 @@ After:
 ```python
 with torch.no_grad():
     net(source, target)
-    phi_px = phi_vectorfield_to_slice_pixels(net, orig_h, orig_w)
+    phi = phi_vectorfield_to_volume_voxels(net, orig_d, orig_h, orig_w)
 ```
 
 All post-processing happens inside `no_grad`, so nothing is graph-aware and
-no activations get pinned. `phi_px` ends up as a plain numpy array detached
+no activations get pinned. The field ends up as a plain numpy array detached
 from PyTorch entirely.
 
 General rule:
