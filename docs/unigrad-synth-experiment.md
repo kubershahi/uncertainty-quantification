@@ -85,8 +85,9 @@ The U-Net is an **uncertainty proxy**: it learns where the registration model is
 image appearance and predicted deformation, without re-running UniGradICON at inference.
 
 **Status:** implemented (`train_unigrad_synth_unet.py`, `eval_unigrad_synth_unet.py`). Defaults include
-`base_channels=16`, val starting at epoch 5 then every 5 epochs. See
-`docs/registration-concepts.md` § Phase III for CNN / U-Net background.
+`base_channels=16`, val starting at epoch 5 then every 5 epochs. Eval writes orthogonal QC
+(`test_random_orthogonal/`, `test_mmm_orthogonal/`) then `test_metrics.json`; use `--mode figures|metrics|both`.
+See `docs/registration-concepts.md` § Phase III for CNN / U-Net background.
 
 ---
 
