@@ -267,36 +267,61 @@ def plot_training_curves_from_csv(
     save_path: Path | None,
     no_show: bool,
     run_label: str,
+    *,
+    train_loss: str = "mae",
+    val_loss: str = "mae",
 ) -> bool:
     if not metrics_csv.is_file():
         return False
     epochs: list[int] = []
-    train_loss: list[float] = []
+    train_vals: list[float] = []
     val_mae: list[float] = []
+    val_mse: list[float] = []
     val_rmse: list[float] = []
     val_r: list[float] = []
+    train_col = f"train_{train_loss}"
     with open(metrics_csv, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        fields = reader.fieldnames or []
+        if train_col not in fields and "train_loss" in fields:
+            train_col = "train_loss"
         for row in reader:
             epochs.append(int(float(row["epoch"])))
-            train_loss.append(float(row["train_loss"]))
+            train_vals.append(float(row[train_col]))
             val_mae.append(float(row["val_mae"]))
+            val_mse.append(float(row["val_mse"]) if "val_mse" in row and row["val_mse"] else float("nan"))
             val_rmse.append(float(row["val_rmse"]))
             val_r.append(float(row["val_pearson_r"]))
     if not epochs:
         return False
 
+    sel_map = {"mae": val_mae, "mse": val_mse, "rmse": val_rmse}
+    sel_vals = np.asarray(sel_map.get(val_loss, val_mae), dtype=float)
+    finite = np.isfinite(sel_vals)
+    if not np.any(finite):
+        best_i = 0
+    else:
+        best_i = int(np.nanargmin(sel_vals))
+
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(epochs, train_loss, label="train loss", color="C0", marker=".", markersize=3)
+    ax.plot(
+        epochs,
+        train_vals,
+        label=f"train {train_loss}",
+        color="C0",
+        marker=".",
+        markersize=3,
+    )
     ax.plot(epochs, val_mae, label="val MAE", color="C1", marker=".", markersize=3)
+    if np.any(np.isfinite(val_mse)):
+        ax.plot(epochs, val_mse, label="val MSE", color="C4", marker=".", markersize=3, alpha=0.7)
     ax.plot(epochs, val_rmse, label="val RMSE", color="C3", marker=".", markersize=3)
-    best_i = int(np.argmin(np.array(val_mae)))
     ax.axvline(
         epochs[best_i],
         color="0.5",
         linestyle="--",
         linewidth=0.8,
-        label=f"best MAE (ep {epochs[best_i]})",
+        label=f"best val {val_loss} (ep {epochs[best_i]})",
     )
     ax.set_xlabel("epoch")
     ax.set_ylabel(f"error ({DISPLACEMENT_UNIT})")
@@ -372,6 +397,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     metrics_csv = Path(args.metrics_csv) if args.metrics_csv else run_path / "metrics.csv"
+    run_cfg_path = run_path / "run_config.json"
+    train_loss_name = "mae"
+    val_loss_name = "mae"
+    if run_cfg_path.is_file():
+        try:
+            run_cfg = json.loads(run_cfg_path.read_text(encoding="utf-8"))
+            train_loss_name = str(run_cfg.get("train_loss", run_cfg.get("loss", "mae")))
+            if train_loss_name == "l1":
+                train_loss_name = "mae"
+            val_loss_name = str(run_cfg.get("val_loss", "mae"))
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"NOTE: could not read {run_cfg_path}: {e}", file=sys.stderr)
     if not args.no_training_curves:
         if metrics_csv.is_file():
             plot_training_curves_from_csv(
@@ -379,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
                 run_path / "training_curves.png",
                 args.no_show,
                 run_path.name,
+                train_loss=train_loss_name,
+                val_loss=val_loss_name,
             )
         else:
             print(f"NOTE: no metrics.csv at {metrics_csv}", file=sys.stderr)
