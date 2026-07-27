@@ -2,27 +2,34 @@
 """
 Train a 3D U-Net to regress the UniGradICON registration error map on HCP synth NPZ.
 
-Phase II outputs (``create_unigrad_synth_data.py``) under ``Train|Val|Test/*.npz``:
-  ``source``, ``moving``, ``u_gt``, ``u_pred`` (3, X, Y, Z), ``u_error_map``, ``source_mask``, …
+Reads Phase II outputs (``create_unigrad_synth_data.py``) under ``Train|Val|Test/*.npz``.
 
-Model input (5 channels, ``N×C×X×Y×Z``):
-  ``[source, moving, u_pred_x / u_scale, u_pred_y / u_scale, u_pred_z / u_scale]``
-Target (1 channel): ``‖u_gt − u_pred‖`` per voxel (full 3D magnitude).
-Loss / metrics: masked by ``source_mask`` (brain tissue on the source grid).
+Input NPZ keys (required)
+-------------------------
+  - source       : fixed image (float32, ``(X, Y, Z)``)
+  - moving       : warped image (float32, ``(X, Y, Z)``)
+  - u_gt         : GT displacement on source grid (float32, ``(3, X, Y, Z)``)
+  - u_pred       : UniGradICON displacement on source grid (float32, ``(3, X, Y, Z)``)
+  - source_mask  : brain mask on source grid (bool, ``(X, Y, Z)``)
+  - u_error_map  : optional; else computed as ``‖u_gt − u_pred‖``
 
-Ablation (``--mask-u-pred``): OFF by default (raw u_pred channels keep extra-cranial
-context). When set, ``u_pred_{x,y,z}`` are zeroed outside ``source_mask`` before the U-Net.
+Model I/O
+---------
+  - input  (5 channels, ``N×C×X×Y×Z``):
+      source, moving, u_pred_x / u_scale, u_pred_y / u_scale, u_pred_z / u_scale
+  - target (1 channel): ``‖u_gt − u_pred‖`` per voxel
+  - loss / metrics: masked by ``source_mask``
 
-Logging: per-epoch CSV (``metrics.csv``, plotted by the eval script) plus optional
-Weights & Biases (``--wandb``). Best checkpoint / early stop / LR plateau use
-``--val-loss`` (default ``mae``). Training objective is ``--train-loss`` (default ``mae``).
+``UNet3D.forward`` pads spatial dims to a multiple of 16 (4× MaxPool3d), then crops the
+output back to the native input size so pred / target / mask stay aligned.
 
-Validation defaults: first val at epoch 5, then every 5 epochs (and always on the last
-epoch). Non-val epochs log ``nan`` for val columns and still write train loss.
+Ablation (``--mask-u-pred``): OFF by default. When set, ``u_pred_{x,y,z}`` are zeroed
+outside ``source_mask`` before the U-Net.
 
-Optimizer AdamW; ``ReduceLROnPlateau`` on the selected val metric; optional early stopping.
-Fixed in code: ``Train``/``Val`` splits; AMP on when CUDA available (``--no-amp`` to disable);
-``torch.compile`` on by default (``--no-compile`` to disable; falls back if unsupported).
+Logging: ``metrics.csv`` (+ optional ``--wandb``). Best checkpoint / early stop / LR
+plateau use ``--val-loss`` (default ``mae``). Train objective: ``--train-loss`` (default
+``mae``). Val from epoch 5, every 5 epochs (and last epoch). AdamW + ``ReduceLROnPlateau``.
+AMP on CUDA by default (``--no-amp``); ``torch.compile`` on by default (``--no-compile``).
 
 Example:
 python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --out-dir assets/runs/regression/unigrad-synth/error_unet_run1 --wandb --wandb-run-name unigradsynth_unet_run1
@@ -45,6 +52,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -77,22 +85,26 @@ def should_run_val(epoch: int, *, epochs: int, val_every: int, val_start_epoch: 
     return (epoch % val_every == 0) or (epoch == epochs)
 
 
-def pad_spatial_to_multiple(
-    arr: np.ndarray,
+def pad_spatial_to_multiple_torch(
+    x: torch.Tensor,
     *,
     multiple: int = SPATIAL_MULTIPLE,
-    is_mask: bool = False,
-) -> np.ndarray:
-    """Pad trailing 3 spatial dims so each is divisible by ``multiple`` (pad after)."""
-    if arr.ndim < 3:
-        raise ValueError(f"expected >=3D array, got {arr.shape}")
-    spatial = arr.shape[-3:]
-    pads = [((multiple - s % multiple) % multiple) for s in spatial]
-    if pads == [0, 0, 0]:
-        return arr
-    pad_width = [(0, 0)] * (arr.ndim - 3) + [(0, pads[0]), (0, pads[1]), (0, pads[2])]
-    constant = False if is_mask else 0
-    return np.pad(arr, pad_width, mode="constant", constant_values=constant)
+) -> tuple[torch.Tensor, tuple[int, int, int]]:
+    """
+    Pad trailing spatial dims (X,Y,Z) so each is divisible by ``multiple`` (pad after).
+
+    Returns ``(padded, (ox, oy, oz))`` where ``(ox, oy, oz)`` is the original spatial size.
+    """
+    if x.ndim != 5:
+        raise ValueError(f"expected (N,C,X,Y,Z), got {tuple(x.shape)}")
+    _, _, ox, oy, oz = x.shape
+    px = (multiple - ox % multiple) % multiple
+    py = (multiple - oy % multiple) % multiple
+    pz = (multiple - oz % multiple) % multiple
+    if px or py or pz:
+        # F.pad order: (Z_left, Z_right, Y_left, Y_right, X_left, X_right)
+        x = F.pad(x, (0, pz, 0, py, 0, px))
+    return x, (ox, oy, oz)
 
 
 def amp_autocast(enabled: bool):
@@ -213,11 +225,6 @@ class HCPErrorMapDataset(Dataset):
         x = np.concatenate([source_n[None], moving_n[None], u_scaled], axis=0)  # (5, X, Y, Z)
         y = err[None, ...]
 
-        # Pad so UNet3D skip-concat shapes match (4 pool levels -> divisible by 16).
-        x = pad_spatial_to_multiple(x)
-        y = pad_spatial_to_multiple(y)
-        source_mask = pad_spatial_to_multiple(source_mask, is_mask=True)
-
         return {
             "x": torch.from_numpy(np.ascontiguousarray(x)),
             "y": torch.from_numpy(np.ascontiguousarray(y)),
@@ -309,7 +316,11 @@ class DoubleConv3d(nn.Module):
 
 
 class UNet3D(nn.Module):
-    """3D U-Net: 5 in-ch (source, moving, u_pred_xyz) -> 1 out-ch (error map)."""
+    """3D U-Net: 5 in-ch (source, moving, u_pred_xyz) -> 1 out-ch (error map).
+
+    Internally pads spatial dims to a multiple of ``SPATIAL_MULTIPLE`` (4 pool levels),
+    then crops the output back to the input spatial size so pred/target/mask stay aligned.
+    """
 
     def __init__(self, in_channels: int = IN_CHANNELS, base: int = 32) -> None:
         super().__init__()
@@ -331,6 +342,7 @@ class UNet3D(nn.Module):
         self.out = nn.Conv3d(b, 1, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, (ox, oy, oz) = pad_spatial_to_multiple_torch(x)
         c1 = self.down1(x)
         p1 = self.pool(c1)
         c2 = self.down2(p1)
@@ -348,7 +360,8 @@ class UNet3D(nn.Module):
         x = self.conv2(torch.cat([x, c2], dim=1))
         x = self.up1(x)
         x = self.conv1(torch.cat([x, c1], dim=1))
-        return self.out(x)
+        out = self.out(x)
+        return out[..., :ox, :oy, :oz]
 
 
 def collate_batch(samples: list[dict]) -> dict:

@@ -102,17 +102,35 @@ def predict_error_map(
     ds: teu.HCPErrorMapDataset,
     device: torch.device,
 ) -> np.ndarray:
-    """Full-volume predicted error map ``(X, Y, Z)`` float32."""
+    """Full-volume predicted error map ``(X, Y, Z)`` float32 (native NPZ spatial size).
+
+    ``UNet3D.forward`` pads internally and crops back. A defensive crop remains for
+    older checkpoints / code paths that returned padded outputs.
+    """
     idx = ds.paths.index(fp)
     batch = ds[idx]
     x = batch["x"].unsqueeze(0).to(device)
     pred = model(x).squeeze(0).squeeze(0).detach().cpu().numpy().astype(np.float32)
-    return pred
+    with np.load(fp) as z:
+        out_shape = tuple(int(s) for s in np.asarray(z["source"]).shape)
+    return _crop_spatial_to(pred, out_shape)
+
+
+def _crop_spatial_to(arr: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
+    """Crop trailing pad if present (no-op when shapes already match)."""
+    if arr.shape == shape:
+        return arr
+    if len(arr.shape) != len(shape):
+        raise ValueError(f"rank mismatch: {arr.shape} vs {shape}")
+    if any(a < s for a, s in zip(arr.shape, shape)):
+        raise ValueError(f"cannot crop {arr.shape} down to {shape}")
+    return np.asarray(arr[tuple(slice(0, s) for s in shape)])
 
 
 def _masked_error(err: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    out = np.asarray(err, dtype=np.float32).copy()
-    out[~mask.astype(bool)] = 0.0
+    err = _crop_spatial_to(np.asarray(err, dtype=np.float32), mask.shape)
+    out = err.copy()
+    out[~np.asarray(mask, dtype=bool)] = 0.0
     return out
 
 
