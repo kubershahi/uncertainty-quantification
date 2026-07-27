@@ -372,7 +372,7 @@ def _render_eval_orthogonal(
             gs=gs,
             cbar_col=7,
             ref_ax=ref_ax,
-            label=r"error (voxels, source_mask)",
+            label=r"Error (voxels, source_mask)",
         )
 
     title_x = 0.5 * (left + right)
