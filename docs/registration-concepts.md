@@ -332,9 +332,10 @@ spatial detail lost in pooling; another double conv fuses them.
 
 **Output.** A `1×1×1` convolution maps final features to **1** channel (the predicted error map).
 
-In this repo, `UNet3D` uses four pool/unpool stages (spatial ÷16 at the bottleneck). Volumes are
-padded so each spatial dim is a multiple of 16. Default width is set by `--base-channels` (HCP synth
-default **16** on 24 GB GPUs; IO often uses **32**).
+In this repo, `UNet3D` uses four pool/unpool stages (spatial ÷16 at the bottleneck).
+`UNet3D.forward` pads spatial dims to a multiple of 16 internally, then **crops the output
+back to the input size** so pred / target / mask stay aligned. Default width is set by
+`--base-channels` (HCP synth default **16** on 24 GB GPUs; IO often uses **32**).
 
 #### 4. Training notes (HCP synth)
 
