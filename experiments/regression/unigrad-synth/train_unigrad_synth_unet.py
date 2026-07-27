@@ -14,12 +14,13 @@ Ablation (``--mask-u-pred``): OFF by default (raw u_pred channels keep extra-cra
 context). When set, ``u_pred_{x,y,z}`` are zeroed outside ``source_mask`` before the U-Net.
 
 Logging: per-epoch CSV (``metrics.csv``, plotted by the eval script) plus optional
-Weights & Biases (``--wandb``). Best checkpoint by validation masked MAE.
+Weights & Biases (``--wandb``). Best checkpoint / early stop / LR plateau use
+``--val-loss`` (default ``mae``). Training objective is ``--train-loss`` (default ``mae``).
 
 Validation defaults: first val at epoch 5, then every 5 epochs (and always on the last
 epoch). Non-val epochs log ``nan`` for val columns and still write train loss.
 
-Optimizer AdamW; ``ReduceLROnPlateau`` on val MAE; optional early stopping.
+Optimizer AdamW; ``ReduceLROnPlateau`` on the selected val metric; optional early stopping.
 Fixed in code: ``Train``/``Val`` splits; AMP on when CUDA available (``--no-amp`` to disable);
 ``torch.compile`` on by default (``--no-compile`` to disable; falls back if unsupported).
 
@@ -238,16 +239,16 @@ def masked_mean(loss_map: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (loss_map * m).sum() / (m.sum() + 1e-8)
 
 
-def masked_l1(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+TRAIN_LOSSES = ("mae", "mse")
+VAL_LOSSES = ("mae", "mse", "rmse")
+
+
+def masked_mae(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return masked_mean(torch.abs(pred - target), mask)
 
 
 def masked_mse(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return masked_mean((pred - target) ** 2, mask)
-
-
-def masked_mae(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    return masked_l1(pred, target, mask)
 
 
 def masked_rmse(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -270,11 +271,17 @@ def masked_pearson_r(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tenso
 def masked_regression_loss(
     pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, *, loss: str
 ) -> torch.Tensor:
-    if loss == "l1":
-        return masked_l1(pred, target, mask)
+    if loss == "mae":
+        return masked_mae(pred, target, mask)
     if loss == "mse":
         return masked_mse(pred, target, mask)
-    raise ValueError(f"Unknown loss {loss!r}; expected 'l1' or 'mse'")
+    raise ValueError(f"Unknown train loss {loss!r}; expected one of {TRAIN_LOSSES}")
+
+
+def val_selection_value(val_metrics: dict[str, float], val_loss: str) -> float:
+    if val_loss not in VAL_LOSSES:
+        raise ValueError(f"Unknown val loss {val_loss!r}; expected one of {VAL_LOSSES}")
+    return float(val_metrics[val_loss])
 
 
 def _norm3d(num_channels: int, groups: int = 8) -> nn.Module:
@@ -405,9 +412,10 @@ def evaluate(
     show_progress: bool = True,
     desc: str = "val",
 ) -> dict[str, float]:
-    """Masked MAE / RMSE / Pearson r inside ``source_mask`` (averaged over batches)."""
+    """Masked MAE / MSE / RMSE / Pearson r inside ``source_mask`` (averaged over batches)."""
     model.eval()
     sum_mae = 0.0
+    sum_mse = 0.0
     sum_rmse = 0.0
     sum_r = 0.0
     n = 0
@@ -419,12 +427,18 @@ def evaluate(
         with amp_autocast(use_amp):
             pred = model(x)
             sum_mae += float(masked_mae(pred, y, mask))
+            sum_mse += float(masked_mse(pred, y, mask))
             sum_rmse += float(masked_rmse(pred, y, mask))
             sum_r += float(masked_pearson_r(pred, y, mask))
         n += 1
         it.set_postfix(mae=f"{sum_mae / max(n, 1):.4f}")
     n = max(n, 1)
-    return {"mae": sum_mae / n, "rmse": sum_rmse / n, "pearson_r": sum_r / n}
+    return {
+        "mae": sum_mae / n,
+        "mse": sum_mse / n,
+        "rmse": sum_rmse / n,
+        "pearson_r": sum_r / n,
+    }
 
 
 def train_epoch(
@@ -492,11 +506,13 @@ def log_wandb_epoch(
     wandb_run: object | None,
     *,
     epoch: int,
+    train_loss_name: str,
     train_loss: float,
     val_metrics: dict[str, float],
+    val_loss_name: str,
     lr: float,
     elapsed_s: float,
-    best_val_mae: float,
+    best_val_metric: float,
 ) -> None:
     if wandb_run is None:
         return
@@ -505,13 +521,15 @@ def log_wandb_epoch(
     wandb.log(
         {
             "epoch": epoch,
-            "train_loss": train_loss,
+            f"train_{train_loss_name}": train_loss,
             "val_mae": val_metrics["mae"],
+            "val_mse": val_metrics["mse"],
             "val_rmse": val_metrics["rmse"],
             "val_pearson_r": val_metrics["pearson_r"],
+            f"val_{val_loss_name}_selected": val_selection_value(val_metrics, val_loss_name),
             "lr": lr,
             "elapsed_s": elapsed_s,
-            "best_val_mae": best_val_mae,
+            "best_val_metric": best_val_metric,
         },
         step=epoch,
     )
@@ -520,15 +538,16 @@ def log_wandb_epoch(
 def finish_wandb(
     wandb_run: object | None,
     *,
-    best_val_mae: float,
+    best_val_metric: float,
     best_epoch: int,
     best_checkpoint: Path,
+    val_loss_name: str,
 ) -> None:
     if wandb_run is None:
         return
     import wandb
 
-    wandb.run.summary["best_val_mae"] = best_val_mae
+    wandb.run.summary[f"best_val_{val_loss_name}"] = best_val_metric
     wandb.run.summary["best_epoch"] = best_epoch
     if best_checkpoint.is_file():
         wandb.save(str(best_checkpoint), base_path=str(best_checkpoint.parent))
@@ -566,7 +585,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Intensity norm (default none: Phase I already masked-z-scored).",
     )
     p.add_argument("--quantile-high", type=float, default=0.99)
-    p.add_argument("--loss", type=str, default="l1", choices=["l1", "mse"])
+    p.add_argument(
+        "--train-loss",
+        type=str,
+        default="mae",
+        choices=list(TRAIN_LOSSES),
+        help="Training objective over masked voxels (default: mae).",
+    )
+    p.add_argument(
+        "--val-loss",
+        type=str,
+        default="mae",
+        choices=list(VAL_LOSSES),
+        help="Validation metric for early stop, LR plateau, and best checkpoint (default: mae). "
+        "mae/mse/rmse are always logged.",
+    )
     p.add_argument(
         "--mask-u-pred",
         action="store_true",
@@ -602,7 +635,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default="plateau",
         choices=["plateau", "none"],
-        help="Reduce LR when val MAE plateaus (default) or fixed LR.",
+        help="Reduce LR when the --val-loss metric plateaus (default) or fixed LR.",
     )
     p.add_argument("--lr-patience", type=int, default=5)
     p.add_argument("--lr-factor", type=float, default=0.5)
@@ -611,10 +644,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--early-stop-patience",
         type=int,
         default=DEFAULT_EARLY_STOP_PATIENCE,
-        help="Stop after this many val checks without val-MAE improvement (0 = off). "
+        help="Stop after this many val checks without --val-loss improvement (0 = off). "
         "With default val every 5 epochs, patience 3 ≈ 15 train epochs without improvement.",
     )
-    p.add_argument("--early-stop-min-delta", type=float, default=0.005)
+    p.add_argument(
+        "--early-stop-min-delta",
+        type=float,
+        default=0.005,
+        help="Min decrease in --val-loss to count as improvement.",
+    )
     p.add_argument("--wandb", action="store_true", help="Log metrics to Weights & Biases.")
     p.add_argument("--wandb-project", type=str, default="unc-quan")
     p.add_argument(
@@ -690,7 +728,8 @@ def main(argv: list[str] | None = None) -> int:
         "target": "||u_gt - u_pred|| (u_error_map)",
         "mask": "source_mask",
         "mask_u_pred": bool(args.mask_u_pred),
-        "loss": args.loss,
+        "train_loss": args.train_loss,
+        "val_loss": args.val_loss,
         "data_dir": str(args.data_dir.resolve()),
         "train_split": TRAIN_SPLIT,
         "val_split": VAL_SPLIT,
@@ -718,7 +757,7 @@ def main(argv: list[str] | None = None) -> int:
         "val_start_epoch": args.val_start_epoch,
         "device": str(device),
         "num_workers": num_workers,
-        "best_metric": "val_mae",
+        "best_metric": f"val_{args.val_loss}",
         "metrics_csv": "metrics.csv",
         "wandb": args.wandb,
         "wandb_project": args.wandb_project if args.wandb else None,
@@ -727,22 +766,38 @@ def main(argv: list[str] | None = None) -> int:
 
     wandb_run = init_wandb(args, meta)
 
+    train_col = f"train_{args.train_loss}"
     metrics_path = args.out_dir / "metrics.csv"
     with open(metrics_path, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(
-            ["epoch", "train_loss", "val_mae", "val_rmse", "val_pearson_r", "lr", "elapsed_s"]
+            [
+                "epoch",
+                train_col,
+                "val_mae",
+                "val_mse",
+                "val_rmse",
+                "val_pearson_r",
+                "lr",
+                "elapsed_s",
+            ]
         )
 
-    best_val_mae = float("inf")
+    best_val_metric = float("inf")
     best_epoch = 0
     epochs_without_improve = 0
-    last_val_m = {"mae": float("nan"), "rmse": float("nan"), "pearson_r": float("nan")}
+    last_val_m = {
+        "mae": float("nan"),
+        "mse": float("nan"),
+        "rmse": float("nan"),
+        "pearson_r": float("nan"),
+    }
     best_path = args.out_dir / "best_model.pt"
     t0 = time.time()
 
     print(
         f"Train {len(train_ds)} / Val {len(val_ds)} on {device} | "
-        f"in_ch={IN_CHANNELS} | mask_u_pred={args.mask_u_pred} | loss={args.loss} | "
+        f"in_ch={IN_CHANNELS} | mask_u_pred={args.mask_u_pred} | "
+        f"train_loss={args.train_loss} | val_loss={args.val_loss} | "
         f"val from epoch {args.val_start_epoch} every {args.val_every}"
     )
 
@@ -752,7 +807,7 @@ def main(argv: list[str] | None = None) -> int:
             train_loader,
             opt,
             device,
-            loss_name=args.loss,
+            loss_name=args.train_loss,
             use_amp=use_amp,
             scaler=scaler if use_amp else None,
             show_progress=show_p,
@@ -776,30 +831,44 @@ def main(argv: list[str] | None = None) -> int:
             )
             last_val_m = val_m
             if scheduler is not None:
-                scheduler.step(val_m["mae"])
+                scheduler.step(val_selection_value(val_m, args.val_loss))
         else:
             val_m = last_val_m
             if epoch < args.val_start_epoch:
                 print(f"  (warmup: no val before epoch {args.val_start_epoch})")
-            elif show_p and np.isfinite(val_m["mae"]):
-                print(f"  (skipped val; last val_mae={val_m['mae']:.6f})")
+            elif show_p and np.isfinite(val_selection_value(val_m, args.val_loss)):
+                print(
+                    f"  (skipped val; last val_{args.val_loss}="
+                    f"{val_selection_value(val_m, args.val_loss):.6f})"
+                )
 
         lr_now = float(opt.param_groups[0]["lr"])
         dt = time.time() - t0
+        sel = val_selection_value(val_m, args.val_loss)
         print(
-            f"epoch {epoch:03d}/{args.epochs}  train_loss={tr_loss:.6f}  "
-            f"val_mae={val_m['mae']:.6f}  val_rmse={val_m['rmse']:.6f}  "
-            f"val_r={val_m['pearson_r']:.4f}  lr={lr_now:.2e}  elapsed={dt:.1f}s"
+            f"epoch {epoch:03d}/{args.epochs}  {train_col}={tr_loss:.6f}  "
+            f"val_mae={val_m['mae']:.6f}  val_mse={val_m['mse']:.6f}  "
+            f"val_rmse={val_m['rmse']:.6f}  val_r={val_m['pearson_r']:.4f}  "
+            f"lr={lr_now:.2e}  elapsed={dt:.1f}s"
         )
         with open(metrics_path, "a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(
-                [epoch, tr_loss, val_m["mae"], val_m["rmse"], val_m["pearson_r"], lr_now, dt]
+                [
+                    epoch,
+                    tr_loss,
+                    val_m["mae"],
+                    val_m["mse"],
+                    val_m["rmse"],
+                    val_m["pearson_r"],
+                    lr_now,
+                    dt,
+                ]
             )
 
-        if run_val and np.isfinite(val_m["mae"]):
-            improved = val_m["mae"] < best_val_mae - args.early_stop_min_delta
+        if run_val and np.isfinite(sel):
+            improved = sel < best_val_metric - args.early_stop_min_delta
             if improved:
-                best_val_mae = val_m["mae"]
+                best_val_metric = sel
                 best_epoch = epoch
                 epochs_without_improve = 0
                 torch.save(
@@ -807,24 +876,30 @@ def main(argv: list[str] | None = None) -> int:
                         "model_state": checkpoint_state_dict(model),
                         "epoch": epoch,
                         "val_mae": val_m["mae"],
+                        "val_mse": val_m["mse"],
                         "val_rmse": val_m["rmse"],
                         "val_pearson_r": val_m["pearson_r"],
+                        f"val_{args.val_loss}": sel,
                         "config": meta,
                     },
                     best_path,
                 )
-                print(f"  saved best (val_mae={best_val_mae:.6f}) -> {best_path}")
+                print(
+                    f"  saved best (val_{args.val_loss}={best_val_metric:.6f}) -> {best_path}"
+                )
             else:
                 epochs_without_improve += 1
 
         log_wandb_epoch(
             wandb_run,
             epoch=epoch,
+            train_loss_name=args.train_loss,
             train_loss=tr_loss,
             val_metrics=val_m,
+            val_loss_name=args.val_loss,
             lr=lr_now,
             elapsed_s=dt,
-            best_val_mae=best_val_mae,
+            best_val_metric=best_val_metric,
         )
 
         if (
@@ -833,19 +908,23 @@ def main(argv: list[str] | None = None) -> int:
             and epochs_without_improve >= args.early_stop_patience
         ):
             print(
-                f"Early stopping: no val MAE improvement > {args.early_stop_min_delta} "
-                f"for {args.early_stop_patience} val check(s) "
-                f"(best epoch {best_epoch}, val_mae={best_val_mae:.6f})."
+                f"Early stopping: no val_{args.val_loss} improvement > "
+                f"{args.early_stop_min_delta} for {args.early_stop_patience} val check(s) "
+                f"(best epoch {best_epoch}, val_{args.val_loss}={best_val_metric:.6f})."
             )
             break
 
     finish_wandb(
         wandb_run,
-        best_val_mae=best_val_mae,
+        best_val_metric=best_val_metric,
         best_epoch=best_epoch,
         best_checkpoint=best_path,
+        val_loss_name=args.val_loss,
     )
-    print(f"Done. Best val MAE={best_val_mae:.6f} at epoch {best_epoch} -> {best_path}")
+    print(
+        f"Done. Best val_{args.val_loss}={best_val_metric:.6f} at epoch {best_epoch} "
+        f"-> {best_path}"
+    )
     print(f"Metrics log: {metrics_path}")
     return 0
 
