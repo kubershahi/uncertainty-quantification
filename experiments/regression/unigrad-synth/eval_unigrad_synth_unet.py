@@ -145,7 +145,7 @@ def _eval_plot_subtitle(
     subject_id: str, run_view: str = "orthogonal", extra: str | None = None
 ) -> str:
     base = (
-        f"Test Subject {subject_id} - Radiological-style display - "
+        f"Test Subject {subject_id} - Radiological-Style Display - "
         f"{viz._view_label(run_view)}"
     )
     if extra:
@@ -206,8 +206,8 @@ def _render_eval_orthogonal(
     img_cols = (0, 1, 2, 3, 5, 6)
     width_ratios = [1.0, 1.0, 1.0, 1.0, 0.28, 1.0, 1.0, 0.32]
     col_titles = {
-        0: "Source (fixed)",
-        1: "Warped (moving)",
+        0: "Source (Fixed)",
+        1: "Warped (Moving)",
         2: r"$\|u_{\mathrm{gt}}\|$",
         3: r"$\|u_{\mathrm{pred}}\|$",
         5: r"GT Error Map ($\|u_{\mathrm{gt}}-u_{\mathrm{pred}}\|$)",
@@ -478,25 +478,32 @@ def plot_training_curves_from_csv(
     best_i = 0 if not np.any(finite) else int(np.nanargmin(sel_vals))
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(epochs, train_vals, label=f"train {train_loss}", color="C0", marker=".", markersize=3)
-    ax.plot(epochs, val_mae, label="val MAE", color="C1", marker=".", markersize=3)
+    ax.plot(
+        epochs,
+        train_vals,
+        label=f"Train {train_loss.upper()}",
+        color="C0",
+        marker=".",
+        markersize=3,
+    )
+    ax.plot(epochs, val_mae, label="Val MAE", color="C1", marker=".", markersize=3)
     if np.any(np.isfinite(val_mse)):
-        ax.plot(epochs, val_mse, label="val MSE", color="C4", marker=".", markersize=3, alpha=0.7)
-    ax.plot(epochs, val_rmse, label="val RMSE", color="C3", marker=".", markersize=3)
+        ax.plot(epochs, val_mse, label="Val MSE", color="C4", marker=".", markersize=3, alpha=0.7)
+    ax.plot(epochs, val_rmse, label="Val RMSE", color="C3", marker=".", markersize=3)
     ax.axvline(
         epochs[best_i],
         color="0.5",
         linestyle="--",
         linewidth=0.8,
-        label=f"best val {val_loss} (ep {epochs[best_i]})",
+        label=f"Best Val {val_loss.upper()} (Ep {epochs[best_i]})",
     )
-    ax.set_xlabel("epoch")
-    ax.set_ylabel(f"error ({DISPLACEMENT_UNIT})")
-    ax.set_title(f"Training curves ({run_label})")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(f"Error ({DISPLACEMENT_UNIT})")
+    ax.set_title(f"Training Curves ({run_label})")
     ax.grid(True, alpha=0.3)
 
     ax_r = ax.twinx()
-    ax_r.plot(epochs, val_r, label="val Pearson r", color="C2", marker=".", markersize=3)
+    ax_r.plot(epochs, val_r, label="Val Pearson r", color="C2", marker=".", markersize=3)
     ax_r.set_ylabel("Pearson r")
     ax_r.set_ylim(-1.05, 1.05)
     ax_r.tick_params(axis="y", labelcolor="C2")
