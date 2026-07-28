@@ -1,3 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uncertainty-quantification"
+version = "0.2.0"
+description = "Uncertainty quantification for medical image registration — HCP UniGradICON synth error-map regression and IXI IO baselines."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "kuber" }]
+keywords = [
+  "medical-image-registration",
+  "uncertainty-quantification",
+  "unigradicon",
+  "hcp",
+  "ixi",
+  "unet",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+  "numpy>=1.20.0",
+  "nibabel>=4.0.0",
+  "tqdm>=4.60.0",
+  "matplotlib>=3.5.0",
+  "torch>=2.0.0",
+  "torchio>=0.19.0",
+  "SimpleITK>=2.2.0",
+  "wandb>=0.16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "black>=24.0.0",
+  "isort>=5.12.0",
+  "ruff>=0.4.0",
+]
+unigradicon = [
+  # Install separately from the UniGradICON project / environment used on the cluster.
+]
+
+[project.urls]
+Repository = "https://github.com/kubershahi/uncertainity-quantification"
+Documentation = "https://github.com/kubershahi/uncertainity-quantification/tree/main/docs"
+
 [tool.black]
 line-length = 100
 target-version = ["py39"]
