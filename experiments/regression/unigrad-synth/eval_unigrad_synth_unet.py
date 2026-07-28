@@ -16,13 +16,13 @@ Writes under ``--run-path`` (when enabled by ``--mode``):
   - ``test_metrics.json`` (masked Test MAE / RMSE / Pearson r) — after figures
 
 Example:
-python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/regression/unigrad-synth/error_unet_run1 --eval-dir datasets/error-map/unigrad-synth/hcp --mode both --no-show
+python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/regression/unigrad-synth/hcp/error_unet_run1 --eval-dir datasets/error-map/unigrad-synth/hcp --mode both --no-show
 
 Example (figures only):
-python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/regression/unigrad-synth/error_unet_run1 --mode figures --no-show
+python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/regression/unigrad-synth/hcp/error_unet_run1 --mode figures --no-show
 
 Example (metrics only):
-python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/regression/unigrad-synth/error_unet_run1 --mode metrics --no-show
+python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/regression/unigrad-synth/hcp/error_unet_run1 --mode metrics --no-show
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ import visualize_unigrad_data as viz
 CHECKPOINT_FILENAME = "best_model.pt"
 DISPLACEMENT_UNIT = "voxels"
 DEFAULT_MMM_CSV = viz.DEFAULT_MMM_CSV
-DEFAULT_RUN_PATH = Path("assets/runs/regression/unigrad-synth/error_unet_run1")
+DEFAULT_RUN_PATH = Path("assets/runs/regression/unigrad-synth/hcp/error_unet_run1")
 DEFAULT_EVAL_DIR = Path("datasets/error-map/unigrad-synth/hcp")
 
 _DPI = 150

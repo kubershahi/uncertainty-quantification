@@ -12,7 +12,7 @@ layout, and Phase I script detail see `docs/hcp-dataset.md`.
 | --- | --- | --- | --- |
 | **1) Synthetic data generation** | Known GT `u_gt` on **source** lattice from TorchIO + invert | `experiments/synth-data-gen/torchio/` | `datasets/synth-data/torchio/hcp/` |
 | **2) Error-map generation** | `u_pred` from `net(moving, source)` → ‖u_gt − u_pred‖ | `experiments/error-map-gen/unigrad-synth/` | `datasets/error-map/unigrad-synth/hcp/` |
-| **3) Error-map U-Net regression** | Learn to predict error map from registration inputs | `experiments/regression/unigrad-synth/` | `assets/runs/regression/unigrad-synth/` |
+| **3) Error-map U-Net regression** | Learn to predict error map from registration inputs | `experiments/regression/unigrad-synth/` | `assets/runs/regression/unigrad-synth/hcp/` |
 
 **Artifact roots:**
 
@@ -23,7 +23,7 @@ layout, and Phase I script detail see `docs/hcp-dataset.md`.
 | Error-map NPZ | `datasets/error-map/unigrad-synth/hcp/` |
 | QC figures (Phase I) | `assets/images/synth-data/torchio/hcp/` |
 | QC figures (Phase II) | `assets/images/error-map/unigrad-synth/hcp/` |
-| U-Net runs | `assets/runs/regression/unigrad-synth/` |
+| U-Net runs | `assets/runs/regression/unigrad-synth/hcp/` |
 
 **Shared displacement convention (Phases 1–2):**
 
