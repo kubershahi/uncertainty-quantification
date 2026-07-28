@@ -35,9 +35,9 @@ fi
 
 # Data under the repo clone on PVC (gitignored via datasets/** in .gitignore)
 export DATASETS_ROOT="${REPO_ROOT}/datasets"
-export IXI_2D_ROOT="${DATASETS_ROOT}/IXI_2D"
 export IXI_ROOT="${DATASETS_ROOT}/IXI"
-export UNIGRAD_IO_2D_OUT="${DATASETS_ROOT}/IXI_2D_unigrad_io"
+export HCP_ROOT="${DATASETS_ROOT}/hcp"
+export UNIGRAD_SYNTH_HCP="${DATASETS_ROOT}/error-map/unigrad-synth/hcp"
 export UNIGRAD_IO_3D_OUT="${DATASETS_ROOT}/error-map/unigrad-io/ixi"
 
 # Experiment outputs (in repo — git pull on laptop for figures / run logs)

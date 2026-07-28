@@ -1,187 +1,193 @@
 # Uncertainty Quantification for Medical Image Registration
 
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+
 This repository supports **ongoing work** on **uncertainty quantification for medical image registration**. The long-term aim is to relate **uncertainty estimates** to **registration quality** in settings where dense ground truth is usually unknown, so that future UQ methods can be trained, calibrated, and interpreted against meaningful error behavior.
 
-**First step (this codebase and report):** we **study the relationship between registration error and signals we can measure or predict**. Concretely, we use **synthetic 2D slices** with known deformations, run a strong foundation registrator (**UniGradICON**), build a **dense registration error map** from predicted vs.\ true motion, and train a **U-Net** to regress that map from images plus the predicted field. That does not solve full clinical UQ by itself; it isolates how error is structured and whether an observable-driven regressor can track it when supervision is available. That is **essential groundwork** before harder real-world uncertainty models.
+**Primary experiment (this codebase):** we study how **dense registration error** relates to signals available at inference. On **HCP** T1w anatomy we synthesize known deformations (TorchIO), run a foundation registrator (**UniGradICON**), form a voxel-wise **error map** ‖u_gt − u_pred‖, and train a **3D U-Net** to regress that map from images plus the predicted displacement. That does not solve clinical UQ by itself; it isolates error structure when supervision is available — essential groundwork before harder real-world uncertainty models.
 
-Implementation targets **TransMorph-style preprocessed IXI** axial slices. Phase I emits ground-truth triplets; Phase II produces **fiver** archives with `phi_pred` and scalar error; Phase III trains and evaluates the regressor. Code lives in `experiments/`; figures and an example run are under `assets/`. Large tensors (`data/`, `models/`) stay local or on Drive (see below). The PDF’s introduction should state the same bigger-picture framing: see **`reports/CSE293_introduction.tex`** to sync LaTeX with the compiled report.
+**Secondary experiment:** the same error-map regression idea on **IXI** volumes, where UniGradICON **instance optimization (IO)** provides a dense proxy target (‖φ_IO − φ_pred‖) without synthetic ground truth.
+
+Code lives under `experiments/`; concepts and run notes under `docs/`; figures and trained runs under `assets/`. Large tensors (`datasets/`, `models/`) stay local or on cluster storage.
 
 | Artifact | Location |
 | --- | --- |
+| **Concepts (φ vs u, U-Net, phases)** | [`docs/registration-concepts.md`](docs/registration-concepts.md) |
+| **HCP data + Phase I synth** | [`docs/hcp-dataset.md`](docs/hcp-dataset.md) |
+| **Primary: UniGrad synth (HCP)** | [`docs/unigrad-synth-experiment.md`](docs/unigrad-synth-experiment.md) |
+| **Secondary: UniGrad IO (IXI)** | [`docs/unigrad-io-experiment.md`](docs/unigrad-io-experiment.md) |
+| **Example HCP U-Net run** | [`assets/runs/regression/unigrad-synth/hcp/error_unet_run1/`](assets/runs/regression/unigrad-synth/hcp/error_unet_run1/) |
+| **Example IXI IO U-Net run** | [`assets/runs/regression/unigrad-io/error_unet_run4/`](assets/runs/regression/unigrad-io/error_unet_run4/) |
 | **Written report (PDF)** | [`reports/CSE293_Uncertainty_Estimation.pdf`](reports/CSE293_Uncertainty_Estimation.pdf) |
-| **Datasets used in the paper** | [Google Drive](https://drive.google.com/drive/folders/1VYUxjbYqrMLb_KWqfJepUZN3i0jNYdU7?usp=sharing) (`IXI_2D*.zip`, `IXI_2D_synth_trip.zip`, `IXI_2D_unigrad_synth_fiver.zip`, etc.) |
 
-### Pipeline in three stages
-
-1. **Phase I (synthetic ground truth):** Fixed/warped images and true displacement `phi` in `*_triplet.npz` (TorchIO-style transforms + QC).
-2. **Phase II (foundation registration):** UniGradICON produces `phi_pred`; residual against channel-aligned `phi_true` yields dense **error map** fivers (`*_fiver.npz`, plus `valid_mask`, `qc_passed`, …).
-3. **Phase III (supervised regression):** A U-Net predicts the dense error map from registration inputs. **2D synth** (`datasets/error-map/unigrad-synth/ixi_2d_fiver`, 4-channel `UNet2D`): `experiments/regression/unigrad-synth/`. **3D IO** (`datasets/error-map/unigrad-io/ixi`, 5-channel `UNet3D`): `experiments/regression/unigrad-io/`.
-
-### 3D U-Net architecture (`UNet3D`)
-
-Implemented in `experiments/regression/unigrad-io/train_unigrad_io_unet.py` as a standard **encoder–decoder U-Net** on 3D volumes (layout `N × C × D × H × W`).
-
-| | |
-| --- | --- |
-| **Input** | 5 channels: robust-normalized **subject** (`source`), **atlas** (`target`), **φ_pred** (3 channels, divided by `--phi-scale`, default 64 voxel units) |
-| **Output** | 1 channel: predicted **error_map** — per-voxel ‖φ_IO − φ_pred‖₂ (voxels), same shape as the label |
-| **Default width** | `--base-channels 32` (denoted `b` below) |
-
-**Encoder (contracting path):** four `MaxPool3d(2)` steps after double-conv blocks. Each block is **DoubleConv3d**: `Conv3d 3×3×3 → BatchNorm3d → ReLU → Conv3d 3×3×3 → BatchNorm3d → ReLU` (no bias in convolutions).
-
-| Stage | Channels (out) | Spatial size (per axis, relative to input) |
-| --- | --- | --- |
-| `down1` | `b` | 1× |
-| `down2` | `2b` | ½× |
-| `down3` | `4b` | ¼× |
-| `down4` | `8b` | ⅛× |
-| `bot` (bottleneck) | `16b` | ¹⁄₁₆× |
-
-**Decoder (expanding path):** four upsampling steps with **skip connections** (channel-wise `concat` with the matching encoder feature map, then DoubleConv3d):
-
-- `ConvTranspose3d` kernel 2, stride 2: `16b → 8b`, concat with `c4` → `conv4` (`16b → 8b`)
-- same pattern: `8b → 4b` (+ `c3`), `4b → 2b` (+ `c2`), `2b → b` (+ `c1`)
-- **Head:** `Conv3d 1×1×1`: `b → 1` (scalar error_map per voxel)
-
-With default `b = 32`, the channel ladder is **32 → 64 → 128 → 256 → 512** in the encoder and the reverse in the decoder. Depth must be divisible by 16 along D, H, and W (four poolings); IXI volumes at ~160×192×224 satisfy this.
-
-**Training:** volume MSE over all voxels; optional `--smooth-weight` adds 3D edge total-variation on the prediction. Optimizer: AdamW; mixed precision on CUDA when enabled.
+---
 
 ## Repository layout
 
 ```text
 .
-├── experiments/           # Pipeline: synth → UniGradICON → train / eval / viz
-├── deploy/nautilus/       # NRP Kubernetes (PVC, GPU pods, Job)
-├── reports/               # PDF + LaTeX intro (CSE293_introduction.tex)
-├── assets/                # Report figures; example run under assets/runs/error_unet_run1/
-├── data/                  # Local tensors (gitignored; use Drive or regenerate)
-├── scripts/               # IXI 2D slicing, PKL/NIfTI helpers
-├── docs/                  # See docs/nautilus.md (cluster runbook), gpu-memory-optimizations.md, unigrad-io-experiment.md
-├── models/                # Optional local checkpoints (gitignored)
+├── experiments/
+│   ├── synth-data-gen/torchio/     # Phase I — HCP TorchIO synth (u_gt)
+│   ├── error-map-gen/
+│   │   ├── unigrad-synth/          # Phase II — UniGradICON error maps (HCP)
+│   │   └── unigrad-io/             # Phase II — IO error maps (IXI)
+│   └── regression/
+│       ├── unigrad-synth/          # Phase III — 3D U-Net (HCP)
+│       └── unigrad-io/             # Phase III — 3D U-Net (IXI IO)
+├── docs/                           # Dataset, experiment, and concept notes
+├── assets/
+│   ├── images/                     # QC / sweep figures
+│   └── runs/regression/            # Trained runs (metrics, checkpoints, QC)
+├── datasets/                       # Local data (gitignored)
+├── scripts/                        # HCP download, registration viz helpers
+├── deploy/nautilus/                # NRP Kubernetes
+├── reports/                        # PDF / LaTeX
 ├── requirements.txt
+├── pyproject.toml
 └── README.md
 ```
 
-## Quick start (end-to-end)
+---
 
-Install dependencies:
+## Quick start
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+# UniGradICON + TorchIO / SimpleITK as needed for Phase I–II (see docs)
 ```
 
-The pipeline assumes local dataset folders match the defaults below (or download the matching archives from [Drive](https://drive.google.com/drive/folders/1VYUxjbYqrMLb_KWqfJepUZN3i0jNYdU7?usp=sharing) and extract under `./data/`).
-
-### Phase I: Ground truth generation (synthetic triplets)
-
-Phase I uses **2D** slices instead of full 3D volumes. The generator `experiments/synthetic/create_synth_data.py` expects `.npy` images as:
-
-```text
-./data/IXI_2D/
-  Train/
-  Val/
-  Test/
-  Atlas/
-```
-
-Build that layout from TransMorph preprocessed 3D IXI PKL files:
+Run commands from the **repository root**. Primary (HCP) defaults:
 
 ```bash
-python scripts/create_ixi_2d.py
+# Phase III — train (after Phase I–II data exist)
+python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/hcp --out-dir assets/runs/regression/unigrad-synth/hcp/error_unet_run1 --wandb --wandb-run-name unigradsynth_unet_run1
+
+# Phase III — eval (figures then Test metrics)
+python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/regression/unigrad-synth/hcp/error_unet_run1 --eval-dir datasets/error-map/unigrad-synth/hcp --mode both --no-show
 ```
 
-Notes:
+Data download and Phase I–II commands: [`docs/hcp-dataset.md`](docs/hcp-dataset.md), [`docs/unigrad-synth-experiment.md`](docs/unigrad-synth-experiment.md).
 
-- `scripts/create_ixi_2d.py` slices a mid-axial band (default `slices_per_volume=10`) per volume.
-- Paths `SOURCE_DIR`, `TARGET_DIR`, and `ATLAS_PATH` are near the bottom of the script—edit for your machine.
-- Default output is `./data/raw/IXI_2D/`; align with `./data/IXI_2D/` or pass `--input-path` to Phase I.
+---
 
-Optional sanity check:
+## Pipeline overview
 
-```bash
-python scripts/visualize_ixi_2d.py --input-dir ./data/IXI_2D --recursive --no-show --save-path ./assets/images/ixi_2d.png
-```
+Shared three-stage pattern for both experiments:
 
-Create synthetic triplets (`I_fixed`, `I_warped`, `phi`) as `*_triplet.npz`:
+| Stage | Intent | Typical outputs |
+| --- | --- | --- |
+| **I — Supervision** | Obtain a dense displacement reference (synthetic GT or IO-refined field) | NPZ with images + displacement / masks |
+| **II — Foundation registration** | Run UniGradICON; form a **dense error map** vs the reference | NPZ with `u_pred` / `phi_pred` + error magnitude |
+| **III — Error-map regression** | Train a 3D U-Net to predict the error map from **observable** inputs (images + predicted field) | `best_model.pt`, `metrics.csv`, QC figures, `test_metrics.json` |
 
-```bash
-python experiments/synthetic/create_synth_data.py --input-path ./data/IXI_2D/ --output-path ./data/IXI_2D_synth_trip/ --workers 64
-```
+Displacement convention (HCP synth): `moving(x + u(x)) ≈ source(x)` on the source/fixed lattice. Vocabulary: [`docs/registration-concepts.md`](docs/registration-concepts.md).
 
-Near-identity resampling (optional):
+---
 
-```bash
-python experiments/synthetic/modify_synth_data.py --near-zero-keep-frac 0.10 --near-zero-eps 1e-4
-```
+## Datasets
 
-QC:
+### Human Connectome Project (HCP) — primary
 
-```bash
-python experiments/data_checks/check_synth_data.py --data-dir ./data/IXI_2D_synth_trip/
-```
+**HCP Young Adult (S1200)** minimally preprocessed T1w in **native** subject space (~0.7 mm isotropic). Used to build synthetic registration pairs with known `u_gt`. Full download layout, splits, and Phase I schema: **[`docs/hcp-dataset.md`](docs/hcp-dataset.md)**.
 
-### Phase II: UniGradICON error maps (fivers)
+| Artifact | Path |
+| --- | --- |
+| Raw T1w | `datasets/hcp/` |
+| Synth NPZ | `datasets/synth-data/torchio/hcp/` |
+| Error-map NPZ | `datasets/error-map/unigrad-synth/hcp/` |
 
-```bash
-python experiments/synthetic/create_unigrad_synth_data.py --input-path ./data/IXI_2D_synth_trip/ --output-path ./datasets/error-map/unigrad-synth/ixi_2d_fiver/
-```
+### IXI — secondary (IO track)
 
-Writes `*_fiver.npz` with `phi_true`, `phi_pred`, `phi_diff`, `error_map`, `valid_mask`, `qc_passed`, etc.
+**IXI** 3D volumes (TransMorph-style preprocessing) for atlas–subject registration with UniGradICON **instance optimization**. Error maps measure how much IO changes the zero-shot field. Details: **[`docs/unigrad-io-experiment.md`](docs/unigrad-io-experiment.md)**.
 
-### Phase III: Supervised error-map training (3D IO volumes)
+| Artifact | Path |
+| --- | --- |
+| IO NPZ | `datasets/error-map/unigrad-io/ixi/` |
 
-Data from `experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py` under `datasets/error-map/unigrad-io/ixi/` (`Train|Val|Test/*.npz`). Each file: `source` (subject), `target` (same atlas for all subjects), `phi_pred`, `error_map`.
+---
 
-```bash
-python experiments/regression/unigrad-io/train_unigrad_io_unet.py --data-dir datasets/error-map/unigrad-io/ixi --epochs 50 --batch-size 1 --out-dir assets/runs/regression/unigrad-io/3d/error_unet_run1
-```
+## Foundation model: UniGradICON
 
-Produces `metrics.csv`, `best_model.pt` (best validation MSE), and `run_config.json`.
+[UniGradICON](https://github.com/uncbiag/uniGradICON) is a foundation network for deformable registration. In this project it supplies the **predicted displacement** used both to define supervised error maps (vs TorchIO GT or vs IO) and as U-Net input channels.
 
-### Evaluation + qualitative figures (3D IO)
+- **HCP synth:** `net(moving, source)` → `u_pred` on the source lattice; target ‖u_gt − u_pred‖.
+- **IXI IO:** zero-shot `phi_pred`, then per-pair IO → `phi_predio`; target ‖φ_predio − φ_pred‖ inside the atlas mask.
 
-```bash
-python experiments/regression/unigrad-io/eval_unigrad_io_unet.py --run-path assets/runs/regression/unigrad-io/3d/error_unet_run1 --eval-dir datasets/error-map/unigrad-io/ixi --no-show
-```
+---
 
-Typical outputs under `--run-path`:
+## Experiments
 
-- `training_curves.png`
-- `test_metrics.json`
-- `test_error_pred_random.png`
-- `test_error_pred_easy_normal_hard.png`
+### 1. UniGrad synthetic experiment (HCP) — primary
 
-### Phase III: 2D synthetic fiver training
+**Goal.** Predict dense UniGradICON error on HCP anatomy when GT motion is known from TorchIO.
 
-```bash
-python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-dir datasets/error-map/unigrad-synth/ixi_2d_fiver --epochs 50 --batch-size 8 --out-dir assets/runs/regression/unigrad-synth/2d/error_unet_run1
-python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/regression/unigrad-synth/2d/error_unet_run1 --eval-dir datasets/error-map/unigrad-synth/ixi_2d_fiver --no-show
-```
+| Item | Choice |
+| --- | --- |
+| Anatomy | HCP T1w (native space) |
+| Registration | UniGradICON zero-shot |
+| Error target | ‖u_gt − u_pred‖ (voxels), masked by `source_mask` |
+| Regressor | `UNet3D`, 5 in / 1 out, GroupNorm, `base_channels=16` |
+| Train objective | masked MAE (default); select by val MAE |
 
-Example 2D run artifacts: `assets/runs/regression/unigrad-synth/2d/error_unet_run1/`.
+**Stages**
 
-### Optional visualization (no training)
+1. **Synth** — TorchIO warp + identity-grid → invert → `u_gt` (`experiments/synth-data-gen/torchio/`).
+2. **Error maps** — UniGradICON → `u_pred`, `u_error_map` (`experiments/error-map-gen/unigrad-synth/`).
+3. **U-Net** — regress error from `[source, moving, u_pred/u_scale]` (`experiments/regression/unigrad-synth/`).
 
-- `python experiments/synthetic/visualize_synth_data.py`
-- `python experiments/synthetic/visualize_unigrad_data.py`
-- `python experiments/error-map-gen/unigrad-io/visualize_unigrad_io_data.py`
+**U-Net (HCP).** Encoder–decoder with 4× pooling (pad to ÷16 inside `forward`, crop to native size). Inputs: source, moving, three `u_pred` components. Output: scalar error map. Loss/metrics inside `source_mask`.
 
-## Report and figures
+**Results (example run `error_unet_run1`).** Artifacts: [`assets/runs/regression/unigrad-synth/hcp/error_unet_run1/`](assets/runs/regression/unigrad-synth/hcp/error_unet_run1/).
 
-- **PDF:** [`reports/CSE293_Uncertainty_Estimation.pdf`](reports/CSE293_Uncertainty_Estimation.pdf)
-- **Figures:** `assets/images/synthetic/`, `assets/images/synth-data/torchio/`, `assets/images/error-map/unigrad-io/`, `assets/images/synth-data/`, and `assets/runs/error_unet_run1/` (training curves, Test panels, metrics JSON).
+| Split | Volumes | Masked MAE | Masked RMSE | Pearson r |
+| --- | ---: | ---: | ---: | ---: |
+| Test | 147 | **0.353** | **0.515** | **0.865** |
+
+QC: `training_curves.png`, `test_random_orthogonal/`, `test_mmm_orthogonal/`, `test_metrics.json`.
+
+Full pipeline, commands, and interpretation: **[`docs/unigrad-synth-experiment.md`](docs/unigrad-synth-experiment.md)**.
+
+---
+
+### 2. UniGrad IO experiment (IXI) — secondary
+
+**Goal.** Predict how much **instance optimization** changes the zero-shot field on real IXI pairs (no synthetic GT).
+
+| Item | Choice |
+| --- | --- |
+| Anatomy | IXI 3D (atlas–subject) |
+| Registration | UniGradICON zero-shot + IO |
+| Error target | ‖φ_predio − φ_pred‖ (voxels), masked by atlas `valid_mask` |
+| Regressor | `UNet3D`, 5 in / 1 out, BatchNorm, `base_channels=32` |
+
+**Stages**
+
+1. **IO data** — zero-shot + IO iterations → `error_map` (`experiments/error-map-gen/unigrad-io/`).
+2. **U-Net** — regress error from subject, atlas, `phi_pred/phi_scale` (`experiments/regression/unigrad-io/`).
+
+**Results (example run `error_unet_run4`, L1 + early stop).** Artifacts: [`assets/runs/regression/unigrad-io/error_unet_run4/`](assets/runs/regression/unigrad-io/error_unet_run4/).
+
+| Split | Volumes | Masked MSE | Masked L1 |
+| --- | ---: | ---: | ---: |
+| Test | 115 | 0.563 | 0.479 |
+
+Run comparison (MSE vs L1, TV ablations) and next steps: **[`docs/unigrad-io-experiment.md`](docs/unigrad-io-experiment.md)**.
+
+---
 
 ## Notes
 
-- **Units (displacements).** Stored fields are in **pixels** on the 2D slice grid: `phi` in `*_triplet.npz`; `phi_true`, `phi_pred`, `phi_diff`, `error_map` in `*_fiver.npz`; Phase I QC limits in `experiments/synthetic/create_synth_data.py`.
-- **Units (internals).** TorchIO elastic uses mm only to sample the B-spline; saved `phi` is still grid-based **pixels**. UniGradICON outputs are **normalized** until `create_unigrad_synth_data.py` rescales to **pixels**. Phase III `--phi-scale` rescales `phi_pred` **inputs** to the U-Net; fiver tensors remain in pixels.
-- Run commands from the **repository root** so relative paths resolve.
-- Large artifacts are not committed (`data/`, `models/`, etc.); use the [Drive folder](https://drive.google.com/drive/folders/1VYUxjbYqrMLb_KWqfJepUZN3i0jNYdU7?usp=sharing) or regenerate locally.
-- `scripts/` and older docs may lag `experiments/` defaults; prefer argparse `--help` when in doubt.
+- Displacement / error units for both 3D tracks are **voxels** (index space).
+- Prefer `argparse --help` and the linked docs over stale one-off scripts.
+- Cluster / PVC setup: `deploy/nautilus/`; GPU tips: [`docs/gpu-memory-optimizations.md`](docs/gpu-memory-optimizations.md).
+
+---
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [`LICENSE`](LICENSE).

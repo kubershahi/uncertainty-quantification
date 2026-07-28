@@ -1,4 +1,21 @@
-nibabel>=4.0.0
+# Core scientific stack (Phase I–III on HCP / IXI 3D)
 numpy>=1.20.0
+nibabel>=4.0.0
 tqdm>=4.60.0
+matplotlib>=3.5.0
+
+# Deep learning
+torch>=2.0.0
+# CUDA builds: install the wheel matching your driver from https://pytorch.org
+
+# Synth deformation + field inversion (Phase I)
+torchio>=0.19.0
+SimpleITK>=2.2.0
+
+# Logging
 wandb>=0.16.0
+
+# Foundation registration (Phase II)
+# Install UniGradICON in the same environment used for create_unigrad_*_data.py, e.g.:
+#   pip install unigradicon
+# or follow https://github.com/uncbiag/uniGradICON
