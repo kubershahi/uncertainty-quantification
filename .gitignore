@@ -30,13 +30,6 @@ env/
 *.trch
 *.ckpt
 
-
-# Large project directories (keep folder structure only)
-/datasets/**
-/models/**
-!datasets/.gitkeep
-!models/.gitkeep
-
 # NIfTI / pickle outputs
 *.nii
 *.nii.gz
@@ -67,3 +60,12 @@ deploy/nautilus/local/
 
 # Commands
 commands.sh
+
+# Large project directories (keep folder structure only)
+/datasets/**
+/models/**
+!datasets/.gitkeep
+!models/.gitkeep
+
+/reports/latex/
+/reports/CSE293_Uncertainty_Estimation_HCP.md
