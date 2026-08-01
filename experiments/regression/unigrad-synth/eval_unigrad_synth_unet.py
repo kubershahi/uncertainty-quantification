@@ -487,8 +487,6 @@ def plot_training_curves_from_csv(
         markersize=3,
     )
     ax.plot(epochs, val_mae, label="Val MAE", color="C1", marker=".", markersize=3)
-    if np.any(np.isfinite(val_mse)):
-        ax.plot(epochs, val_mse, label="Val MSE", color="C4", marker=".", markersize=3, alpha=0.7)
     ax.plot(epochs, val_rmse, label="Val RMSE", color="C3", marker=".", markersize=3)
     ax.axvline(
         epochs[best_i],
@@ -510,7 +508,14 @@ def plot_training_curves_from_csv(
 
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax_r.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=9)
+    ax.legend(
+        h1 + h2,
+        l1 + l2,
+        loc="center right",
+        fontsize=9,
+        frameon=True,
+        framealpha=0.9,
+    )
     fig.tight_layout()
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
