@@ -1,11 +1,11 @@
 {
-  "checkpoint": "/files/repo/uncertainty-quantification/assets/runs/regression/unigrad-synth/error_unet_run1/best_model.pt",
+  "checkpoint": "/files/repo/uncertainty-quantification/assets/runs/regression/unigrad-synth/hcp/error_unet_run1/best_model.pt",
   "eval_dir": "/files/repo/uncertainty-quantification/datasets/error-map/unigrad-synth/hcp",
   "eval_split": "Test",
   "n_volumes": 147,
-  "masked_mae": 0.35337550654297784,
-  "masked_rmse": 0.5147443349872317,
-  "masked_pearson_r": 0.865294740921786,
+  "masked_mae": 0.33762690141087487,
+  "masked_rmse": 0.48450128571922274,
+  "masked_pearson_r": 0.8744068539061514,
   "unit": "voxels",
   "mask": "source_mask",
   "config": {
