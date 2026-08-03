@@ -11,17 +11,9 @@ This repository supports **ongoing work** on **uncertainty quantification for me
 
 **Secondary experiment:** the same error-map regression idea on **IXI** volumes, where UniGradICON **instance optimization (IO)** provides a dense proxy target (‖φ_IO − φ_pred‖) without synthetic ground truth.
 
-Code lives under `experiments/`; concepts and run notes under `docs/`; figures and trained runs under `assets/`. Large tensors (`datasets/`, `models/`) stay local or on cluster storage.
+**Written report:** [`reports/Uncertainty_Quantification.pdf`](reports/Uncertainty_Quantification.pdf)
 
-| Artifact | Location |
-| --- | --- |
-| **Concepts (φ vs u, U-Net, phases)** | [`docs/registration-concepts.md`](docs/registration-concepts.md) |
-| **HCP data + Phase I synth** | [`docs/hcp-dataset.md`](docs/hcp-dataset.md) |
-| **Primary: UniGrad synth (HCP)** | [`docs/unigrad-synth-experiment.md`](docs/unigrad-synth-experiment.md) |
-| **Secondary: UniGrad IO (IXI)** | [`docs/unigrad-io-experiment.md`](docs/unigrad-io-experiment.md) |
-| **Example HCP U-Net run** | [`assets/runs/regression/unigrad-synth/hcp/error_unet_run1/`](assets/runs/regression/unigrad-synth/hcp/error_unet_run1/) |
-| **Example IXI IO U-Net run** | [`assets/runs/regression/unigrad-io/error_unet_run4/`](assets/runs/regression/unigrad-io/error_unet_run4/) |
-| **Written report (PDF)** | [`reports/CSE293_Uncertainty_Estimation.pdf`](reports/CSE293_Uncertainty_Estimation.pdf) |
+Code lives under `experiments/`; concepts and run notes under `docs/`; figures and trained runs under `assets/`. Large tensors (`datasets/`, `models/`) stay local or on cluster storage.
 
 ---
 
@@ -146,7 +138,7 @@ Displacement convention (HCP synth): `moving(x + u(x)) ≈ source(x)` on the sou
 
 | Split | Volumes | Masked MAE | Masked RMSE | Pearson r |
 | --- | ---: | ---: | ---: | ---: |
-| Test | 147 | **0.353** | **0.515** | **0.865** |
+| Test | 147 | **0.338** | **0.485** | **0.874** |
 
 QC: `training_curves.png`, `test_random_orthogonal/`, `test_mmm_orthogonal/`, `test_metrics.json`.
 
@@ -177,6 +169,19 @@ Full pipeline, commands, and interpretation: **[`docs/unigrad-synth-experiment.m
 | Test | 115 | 0.563 | 0.479 |
 
 Run comparison (MSE vs L1, TV ablations) and next steps: **[`docs/unigrad-io-experiment.md`](docs/unigrad-io-experiment.md)**.
+
+---
+
+## Artifacts
+
+| Artifact | Location |
+| --- | --- |
+| **Concepts (φ vs u, U-Net, phases)** | [`docs/registration-concepts.md`](docs/registration-concepts.md) |
+| **HCP data + Phase I synth** | [`docs/hcp-dataset.md`](docs/hcp-dataset.md) |
+| **Primary: UniGrad synth (HCP)** | [`docs/unigrad-synth-experiment.md`](docs/unigrad-synth-experiment.md) |
+| **Secondary: UniGrad IO (IXI)** | [`docs/unigrad-io-experiment.md`](docs/unigrad-io-experiment.md) |
+| **Example HCP U-Net run** | [`assets/runs/regression/unigrad-synth/hcp/error_unet_run1/`](assets/runs/regression/unigrad-synth/hcp/error_unet_run1/) |
+| **Example IXI IO U-Net run** | [`assets/runs/regression/unigrad-io/error_unet_run4/`](assets/runs/regression/unigrad-io/error_unet_run4/) |
 
 ---
 

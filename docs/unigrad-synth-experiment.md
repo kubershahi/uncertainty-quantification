@@ -84,10 +84,10 @@ metrics use `source_mask`.
 The U-Net is an **uncertainty proxy**: it learns where the registration model is likely wrong from
 image appearance and predicted deformation, without re-running UniGradICON at inference.
 
-**Results (example):** [`assets/runs/regression/unigrad-synth/hcp/error_unet_run1/`](../assets/runs/regression/unigrad-synth/hcp/error_unet_run1/) — Test (147 vols, `source_mask`): MAE **0.353**, RMSE **0.515**, Pearson r **0.865**. See that folder for curves and orthogonal QC.
+**Results (example):** [`assets/runs/regression/unigrad-synth/hcp/error_unet_run1/`](../assets/runs/regression/unigrad-synth/hcp/error_unet_run1/) — Test (147 vols, `source_mask`): MAE **0.338**, RMSE **0.485**, Pearson r **0.874**. See that folder for curves and orthogonal QC.
 
-**Status:** implemented (`train_unigrad_synth_unet.py`, `eval_unigrad_synth_unet.py`). Defaults include
-`base_channels=16`, val starting at epoch 5 then every 5 epochs. Eval writes orthogonal QC
+**Status:** implemented (`train_unigrad_synth_unet.py`, `eval_unigrad_synth_unet.py`). Example run `error_unet_run1` used
+`base_channels=16`, val starting at epoch 3 then every 3 epochs (80-epoch budget, early stop). Eval writes orthogonal QC
 (`test_random_orthogonal/`, `test_mmm_orthogonal/`) then `test_metrics.json`; use `--mode figures|metrics|both`.
 See `docs/registration-concepts.md` § Phase III for CNN / U-Net background.
 
