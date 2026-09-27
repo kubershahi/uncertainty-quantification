@@ -34,7 +34,7 @@ yields a temporary backward field on the moving lattice; we invert it to ``u_gt`
 index space on the shared source/moving grid.
 
 Split policy (full run):
-  - deterministic 70/15/15 by subject hash (Train/Val/Test)
+  - deterministic 75/10/15 by subject hash (Train/Val/Test)
   - balanced deformation mix in each split:
       5% none, 20% rigid, 25% affine, 25% elastic, 25% affine+elastic
 
@@ -49,7 +49,7 @@ python experiments/synth-data-gen/torchio/create_synth_data.py --input-path data
 # Full cohort (all subjects)
 python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp --workers 16
 
-# Subset full run (100 subjects → ~70/15/15 + per-class ratios in each split)
+# Subset full run (100 subjects → ~75/10/15 + per-class ratios in each split)
 python experiments/synth-data-gen/torchio/create_synth_data.py --input-path datasets/hcp --output-path datasets/synth-data/torchio/hcp_100 --max-subjects 100 --workers 16
 """
 
@@ -80,7 +80,7 @@ from tqdm import tqdm
 T1_NAME = "T1w_acpc_dc_restore_brain.nii.gz"
 MASK_NAME = "brainmask_fs.nii.gz"
 
-# Split ratios (70/15/15)
+# Split ratios (75/10/15)
 TRAIN_FRAC = 0.75
 VAL_FRAC = 0.10
 # Test gets the remainder

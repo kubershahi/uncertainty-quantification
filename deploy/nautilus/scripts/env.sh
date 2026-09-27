@@ -45,7 +45,7 @@ export ASSETS_ROOT="${REPO_ROOT}/assets"
 export ASSETS_IMAGES="${ASSETS_ROOT}/images"
 export ASSETS_RUNS="${ASSETS_ROOT}/runs"
 export RUNS_ROOT="${ASSETS_RUNS}"
-export SWEEP_IO_SAVE="${ASSETS_IMAGES}/error-map/unigrad-io/3d/sweep_io.png"
+export SWEEP_IO_SAVE="${ASSETS_IMAGES}/error-map/unigrad-io/sweep_io.png"
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
