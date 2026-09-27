@@ -28,7 +28,7 @@ Example (Nautilus PVC, ``/files`` mounted)::
 python experiments/error-map-gen/unigrad-io/sweep_io_iterations.py --ixi-root datasets/IXI --atlas-pkl datasets/IXI/atlas.pkl --split Train --num-subjects 5 --save-path assets/images/error-map/unigrad-io/unigradio_sweep_io.png --no-show
 
 Omit ``--ixi-root`` / ``--save-path`` to use defaults (see argparse help): on NRP,
-inputs under ``<repo>/datasets/IXI``; figures under ``<repo>/assets/images/error-map/unigrad-io/3d/``.
+inputs under ``<repo>/datasets/IXI``; figures under ``<repo>/assets/images/error-map/unigrad-io/``.
 
 Default ``--checkpoints``: ``0,50,100,150,200,250,300``. ``--seed 42``.
 """
@@ -109,7 +109,7 @@ NRP_DATASETS = NRP_REPO / "datasets"
 NRP_IXI_PKL_ROOT = NRP_DATASETS / "IXI"
 NRP_SWEEP_SAVE = NRP_REPO / "assets" / "images" / "error-map" / "unigrad-io" / "3d" / "sweep_io.png"
 LOCAL_IXI_PKL = Path("./datasets/IXI/")
-LOCAL_SWEEP_SAVE = Path("./assets/images/error-map/unigrad-io/3d/sweep_io.png")
+LOCAL_SWEEP_SAVE = Path("./assets/images/error-map/unigrad-io/sweep_io.png")
 
 CHECKPOINTS_DEFAULT = "0,50,100,150,200,250,300"
 
@@ -1078,7 +1078,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Base path for outputs (parent dirs created). For each swept subject "
         "S, three files are written: <stem>_<S>_images<ext>, <stem>_<S>_curves<ext>, "
         "and <stem>_<S>_metrics.csv. Default on NRP: "
-        "/files/repo/uncertainty-quantification/assets/images/error-map/unigrad-io/3d/sweep_io.png.",
+        "/files/repo/uncertainty-quantification/assets/images/error-map/unigrad-io/sweep_io.png.",
     )
     p.add_argument("--no-show", action="store_true")
     return p.parse_args(argv)

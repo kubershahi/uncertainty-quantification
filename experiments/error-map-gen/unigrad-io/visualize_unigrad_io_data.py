@@ -545,7 +545,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--save-dir",
         type=Path,
         default=None,
-        help="Directory for per-subject PNGs (default: assets/images/error-map/unigrad-io/3d/viz).",
+        help="Directory for per-subject PNGs (default: assets/images/error-map/unigrad-io/viz).",
     )
     p.add_argument(
         "--save-path",
@@ -584,7 +584,7 @@ def main(argv: list[str] | None = None) -> int:
 
     save_dir = args.save_dir
     if save_dir is None and args.save_path is None and args.no_show:
-        save_dir = Path("assets/images/error-map/unigrad-io/3d/viz")
+        save_dir = Path("assets/images/error-map/unigrad-io/viz")
 
     for split in splits:
         try:

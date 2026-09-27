@@ -28,7 +28,7 @@ outside ``source_mask`` before the U-Net.
 
 Logging: ``metrics.csv`` (+ optional ``--wandb``). Best checkpoint / early stop / LR
 plateau use ``--val-loss`` (default ``mae``). Train objective: ``--train-loss`` (default
-``mae``). Val from epoch 5, every 5 epochs (and last epoch). AdamW + ``ReduceLROnPlateau``.
+``mae``). Val from epoch 3, every 3 epochs (and last epoch). AdamW + ``ReduceLROnPlateau``.
 AMP on CUDA by default (``--no-amp``); ``torch.compile`` on by default (``--no-compile``).
 
 Example:
@@ -635,13 +635,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--val-every",
         type=int,
         default=DEFAULT_VAL_EVERY,
-        help="Run validation every N epochs after --val-start-epoch (default: 5).",
+        help="Run validation every N epochs after --val-start-epoch (default: 3).",
     )
     p.add_argument(
         "--val-start-epoch",
         type=int,
         default=DEFAULT_VAL_START_EPOCH,
-        help="First epoch to validate (default: 5). Always validates on the last epoch.",
+        help="First epoch to validate (default: 3). Always validates on the last epoch.",
     )
     p.add_argument(
         "--lr-scheduler",
@@ -658,7 +658,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_EARLY_STOP_PATIENCE,
         help="Stop after this many val checks without --val-loss improvement (0 = off). "
-        "With default val every 5 epochs, patience 3 ≈ 15 train epochs without improvement.",
+        "With default val every 3 epochs, patience 3 ≈ 9 train epochs without improvement.",
     )
     p.add_argument(
         "--early-stop-min-delta",

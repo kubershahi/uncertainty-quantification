@@ -15,7 +15,7 @@ Notes for keeping **`experiments/error-map-gen/unigrad-io/create_unigrad_io_data
 
 Implementation lives in
 [`experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py`](../experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py),
-specifically `run_io_then_extract_phi_px` and the inner loop of
+specifically `run_io_then_extract_phi` and the inner loop of
 `run_atlas_io_generation`.
 
 ## Why GPU memory mattered here

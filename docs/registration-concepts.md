@@ -342,7 +342,7 @@ back to the input size** so pred / target / mask stay aligned. Default width is 
 - Masked MAE or MSE: `sum(loss * mask) / (sum(mask) + ε)` over `source_mask` (`--train-loss`).
 - Val metrics always logged: MAE, MSE, RMSE, Pearson r. Early stop / LR plateau / best
   checkpoint use `--val-loss` (default `mae`).
-- Default val schedule: first validation at epoch 5, then every 5 epochs; early stop on the
+- Default val schedule: first validation at epoch 3, then every 3 epochs; early stop on the
   selected val metric.
 - Optional ablation `--mask-u-pred`: zero `u_pred` outside `source_mask` before the U-Net.
 
