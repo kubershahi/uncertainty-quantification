@@ -1,0 +1,10 @@
+split,rank,u_metric,subject_id,file,deformation_class,u_score
+Train,min,mean,783462,783462_ela.npz,elastic,2.965998705341665
+Train,median,mean,192641,192641_aff.npz,affine,11.052111135213169
+Train,max,mean,993675,993675_aela.npz,affine_elastic,19.280736452647567
+Val,min,mean,818859,818859_rig.npz,rigid,2.854490866524657
+Val,median,mean,102715,102715_aff.npz,affine,10.793618177969574
+Val,max,mean,814548,814548_aela.npz,affine_elastic,17.904689823289086
+Test,min,mean,159845,159845_ela.npz,elastic,3.0577302255705656
+Test,median,mean,175035,175035_aff.npz,affine,11.378052176823779
+Test,max,mean,202719,202719_aff.npz,affine,18.169007647430604
