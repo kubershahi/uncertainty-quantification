@@ -1,6 +1,6 @@
 # Uncertainty-aware uniGradICON: literature and design recon
 
-Goal: make uniGradICON output, in one forward pass, a per-voxel uncertainty on its deformation next to the deformation itself. Then train it from the released weights by probing (backbone frozen), fine-tuning, or probing followed by fine-tuning. This document surveys what exists, fixes what the uncertainty is *of*, compares the designs, and ends with a recommendation and an experiment ladder. Model facts come from [`UNIGRADICON.md`](UNIGRADICON.md). Literature search: about 50 queries plus full reads of the key papers, run on **2026-09-26**. Every URL below was opened.
+Goal: make uniGradICON output, in one forward pass, a per-voxel uncertainty on its deformation next to the deformation itself. Then train it from the released weights by probing (backbone frozen), fine-tuning, or probing followed by fine-tuning. This document surveys what exists, fixes what the uncertainty is *of*, compares the designs, and ends with a recommendation and an experiment ladder. Model facts come from [`UNIGRADICON.md`](UNIGRADICON.md). Literature search: about 50 queries plus full reads of the key papers, run on **2026-09-26**; status refresh on **2026-11-12** (Tian NeurIPS acceptance, new probabilistic / foundation-model checks, package versions). Every URL below was opened.
 
 **Hard constraint throughout:** a real clinical pair never has a ground-truth deformation `u_gt`. The uncertainty therefore has to be produced **without** any error signal at inference, and it must be trainable without one. `u_gt` is used only where it can be manufactured (synthetic warps of real anatomy): to *measure* whether the uncertainty tracks true error, and to *calibrate* its scale.
 
@@ -15,7 +15,7 @@ Read in tier order. "Read" gives the depth used for this recon: **full** = the w
 | # | Paper | Read | Summary | Main contribution | Results | Why we read it |
 | ---: | --- | --- | --- | --- | --- | --- |
 | 1 | **uniGradICON**, Tian et al., MICCAI 2024, [arXiv 2403.05780](https://arxiv.org/abs/2403.05780) | full | One GradICON network trained on four datasets (lung CT, knee MRI, brain MRI, abdomen CT) at 175³; zero-shot on new tasks, optional instance optimisation (IO). | First universal deep registration model that works across anatomies and modalities without retraining. | In-distribution, zero-shot → IO: COPDGene mTRE 2.26 → 1.40 mm, OAI Dice 68.9 → 70.3, HCP Dice 76.2 → 78.9, Abdomen Dice 48.3 → 52.2. A universal VoxelMorph trained on the same data reaches HCP Dice 44.2. No uncertainty anywhere. | The model we extend. Details in [`UNIGRADICON.md`](UNIGRADICON.md). |
-| 2 | **Tian, Hu & Iglesias**, *Uncertainty Estimation for Pretrained Medical Image Registration Models via Transformation Equivariance*, under review (ICLR 2026 submission), [arXiv 2509.23355](https://arxiv.org/abs/2509.23355) | full | Perturb the input by translations, shears, scales or B-splines (N = 50), map each prediction back, report the variance. Training-free; runs on uniGradICON, SynthMorph and TransMorph. | Test-time uncertainty for any pretrained registration network, with a proof that the variance splits into "intrinsic spread" + "bias jitter". | On uniGradICON, single cases: r 0.71–0.78 against linear ground truth, **r 0.43** against nonlinear; nAURC 0.29–0.47. 12–28 s per pair vs 0.20 s for one pass. Maps agree spatially with MC dropout. | **The baseline to beat.** Same model and grid; its failure mode (a deterministic network gives pure bias jitter) is our opening. |
+| 2 | **Tian, Hu & Iglesias**, *Uncertainty Estimation for Pretrained Medical Image Registration Models via Transformation Equivariance*, **NeurIPS 2026**, [arXiv 2509.23355](https://arxiv.org/abs/2509.23355) (v2 31 Jan 2026; accepted Sep 2026) | full | Perturb the input by translations, shears, scales or B-splines (N = 50), map each prediction back, report the variance. Training-free; runs on uniGradICON, SynthMorph and TransMorph. | Test-time uncertainty for any pretrained registration network, with a proof that the variance splits into "intrinsic spread" + "bias jitter". | On uniGradICON, single cases: r 0.71–0.78 against linear ground truth, **r 0.43** against nonlinear; nAURC 0.29–0.47. 12–28 s per pair vs 0.20 s for one pass. Maps agree spatially with MC dropout. | **The baseline to beat.** Same model and grid; its failure mode (a deterministic network gives pure bias jitter) is our opening. Still training-free — does not close the learned-head gap. |
 | 3 | **Dalca, Balakrishnan, Guttag & Sabuncu**, *Unsupervised learning of probabilistic diffeomorphic registration*, MedIA 2019, [arXiv 1903.03545](https://arxiv.org/abs/1903.03545) | full | Probabilistic VoxelMorph: the network outputs mean and diagonal variance of a velocity field; one reparameterised sample per step; Laplacian smoothness prior; image likelihood. | The variational template for unsupervised registration with a learned posterior variance. | Brain atlas registration Dice 0.754 with 0.2 folding voxels, vs ANTs 0.749. Diagonal vs smoothed covariance: no difference at λ = 20. **No quantitative uncertainty result** ("beyond the scope of this paper"). | Our objective is this one adapted to uniGradICON. It also warns that diagonal noise on a *displacement* (not velocity) field is harmful. |
 | 4 | **PULPo**, Siegert, Fischer, Heinrich & Baumgartner, MICCAI 2024, [arXiv 2407.10567](https://arxiv.org/abs/2407.10567) | abstract | Hierarchical variational registration: one latent per level of a Laplacian pyramid, KL per level, NCC likelihood. | Calibrated uncertainty from unsupervised probabilistic registration; shows the Dalca model collapses to near-deterministic. | Voxel-level NCC between variance and error: OASIS 0.533 vs 0.210 (Dalca), BraTS 0.497 vs 0.264. Landmark-level: 0.302 vs −0.171. Dalca's max variance 3.4e-5 vs PULPo 1.4. | **Variance collapse is our main technical risk**; this paper names it and fixes it with level weighting. |
 | 5 | **Hu et al.**, *Hierarchical Uncertainty Estimation for Learning-based Registration in Neuroimaging*, ICLR 2025, [arXiv 2410.09299](https://arxiv.org/abs/2410.09299), [code](https://github.com/HuXiaoling/Regre4Regis) | full | Network regresses atlas coordinates plus 3 per-axis log-variances with Gaussian NLL; the variance is propagated into affine, B-spline and Demons fits. | A learned Gaussian head beats MC dropout by a wide margin, and uncertainty-weighted fitting improves registration. | Correlation with error: head r 0.476 / ρ 0.601 vs MC dropout r 0.108 / ρ 0.181. 3 variance channels vs 1: Dice 0.790 vs 0.714. Demons trained with direct deformation: Dice 0.767 → 0.799 with uncertainty. | Justifies per-axis variance and dismisses MC dropout. Supervised against NiftyReg; ours is label-free. They list pairwise registration as future work. |
@@ -35,9 +35,13 @@ Read in tier order. "Read" gives the depth used for this recon: **full** = the w
 | 14 | **Loi et al.**, *Inverse consistency error for validating deformable image registration*, Phys. Imaging Radiat. Oncol. 2026, [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC12925039/) | abstract | Uses the forward–backward inconsistency map as an error proxy in radiotherapy. | A free, label-free error proxy for any bidirectional registration. | R = 0.85 vs true error, 0.68 vs TRE; underestimates deformations above 15 mm. | Free baseline: uniGradICON computes both directions every pass. |
 | 15 | **Chen et al.**, *From Registration Uncertainty to Segmentation Uncertainty*, ISBI 2024, [arXiv 2403.05111](https://arxiv.org/abs/2403.05111), [code](https://github.com/junyuchen245/Registration_Uncertainty) | abstract | A small auxiliary network on a fixed registration network turns registration uncertainty into segmentation uncertainty. | Auxiliary heads on frozen registration networks, and a downstream use of sampled fields. | Epistemic and aleatoric segmentation uncertainty track label-propagation error; numbers not extracted. | Precedent for a frozen-backbone head; the label-propagation evaluation in §5. |
 | 16 | **Salari et al.**, *FocalErrorNet*, MICCAI 2023, [arXiv 2307.14520](https://arxiv.org/abs/2307.14520) | abstract | Focal-modulation network regresses MRI–ultrasound registration error, with MC dropout on its own estimate. | Error prediction with uncertainty on the prediction itself. | 0.59 ± 0.57 mm vs 1.69 ± 1.37 mm for a CNN baseline. | Error-prediction baseline family on real clinical data. |
-| 17 | **RUGI**, González, Bates, Ng & Tang, 2026, [arXiv 2609.28081](https://arxiv.org/abs/2609.28081) | abstract | Recursive refinement of pretrained VoxelMorph / TransMorph / CycleMorph, gated by uncertainty or residual. | Uncertainty used to decide *where and whether* to refine. | 27–37 % lower MSE on cardiac MRI and echo. Notes that Tian 2025 did not use their map for refinement. | The template for σ-guided IO (E5). |
+| 17 | **RUGI**, González, Bates, Ng & Tang, 2026, [arXiv 2609.28081](https://arxiv.org/abs/2609.28081) | abstract | Recursive refinement of pretrained VoxelMorph / TransMorph / CycleMorph, gated by uncertainty or residual. | Uncertainty used to decide *where and whether* to refine. | 27–37 % lower MSE on cardiac MRI and echo. Notes that Tian 2026 did not use their map for refinement. | The template for σ-guided IO (E5). |
 | 18 | **The LUMirage**, Jena, Chaudhari & Gee, 2025, [arXiv 2512.15505](https://arxiv.org/abs/2512.15505) | abstract | Independent re-evaluation of zero-shot claims in the LUMIR brain challenge. | Shows deep registration fails silently under contrast, resolution and preprocessing shifts. | Significant drops on T2, T2* and FLAIR (Cohen's d 0.7–1.5); models fail to run on 0.6 mm images. | Defines the OOD conditions σ should flag (E4). |
 | 19 | **Chaudhary et al.**, *Uncertainty-Aware Test-Time Adaptation for Inverse Consistent Diffeomorphic Lung Image Registration*, 2024, [arXiv 2411.07567](https://arxiv.org/abs/2411.07567) | abstract | MC-dropout uncertainty guides test-time adaptation of an inverse-consistent lung network. | Uncertainty-guided test-time adaptation. | Lung Dice 0.966 vs 0.953 for VoxelMorph and TransMorph on 675 COPDGene subjects. | Closest existing "uncertainty-guided IO"; same data as uniGradICON's lung corpus. |
+| 19b | **Structured SIR**, 2026, [arXiv 2603.17415](https://arxiv.org/abs/2603.17415) | abstract | Sampled Importance Resampling with a low-rank + sparse Cholesky covariance for high-dimensional registration posteriors. | Expressive, better-calibrated alternative to diagonal VI for dense 3D fields. | Uncertainty "significantly better calibrated than those produced by variational methods" at equal or better accuracy (abstract). | Calibration / multi-modal posterior baseline; not a foundation-model head. |
+| 19c | **BINDER**, Cerri et al., 2026, [arXiv 2609.19875](https://arxiv.org/abs/2609.19875) | abstract | Probabilistic MI registration with latent voxel correspondences; closed-form EM + Gibbs MCMC over free-form 3D fields. | First MCMC multimodal UQ at million-parameter dense deformations (optimization-based, not a foundation model). | Out-of-the-box multimodal registration + sampler; numbers in body, not extracted. | Classical-style probabilistic baseline; shows multimodal UQ is still mostly optimisation-time. |
+| 19d | **Dose-propagation DIR UQ**, 2026, [arXiv 2606.09253](https://arxiv.org/abs/2606.09253) | abstract | Lightweight certainty maps → voxel dose probabilities and DVH envelopes for radiotherapy. | Practical clinical use of DIR uncertainty without learning a head. | Case study only; certainty-map design dominates kernel choice. | Downstream use case for a calibrated σ (dose / DVH). |
+| 19e | **VCoR-Reg**, 2026, [arXiv 2602.00211](https://arxiv.org/abs/2602.00211) | abstract | Multi-hop unsupervised registration; hop-wise confidence / uncertainty from metric stability. | Process-level interpretability; future work explicitly asks for *learned* uncertainty estimators. | DIR-Lab confidence 0.472→0.571 across hops (empirical weights). | Reinforces demand for a learned σ; not itself a foundation-model head. |
 
 ### Tier 3: background (read as needed)
 
@@ -49,8 +53,10 @@ Read in tier order. "Read" gives the depth used for this recon: **full** = the w
 | 23 | **Krebs et al.**, *Learning a Probabilistic Model for Diffeomorphic Registration*, IEEE TMI 2019, [arXiv 1812.07460](https://arxiv.org/abs/1812.07460) | known | Conditional VAE over a low-dimensional latent deformation. | Not extracted. | Alternative latent-variable formulation. |
 | 24 | **Rivetti et al.**, PMB 2024, [DOI](https://doi.org/10.1088/1361-6560/ad4c4f) | abstract | Multivariate-normal output over the displacement field. | Beats MC dropout and MC B-spline; KL 0.15. | A non-diagonal alternative to §3.3. |
 | 25 | **Sokooti et al.**, MedIA 2019, [arXiv 1905.07624](https://arxiv.org/abs/1905.07624) | abstract | Regression forests predicting local registration error from transformation and dissimilarity features. | Quantitative local error on chest CT; numbers not extracted. | Classical error-prediction precedent. |
-| 26 | **Bierbrier, Gueziri & Collins**, MedIA 81:102531, 2022 | abstract | Taxonomy and scoping review of registration error and confidence estimation. | 20 of 570 screened studies included. | Framing and terminology for the related-work section. |
+| 26 | **Bierbrier, Gueziri & Collins**, MedIA 81:102531, 2022, [DOI](https://doi.org/10.1016/j.media.2022.102531) | abstract | Taxonomy and scoping review of registration error and confidence estimation. | 20 of 570 screened studies included. | Framing and terminology for the related-work section. |
 | 27 | **Gal & Ghahramani**, ICML 2016, [arXiv 1506.02142](https://arxiv.org/abs/1506.02142) | known | Dropout as approximate Bayesian inference (MC dropout). | Not extracted. | The weak baseline in Hu 2025; needs injected dropout in uniGradICON. |
+| 28 | **Chen et al.**, *A survey on deep learning in medical image registration…*, MedIA 100:103385, 2025, [arXiv 2307.15615](https://arxiv.org/abs/2307.15615) | abstract | Broad DL registration survey including an uncertainty section. | Frames open problems around UQ, evaluation and foundation models. | Survey; numbers not extracted. | Related-work framing for the NeurIPS / advisor pitch. |
+| 29 | **CARL**, Greer et al., CVPR 2025, [arXiv 2405.16738](https://arxiv.org/abs/2405.16738) | abstract | Equivariance analysis for multi-step registration; coordinate-attention first step + GradICON-style cascade (uniCARL preview in the uniGradICON repo). | Stronger `[W,U]` translation equivariance than plain displacement UNets. | Matches or beats SOTA on abdomen / lung / brain (abstract). | Same group; relevant because Tian 2026's map can be blind to equivariant errors — CARL pushes that axis further, still without a σ head. |
 
 **Suggested order for a first pass:** 1 → 2 → 3 → 4 → 5 → 6, which covers the model, the baseline, the objective, its failure mode, the head, and the probe theory. Then 7 and 8 for the evaluation question and the training order, and 13 and 14 for calibration and the free baseline.
 
@@ -73,15 +79,15 @@ uniGradICON returns `phi_AB`, a map from coordinates on **B's lattice** (the fix
 
 ## 1. Has this been done?
 
-**No trained uncertainty output exists for any registration foundation model**, in any of the probe, fine-tune or probe-then-fine-tune variants. We checked uniGradICON, multiGradICON, SynthMorph, BrainMorph, TransMorph variants, DINO-Reg, SAME++ and IMPACT.
+**No trained uncertainty output exists for any registration foundation model**, in any of the probe, fine-tune or probe-then-fine-tune variants. Re-checked on **2026-11-12** for uniGradICON, multiGradICON, uniCARL / CARL, SynthMorph, BrainMorph, TransMorph variants, DINO-Reg, SAME++ and IMPACT. New 2026 probabilistic work (Structured SIR, BINDER, AC-CAR's intensity-variance branch, VCoR-Reg hop confidence) is either optimisation-time, task-specific, or intensity-residual — none attaches a learned transformation-σ head to a released foundation checkpoint.
 
-Queries run (2026-09-26): "uniGradICON uncertainty", "registration foundation model uncertainty", "uncertainty-aware image registration foundation model", "probabilistic uniGradICON", "GradICON uncertainty", "multiGradICON", "SynthMorph / BrainMorph uncertainty", "DINO-Reg OR SAME++ OR IMPACT uncertainty", "test-time adaptation registration uncertainty pretrained foundation", "registration failure detection foundation model", "pretrained registration network post-hoc variance head frozen backbone", "fine-tuning uniGradICON", "uniGradICON OOD". One search summary claimed uniGradICON "provides a probabilistic version". Neither the paper nor the README supports this.
+Queries run (2026-09-26, plus 2026-11-12 refresh): "uniGradICON uncertainty", "registration foundation model uncertainty", "uncertainty-aware image registration foundation model", "probabilistic uniGradICON", "GradICON uncertainty", "multiGradICON", "SynthMorph / BrainMorph uncertainty", "DINO-Reg OR SAME++ OR IMPACT uncertainty", "test-time adaptation registration uncertainty pretrained foundation", "registration failure detection foundation model", "pretrained registration network post-hoc variance head frozen backbone", "fine-tuning uniGradICON", "uniGradICON OOD", "NeurIPS 2026 registration uncertainty", "Structured SIR registration", "BINDER probabilistic registration". One search summary claimed uniGradICON "provides a probabilistic version". Neither the paper nor the README supports this; the NeurIPS 2026 companion is still test-time only.
 
 **Closest work**
 
 | Paper | What it does | Relevance |
 | --- | --- | --- |
-| **Tian, Hu & Iglesias 2025/26**, *Uncertainty Estimation for Pretrained Medical Image Registration Models via Transformation Equivariance*, [arXiv 2509.23355](https://arxiv.org/abs/2509.23355) (v2 31 Jan 2026) | Test-time, training-free. Perturb the input by τ, map the prediction back, report `√tr Var_τ[τ∘f(A∘τ, B)]`. N = 50 per perturbation type. Runs on uniGradICON at 175³. | **Must-compare baseline.** Same model, same grid. Details below. |
+| **Tian, Hu & Iglesias, NeurIPS 2026**, *Uncertainty Estimation for Pretrained Medical Image Registration Models via Transformation Equivariance*, [arXiv 2509.23355](https://arxiv.org/abs/2509.23355) (v2 31 Jan 2026; accepted Sep 2026) | Test-time, training-free. Perturb the input by τ, map the prediction back, report `√tr Var_τ[τ∘f(A∘τ, B)]`. N = 50 per perturbation type. Runs on uniGradICON at 175³. | **Must-compare baseline.** Same model, same grid. Details below. |
 | **Hu et al., ICLR 2025**, *Hierarchical Uncertainty Estimation for Learning-based Registration in Neuroimaging*, [arXiv 2410.09299](https://arxiv.org/abs/2410.09299), [code](https://github.com/HuXiaoling/Regre4Regis) | Gaussian head (μ + 3 log σ²) on a coordinate-regression network trained from scratch with NLL against NiftyReg ground truth; propagates σ to affine / B-spline / Demons fits. | Strongest evidence that a learned Gaussian head beats MC dropout (r 0.476 vs 0.108; ρ 0.601 vs 0.181). Future work in their words: "extend the framework to pairwise registration of any two input images." |
 | **Chaudhary et al. 2024**, [arXiv 2411.07567](https://arxiv.org/abs/2411.07567) | MC-dropout uncertainty guides test-time adaptation of an inverse-consistent lung network (COPDGene). | Not a foundation model; uses a dataset from uniGradICON's corpus. |
 | **Hu, Yu et al., IJCNN 2025**, [arXiv 2505.06527](https://arxiv.org/abs/2505.06527), [code](https://github.com/Promise13/fm_sam) | Retrains uniGradICON with sharpness-aware minimisation for better generalisation. | Only other uniGradICON retraining found; no uncertainty. |
@@ -89,12 +95,10 @@ Queries run (2026-09-26): "uniGradICON uncertainty", "registration foundation mo
 
 ### Tian, Hu & Iglesias in detail (the paper to answer)
 
-**Status:**
-- Submitted to ICLR 2026. The OpenReview PDF header reads "Under review".
-- No decision or reviews are visible without logging in: [OpenReview forum](https://openreview.net/forum?id=4dARndGskg).
-- arXiv v2 carries no venue note, and Semantic Scholar lists no venue.
-- The code was promised "upon acceptance"; no repository exists on GitHub.
-- We cannot say whether it was accepted or rejected. The retitled v2 after the ICLR decision window fits a resubmission, but that is inference.
+**Status (as of 2026-11-12):**
+- **Accepted at NeurIPS 2026** ([author announcement](https://lintian-a.github.io/news/ue-neurips/), [NeurIPS poster](https://neurips.cc/virtual/2026/poster/148713)). Earlier draft was an ICLR 2026 submission ([OpenReview](https://openreview.net/forum?id=4dARndGskg)).
+- arXiv still at **v2 (31 Jan 2026)**; numbers below match v2 / the HTML.
+- Code "will be released" (NeurIPS abstract); no public repository found on GitHub yet.
 
 **Method:**
 - Perturbations, N = 50 each:
@@ -154,12 +158,12 @@ This repo's Phase III (external `UNet3D` regressing `‖u_gt − u_pred‖` from
 | Salari et al., MICCAI 2023 (FocalErrorNet), [arXiv 2307.14520](https://arxiv.org/abs/2307.14520); IEEE IUS 2023, [arXiv 2308.10784](https://arxiv.org/abs/2308.10784) | focal-modulation / Swin UNETR error regressors for MRI–ultrasound, MC dropout on the estimate | 0.59 ± 0.57 mm vs 1.69 ± 1.37 mm CNN baseline | dense error maps on real clinical data |
 | Chen et al., ISBI 2024, [arXiv 2403.05111](https://arxiv.org/abs/2403.05111), [code](https://github.com/junyuchen245/Registration_Uncertainty) | auxiliary network on a **fixed** registration network | epistemic + aleatoric segmentation uncertainty tracks label-propagation error | auxiliary head on a frozen network |
 | Loi et al. 2026, *Phys. Imaging Radiat. Oncol.* 37:100916, [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC12925039/) | inverse-consistency error map as an error proxy | R = 0.85 vs true error, 0.68 vs TRE; underestimates > 15 mm | **free baseline** on uniGradICON (both directions are computed) |
-| Bierbrier, Gueziri & Collins 2022, *MedIA* 81:102531 (DOI 10.1016/j.media.2022.102531, inferred) | taxonomy and scoping review | 20 of 570 studies | framing |
+| Bierbrier, Gueziri & Collins 2022, *MedIA* 81:102531, [DOI](https://doi.org/10.1016/j.media.2022.102531) | taxonomy and scoping review | 20 of 570 studies | framing |
 | RegQCNET 2020, [arXiv 2005.06835](https://arxiv.org/abs/2005.06835) | scalar affine-QC regressor | — | global, affine only |
 
 **Where we sit.**
 - No error-map paper targets a foundation registration model.
-- Our r = 0.874 is against **nonlinear** synthetic ground truth. That is the regime where Tian 2025 reports r = 0.43 for uniGradICON, but the ground-truth distributions differ (TorchIO classes at native resolution vs B-spline compositions at 175³), so the two numbers are not yet comparable.
+- Our r = 0.874 is against **nonlinear** synthetic ground truth. That is the regime where Tian 2026 reports r = 0.43 for uniGradICON, but the ground-truth distributions differ (TorchIO classes at native resolution vs B-spline compositions at 175³), so the two numbers are not yet comparable.
 - Error regression needs `u_gt`-like supervision, which is why it is the **baseline**, not the primary route.
 
 ---
@@ -173,7 +177,7 @@ This repo's Phase III (external `UNet3D` regressing `‖u_gt − u_pred‖` from
 | **Variational Gaussian over `u`** ([Dalca 2019](https://arxiv.org/abs/1903.03545), [Krebs 2019](https://arxiv.org/abs/1812.07460), [PULPo 2024](https://arxiv.org/abs/2407.10567), [Rivetti 2024](https://doi.org/10.1088/1361-6560/ad4c4f)) | μ (3) + log σ² (3) per voxel | registration loss on a reparameterised sample + KL to a smoothness prior | **no** | transformation variance consistent with the images under the model | head on the last UNet's features; frozen μ keeps registration quality | **primary** |
 | Heteroscedastic intensity residual ([Zhang 2024](https://arxiv.org/abs/2312.00836), [AC-CAR 2026](https://arxiv.org/abs/2601.05981), [Gong 2022](https://openaccess.thecvf.com/content/WACV2022/papers/Gong_Uncertainty_Learning_Towards_Unsupervised_Deformable_Medical_Image_Registration_WACV_2022_paper.pdf)) | log σ²_I of `A∘φ − B` | β-NLL ([Seitzer 2022](https://arxiv.org/abs/2203.09168)) on the residual | no | image-level ambiguity, **not** transformation variance | cheap (+1.2 M params in AC-CAR) | label-free baseline |
 | MC dropout ([Gal 2016](https://arxiv.org/abs/1506.02142)), deep ensembles, last-layer Laplace, SWAG | sample variance | retraining with dropout / several models | no | epistemic | uniGradICON has **no dropout**; 4 × 70.7 M for ensembles | baseline only (weak: Hu 2025 r 0.108) |
-| Test-time equivariance (Tian 2025) | `√tr Var_τ` | none | no | bias jitter | 50 passes | training-free baseline |
+| Test-time equivariance (Tian 2026) | `√tr Var_τ` | none | no | bias jitter | 50 passes | training-free baseline |
 | Inverse-consistency error | `‖φ_AB∘φ_BA − id‖` | none | no | inconsistency | free | training-free baseline |
 | Error-prediction head ([DeVries 2018](https://arxiv.org/abs/1802.04865), [Yoo 2019](https://arxiv.org/abs/1905.03677), [IO-CUE 2025](https://arxiv.org/abs/2506.00918), our Phase III) | `ê(x)` | regression / NLL against `u_gt` | **yes** (synthetic only) | expected error | head on features or external | supervised baseline |
 | Conformal / quantile layer ([CONReg 2026](https://doi.org/10.1007/s10278-026-01878-3)) | calibrated intervals | calibration split | yes, once, on a calibration set | coverage guarantee | sits on top of any σ | **calibration step** (§3.5) |
@@ -260,7 +264,7 @@ All start from the released `Step_2_final.trch`; **no pretraining from scratch**
 | Check | Data | What it measures | `u_gt` needed | Notes |
 | --- | --- | --- | --- | --- |
 | **Synthetic bench** | HCP synth (this repo: 1113 subjects, 857 / 109 / 147, five classes: none, rigid, affine, elastic, affine + elastic) | Pearson / Spearman of σ vs `‖u_gt − μ‖` in the brain mask; sparsification and AUSE; NLL and coverage of `u_gt` under `N(μ, σ_cal²)`; per class and per region | yes (manufactured) | answers [Luo 2020](https://arxiv.org/abs/1908.07709) ("Are registration uncertainty and error monotonically associated?"; their ρ_s ≈ 0.29 on real landmarks) at scale |
-| **Tian 2025 protocol** | the same brains resampled to 175³ with their translation / affine / B-spline ground truth | r, ρ, AURC, nAURC | yes (manufactured) | head-to-head with the published baseline |
+| **Tian 2026 protocol** | the same brains resampled to 175³ with their translation / affine / B-spline ground truth | r, ρ, AURC, nAURC | yes (manufactured) | head-to-head with the published baseline |
 | Landmark TRE | DIR-Lab COPDgene (10 pairs × 300 landmarks), L2R NLST (inhale / exhale, ≈ 2,000 automatic + 100+ manual keypoints per case) | sparsification of σ against landmark error; conformal coverage | no | lung is in-distribution (COPDGene) and type-1 OOD (NLST) |
 | Label-propagation error | HCP `aparc+aseg` (downloaded), L2R AbdomenCTCT (13 organs), L2R OASIS (35 labels), IXI (TransMorph labels) | does high σ coincide with boundary disagreement after warping labels | no | sparse and indirect: label error ≠ transformation error (Luo 2019) |
 | OOD flagging | uniGradICON's type 1 / 2 / 3 splits; [LUMirage 2025](https://arxiv.org/abs/2512.15505) conditions (T2, T2*, FLAIR, 0.6 mm, preprocessing changes) | does mean σ rise when registration quality falls | no | AUROC of image-level σ vs failure (Dice drop) |
@@ -269,7 +273,7 @@ All start from the released `Step_2_final.trch`; **no pretraining from scratch**
 **Metrics to add to this repo:** sparsification curves and AUSE, nAURC (Tian's definition `(Unc − Oracle)/(Random − Oracle)`), Gaussian NLL, coverage at 1σ / 2σ, and ECE for regression. Existing masked MAE / RMSE / Pearson carry over.
 
 **Expected ranges (to set honest targets):**
-- On synthetic data: Hu 2025's learned head reaches r 0.48 / ρ 0.60, and Tian 2025's uniGradICON reaches r 0.43 on nonlinear ground truth.
+- On synthetic data: Hu 2025's learned head reaches r 0.48 / ρ 0.60, and Tian 2026's uniGradICON reaches r 0.43 on nonlinear ground truth.
 - On real landmarks, correlations are weak to moderate everywhere: Luo 2020 ρ_s 0.29 / 0.40, PULPo landmark NCC 0.23–0.30.
 
 ---
@@ -278,7 +282,7 @@ All start from the released `Step_2_final.trch`; **no pretraining from scratch**
 
 | Use | Idea | Evidence so far |
 | --- | --- | --- |
-| **σ-guided IO** | refine only where σ is high; stop early where σ is low; weight IO's similarity by σ⁻¹ | uniGradICON's IO raises folding (Abdomen `%|J|<0` 0.31 → 0.96, CT–MR 0.04 → 0.61). [RUGI 2026](https://arxiv.org/abs/2609.28081): uncertainty-gated recursive refinement of pretrained networks, −27–37 % MSE. [Chaudhary 2024](https://arxiv.org/abs/2411.07567): uncertainty-guided test-time adaptation, lung Dice 0.966 vs 0.953. Tian 2025 did not use their map for refinement (noted by RUGI). |
+| **σ-guided IO** | refine only where σ is high; stop early where σ is low; weight IO's similarity by σ⁻¹ | uniGradICON's IO raises folding (Abdomen `%|J|<0` 0.31 → 0.96, CT–MR 0.04 → 0.61). [RUGI 2026](https://arxiv.org/abs/2609.28081): uncertainty-gated recursive refinement of pretrained networks, −27–37 % MSE. [Chaudhary 2024](https://arxiv.org/abs/2411.07567): uncertainty-guided test-time adaptation, lung Dice 0.966 vs 0.953. Tian 2026 did not use their map for refinement (noted by RUGI). |
 | **Failure / OOD flagging** | image-level summary of σ predicts registration failure before anyone looks | LUMirage: zero-shot models drop sharply on T2 / T2* / FLAIR (Cohen's d 0.7–1.5), fail at 0.6 mm, and are sensitive to preprocessing, silently |
 | Precision-weighted smoothing | `K ⋆ (σ⁻² ⊙ μ) / (K ⋆ σ⁻²)` (Hu 2025's Demons formula) as a cheap post-hoc correction | Hu 2025: Demons Dice 0.767 → 0.799 with uncertainty |
 | Downstream propagation | sample fields → label / dose / segmentation uncertainty | [Chen ISBI 2024](https://arxiv.org/abs/2403.05111) |
@@ -331,7 +335,7 @@ Add L2R AbdomenCTCT and IXI in E4. Request DIR-Lab access now, because it takes 
 
 ## 9. Recommendation (proposal for the advisor)
 
-**Claim to aim for:** a single forward pass of uniGradICON can output a calibrated per-voxel transformation uncertainty. It is learned from the model's own registration objective, with no ground-truth deformations, from the released weights by probing. It tracks true error better than test-time equivariance (Tian 2025) and inverse-consistency error, at 1/60 of the cost. It flags OOD failure and guides instance optimisation.
+**Claim to aim for:** a single forward pass of uniGradICON can output a calibrated per-voxel transformation uncertainty. It is learned from the model's own registration objective, with no ground-truth deformations, from the released weights by probing. It tracks true error better than test-time equivariance (Tian 2026) and inverse-consistency error, at 1/60 of the cost. It flags OOD failure and guides instance optimisation.
 
 **Design**
 
@@ -349,7 +353,7 @@ Add L2R AbdomenCTCT and IXI in E4. Request DIR-Lab access now, because it takes 
 
 | Step | What | Output |
 | --- | --- | --- |
-| E0 | Baselines on the HCP synthetic bench: inverse-consistency error (free), Tian 2025 re-implemented (N = 50, their four perturbation types), IO delta, our `UNet3D` error regressor | table of r / ρ / AUSE / nAURC per deformation class |
+| E0 | Baselines on the HCP synthetic bench: inverse-consistency error (free), Tian 2026 re-implemented (N = 50, their four perturbation types), IO delta, our `UNet3D` error regressor | table of r / ρ / AUSE / nAURC per deformation class |
 | E1 | Probe: σ head only, trained on real HCP inter-subject pairs with the §3.3 objective; β sweep; collapse monitoring | σ maps; calibration fitted on synthetic Val; E0 table extended |
 | E2 | LP-FT from E1 | same table + Dice / TRE of μ (must not drop) |
 | E3 | Full FT from the checkpoint | same, for the LP vs LP-FT vs FT comparison |
@@ -360,8 +364,8 @@ Add L2R AbdomenCTCT and IXI in E4. Request DIR-Lab access now, because it takes 
 
 | Open point (source) | How this work answers it |
 | --- | --- |
-| Tian 2025 v1: framework "naturally extends to probabilistic registration models"; v2 limitation: "does not disentangle different sources of uncertainty"; dropped v1 limitation: blind to transformation-equivariant errors | a learned probabilistic output on the same model, compared on their protocol, in one pass |
-| Tian 2025: r = 0.43 vs nonlinear ground truth on uniGradICON; the map is pure bias jitter for a deterministic net | σ is trained on residual evidence, not jitter; tested on nonlinear ground truth at scale |
+| Tian 2026 v1: framework "naturally extends to probabilistic registration models"; v2 limitation: "does not disentangle different sources of uncertainty"; dropped v1 limitation: blind to transformation-equivariant errors | a learned probabilistic output on the same model, compared on their protocol, in one pass |
+| Tian 2026: r = 0.43 vs nonlinear ground truth on uniGradICON; the map is pure bias jitter for a deterministic net | σ is trained on residual evidence, not jitter; tested on nonlinear ground truth at scale |
 | Hu et al. ICLR 2025: "extend the framework to pairwise registration of any two input images" | pairwise, any anatomy, foundation model, label-free |
 | Dalca 2019: "Analysis of uncertainty is beyond the scope of this paper"; PULPo 2024: σ collapse | quantitative uncertainty analysis with collapse diagnostics and calibration |
 | Luo 2020: are uncertainty and error monotonically associated? | tested per deformation class and region with known `u_gt` (1113 subjects) |
@@ -370,7 +374,7 @@ Add L2R AbdomenCTCT and IXI in E4. Request DIR-Lab access now, because it takes 
 | uniGradICON paper: no uncertainty; IO increases folding | σ-guided IO |
 | LUMirage 2025: silent zero-shot failure under contrast / resolution shift | image-level σ as a failure flag |
 
-Nobody else has published this as of 2026-09-26. The nearest risk is the Tian group itself (Tian is also uniGradICON's first author).
+Nobody else has published a *trained* foundation-model uncertainty head as of **2026-11-12**. The nearest risk is the Tian group itself (Tian is also uniGradICON's first author); their NeurIPS 2026 paper is still training-free and is the baseline we compare against, not a scoop of the probe / LP-FT design.
 
 ---
 
@@ -378,7 +382,7 @@ Nobody else has published this as of 2026-09-26. The nearest risk is the Tian gr
 
 1. Is the claim **transformation variance calibrated against error**, or **expected error**? This decides whether the error-prediction head is the baseline or a co-primary.
 2. Is a synthetic-only calibration step acceptable, given that `u_gt` is never used at inference?
-3. Should the Tian 2025 baseline be re-implemented now (no code released), or should we wait for their code?
+3. Should the Tian 2026 (NeurIPS) baseline be re-implemented now (code still unreleased as of 2026-11-12), or wait for their promised release?
 4. Compute budget on Nautilus for LP-FT and full FT (batch 1 on 40–80 GB GPUs, 4 UNets × 2 directions).
 5. Dataset access to request now: DIR-Lab COPDgene (form), and whether OAI via NDA is worth the paperwork.
 6. Target venue and timing, which decides how far down the E0–E5 ladder the first paper goes.
@@ -386,7 +390,7 @@ Nobody else has published this as of 2026-09-26. The nearest risk is the Tian gr
 
 ---
 
-## References (opened 2026-09-26, except Gal & Ghahramani 2016, added from its well-known arXiv id)
+## References (opened 2026-09-26; status rows refreshed 2026-11-12)
 
 | Short name | Citation | Link |
 | --- | --- | --- |
@@ -394,7 +398,8 @@ Nobody else has published this as of 2026-09-26. The nearest risk is the Tian gr
 | GradICON | Tian et al., CVPR 2023 | [arXiv 2206.05897](https://arxiv.org/abs/2206.05897) |
 | ICON | Greer et al., ICCV 2021 | [arXiv 2105.04459](https://arxiv.org/abs/2105.04459) |
 | multiGradICON | Demir et al., WBIR 2024 | [arXiv 2408.00221](https://arxiv.org/abs/2408.00221) |
-| Tian 2025 | Tian, Hu, Iglesias, under review (ICLR 2026 submission) | [arXiv 2509.23355](https://arxiv.org/abs/2509.23355), [OpenReview](https://openreview.net/forum?id=4dARndGskg) |
+| CARL | Greer et al., CVPR 2025 | [arXiv 2405.16738](https://arxiv.org/abs/2405.16738) |
+| Tian 2026 | Tian, Hu, Iglesias, NeurIPS 2026 | [arXiv 2509.23355](https://arxiv.org/abs/2509.23355), [NeurIPS poster](https://neurips.cc/virtual/2026/poster/148713) |
 | Hu 2025 | Hu et al., ICLR 2025 | [arXiv 2410.09299](https://arxiv.org/abs/2410.09299) |
 | Chaudhary 2024 | Chaudhary et al., arXiv 2024 | [arXiv 2411.07567](https://arxiv.org/abs/2411.07567) |
 | SAM-uniGradICON | Hu, Yu et al., IJCNN 2025 | [arXiv 2505.06527](https://arxiv.org/abs/2505.06527) |
@@ -403,7 +408,7 @@ Nobody else has published this as of 2026-09-26. The nearest risk is the Tian gr
 | Eppenhof 2018 | Eppenhof & Pluim, J. Med. Imaging 5(2) | [DOI 10.1117/1.JMI.5.2.024003](https://doi.org/10.1117/1.JMI.5.2.024003) |
 | Sokooti 2019 | Sokooti et al., MedIA 2019 | [arXiv 1905.07624](https://arxiv.org/abs/1905.07624) |
 | Sokooti 2021 | Sokooti, Yousefi et al., IEEE Access 9 | [IEEE 9408621](https://ieeexplore.ieee.org/document/9408621/) |
-| Bierbrier 2022 | Bierbrier, Gueziri, Collins, MedIA 81:102531 | DOI 10.1016/j.media.2022.102531 (inferred) |
+| Bierbrier 2022 | Bierbrier, Gueziri, Collins, MedIA 81:102531 | [DOI 10.1016/j.media.2022.102531](https://doi.org/10.1016/j.media.2022.102531) |
 | RegQCNET | de Senneville, Manjón, Coupé, PMB 2020 | [arXiv 2005.06835](https://arxiv.org/abs/2005.06835) |
 | FocalErrorNet | Salari et al., MICCAI 2023 | [arXiv 2307.14520](https://arxiv.org/abs/2307.14520) |
 | Salari 2023 | Salari et al., IEEE IUS 2023 | [arXiv 2308.10784](https://arxiv.org/abs/2308.10784) |
@@ -425,7 +430,11 @@ Nobody else has published this as of 2026-09-26. The nearest risk is the Tian gr
 | Evidential | Amini et al., NeurIPS 2020 | [arXiv 1910.02600](https://arxiv.org/abs/1910.02600) |
 | DeVries 2018 | DeVries & Taylor, arXiv 2018 | [arXiv 1802.04865](https://arxiv.org/abs/1802.04865) |
 | Learning loss | Yoo & Kweon, CVPR 2019 | [arXiv 1905.03677](https://arxiv.org/abs/1905.03677) |
+| Structured SIR | 2026 | [arXiv 2603.17415](https://arxiv.org/abs/2603.17415) |
 | BINDER | Cerri et al., arXiv 2026 | [arXiv 2609.19875](https://arxiv.org/abs/2609.19875) |
+| Dose-propagation DIR UQ | 2026 | [arXiv 2606.09253](https://arxiv.org/abs/2606.09253) |
+| VCoR-Reg | 2026 | [arXiv 2602.00211](https://arxiv.org/abs/2602.00211) |
+| Chen survey 2025 | Chen et al., MedIA 100:103385 | [arXiv 2307.15615](https://arxiv.org/abs/2307.15615) |
 | Luo 2019 | Luo et al., MICCAI 2019 | [arXiv 1803.05266](https://arxiv.org/abs/1803.05266) |
 | Luo 2020 | Luo et al., MICCAI 2020 | [arXiv 1908.07709](https://arxiv.org/abs/1908.07709) |
 | RUGI | González et al., arXiv 2026 | [arXiv 2609.28081](https://arxiv.org/abs/2609.28081) |

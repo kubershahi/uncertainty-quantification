@@ -1,8 +1,8 @@
 # uniGradICON: how it was pretrained
 
-Everything needed to continue pretraining, fine-tune, or extend uniGradICON, with the source of each fact. Sources: the paper `reports/uniGradICON.pdf` (arXiv 2403.05780v1, 9 Mar 2024) cited as `paper p<N>`; the code at [uncbiag/uniGradICON](https://github.com/uncbiag/uniGradICON) commit `3e83a92` cited as `train.py:<line>`, `dataset.py:<line>`, `__init__.py:<line>` (`src/unigradicon/__init__.py`); and the `icon_registration` 1.1.7 package cited as `IR/<file>:<line>`. Numbers marked **measured** were reproduced by building the network on CPU.
+Everything needed to continue pretraining, fine-tune, or extend uniGradICON, with the source of each fact. Sources: the paper `reports/uniGradICON.pdf` (arXiv 2403.05780**v1**, 9 Mar 2024; still the only arXiv version as of 2026-11-12) cited as `paper p<N>`; the code at [uncbiag/uniGradICON](https://github.com/uncbiag/uniGradICON) tag **`v1.0.6`** / commit `7678ceb` (PyPI 1.0.6, 15 Oct 2026) cited as `train.py:<line>`, `dataset.py:<line>`, `__init__.py:<line>` (`src/unigradicon/__init__.py`), `finetuning/…`; and `icon_registration` **≥ 1.1.9** (PyPI 1.1.9, 14 Oct 2026) cited as `IR/<file>:<line>`. The laptop conda env `biag` may still pin older wheels (`unigradicon` editable metadata 1.0.4 + `icon_registration` 1.1.7) — upgrade before relying on IO restore or the finetune CLI. Numbers marked **measured** were reproduced by building the network on CPU.
 
-Companion document: [`RECON.md`](RECON.md) (uncertainty-head literature and design).
+Companion document: [`RECON.md`](RECON.md) (uncertainty-head literature and design). Status refresh: **2026-11-12**.
 
 ---
 
@@ -12,13 +12,13 @@ Companion document: [`RECON.md`](RECON.md) (uncertainty-head literature and desi
 | --- | --- | --- |
 | Paper | Tian, Greer, Kwitt, Vialard, San José Estépar, Bouix, Rushmore, Niethammer. *uniGradICON: A Foundation Model for Medical Image Registration*. MICCAI 2024 | paper p1 |
 | Version read | arXiv 2403.05780v1; says "twelve datasets", the table has thirteen rows | paper p1, p12 |
-| Code | `unigradicon` 1.0.4 (tags up to 1.0.5), on top of `icon_registration` ≥ 1.1.6 | `setup.cfg`, `requirements.txt` |
+| Code | `unigradicon` **1.0.6** (PyPI 15 Oct 2026), requires `icon_registration` **≥ 1.1.9** | `setup.cfg`, [PyPI](https://pypi.org/project/unigradicon/) |
 | Built on | GradICON (Tian et al., CVPR 2023, [arXiv 2206.05897](https://arxiv.org/abs/2206.05897)); ICON (Greer et al., ICCV 2021, [arXiv 2105.04459](https://arxiv.org/abs/2105.04459)) | paper p3 |
-| Weights | `https://github.com/uncbiag/uniGradICON/releases/download/unigradicon_weights/Step_2_final.trch` | `__init__.py:263–279` |
-| Weights cache | `network_weights/unigradicon1.0/Step_2_final.trch`, **relative to the current working directory**; override with `weights_location=` | `__init__.py:266–273` |
-| Sibling models | multiGradICON (`multigradicon_weights` release); uniCARL preview (`v1.0.4` release, 160³) | `__init__.py:244–261`, `unicarl.py:17,31` |
-| CLI | `unigradicon-register`, `unigradicon-warp`, `unigradicon-jacobian`, `unicarl-register` | `setup.cfg:30–34` |
-| Local install | editable in conda env `biag` from `~/Documents/GitHub/uniGradICON` | — |
+| Weights | `https://github.com/uncbiag/uniGradICON/releases/download/unigradicon_weights/Step_2_final.trch` (unchanged; no new foundation weights in 1.0.6) | `__init__.py` `get_unigradicon` |
+| Weights cache | `network_weights/unigradicon1.0/Step_2_final.trch`, **relative to the current working directory**; override with `weights_location=` or CLI `--network_weights` | `__init__.py` |
+| Sibling models | multiGradICON (`multigradicon_weights` release); **CARL** (Greer et al., CVPR 2025, [arXiv 2405.16738](https://arxiv.org/abs/2405.16738)) with a uniCARL preview (`unicarl-preview` release, 160³) | `unicarl.py`; CARL paper |
+| CLI | `unigradicon-register`, `unigradicon-warp`, `unigradicon-jacobian`, **`unigradicon-finetune`**, `unicarl-register` | `setup.cfg` console_scripts |
+| Local install | editable in conda env `biag` from `~/Documents/GitHub/uniGradICON` (HEAD `7678ceb` / `v1.0.6`); pair with `pip install -U 'icon-registration>=1.1.9'` | — |
 
 ## 2. Pretraining corpus
 
@@ -155,14 +155,28 @@ The paper reports **no** GPU type, count, batch size or wall-clock time. What th
 
 | Item | Value | Source |
 | --- | --- | --- |
-| Function | `finetune_execute(model, A, B, steps)`; `finetune_execute_mask(…)` with masks | `IR/itk_wrapper.py:12–39` |
-| Optimiser | Adam, lr 2e-5, over **all** `model.parameters()` | `IR/itk_wrapper.py:14` |
-| Loss | the full GradICON loss (`loss_tuple[0]`) | `IR/itk_wrapper.py:18–19` |
-| Steps | 50 by default (`--io_iterations`, `"None"` disables) | `__init__.py:349` |
-| Mode | model stays in `eval()`, so BatchNorm uses running statistics | `__init__.py:260, 278` |
-| **Caveat** | `finetune_execute` does **not** restore the weights afterwards (the `load_state_dict` line is commented out, `IR/itk_wrapper.py:23`); only the mask variant restores. Registering a second pair with the same model object continues from the first pair's IO weights. Reload or deep-copy between pairs. | measured |
+| Function (1.1.9) | `finetune_execute(model, A, B, steps, learning_rate, **model_kwargs)` | `IR/itk_wrapper.py` on tag `1.1.9` |
+| Optimiser | Adam, default lr **2e-5** (`DEFAULT_FINETUNE_LEARNING_RATE`); CLI exposes `--io_lr` | `IR/itk_wrapper.py`; `__init__.py` register CLI |
+| Loss | the full GradICON loss (`loss_tuple[0]`); optional Dice / mask kwargs when the network was built with them | `IR/itk_wrapper.py`; `__init__.py` `GradientICONSparse` |
+| Steps | 50 by default (`--io_iterations`, `"None"` disables) | `__init__.py` |
+| Mode | model stays in `eval()`, so BatchNorm uses running statistics | `__init__.py` |
+| **Weight restore (1.1.9)** | `finetune_execute` **does restore** `model.load_state_dict(state_dict)` after the loop. This fixes the 1.1.7 bug where that line was commented out and only the mask variant restored. **`biag` still has 1.1.7 until upgraded** — deep-copy or reload between pairs on the old wheel. | measured against PyPI 1.1.9 source |
 
-This repo runs its own IO loop in [`create_unigrad_io_data.py:169–190`](../experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py#L169-L190).
+This repo runs its own IO loop in [`create_unigrad_io_data.py:169–190`](../experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py#L169-L190) (independent of `itk_wrapper`, so the restore fix does not change that script).
+
+### Official finetuning module (new in 1.0.6)
+
+Released Oct 2026 (`src/unigradicon/finetuning/`, CLI `unigradicon-finetune --config path.yaml`). Config-driven multi-dataset fine-tuning of the released weights (not from-scratch pretraining).
+
+| Item | Default / notes | Source |
+| --- | --- | --- |
+| Entry point | `unigradicon-finetune --config …` | `setup.cfg` |
+| Epochs / lr / batch | 100 / **5e-5** (pretraining lr) / 4 (example configs often use batch 2) | `finetuning/README.md` |
+| Loss | `λ · GradICON + similarity + dice_loss_weight · Dice` (`dice_loss_weight` default 0) | same |
+| Data | JSON lists; types `paired` / `unpaired` (+ optional `segmentation`, `mask`); Learn2Reg example YAMLs under `configs/learn2reg/` | `finetuning/dataset.py`, `configs/` |
+| Input shape | keep `[175,175,175]` to stay CLI-compatible | `finetuning/README.md` |
+| Checkpoints | `network_weights_final.trch` (+ optimiser); load at inference with `--network_weights` | README / register CLI |
+| Relation to our plan | trains **μ** (the registration field). An uncertainty head still wants to live **outside** `regis_net` ([`RECON.md`](RECON.md) §3–4); this module is the upstream way to domain-adapt μ before or after probing σ. | — |
 
 **IO gains reported in the paper** (zero-shot → IO):
 
@@ -213,16 +227,17 @@ Learn2Reg numbers are on the test sets, uniGradICON's on the validation sets; th
 
 **Stated limitations** (p9, p13): few in-distribution tasks; multimodal performance (suggested: modality-agnostic features, more multimodal data, LNCC² or NMI); only intensities used, no segmentations; a larger network would likely help; no universal affine network; orientation handling. **The paper never mentions uncertainty.**
 
-## 10. multiGradICON and uniCARL (pointers)
+## 10. multiGradICON and CARL / uniCARL (pointers)
 
-- **multiGradICON** (Demir et al., WBIR 2024, [arXiv 2408.00221](https://arxiv.org/abs/2408.00221); `training/train_multi.py`): corpus COPDGene, BraTS-Reg, AbdomenCTCT (plus intensity-inverted CT), HCP, ABCD FA/MD, OAI multi-sequence, L2R MR–CT, UK Biobank; `use_label=True` computes the similarity on a random other modality of the same subject; `WeightedRandomSampler` with weight `regions · C(n_mod+1, 2)`, 4,000 samples per epoch; same `[801, 201]` schedule plus 100 anatomy-balanced fine-tuning epochs (`train_multi.py:41–84, 317–354`).
-- **uniCARL**: preview model at 160³ in `unicarl.py`; not documented in the paper.
+- **multiGradICON** (Demir et al., WBIR 2024, [arXiv 2408.00221](https://arxiv.org/abs/2408.00221); `training/train_multi.py`): corpus COPDGene, BraTS-Reg, AbdomenCTCT (plus intensity-inverted CT), HCP, ABCD FA/MD, OAI multi-sequence, L2R MR–CT, UK Biobank; `use_label=True` computes the similarity on a random other modality of the same subject; `WeightedRandomSampler` with weight `regions · C(n_mod+1, 2)`, 4,000 samples per epoch; same `[801, 201]` schedule plus 100 anatomy-balanced fine-tuning epochs (`train_multi.py:41–84, 317–354`). Finetuning CLI in 1.0.6 also covers multiGradICON.
+- **CARL** (Greer et al., CVPR 2025, [arXiv 2405.16738](https://arxiv.org/abs/2405.16738)): equivariance framework (`[U,U]` vs `[W,U]`) for multi-step registration; coordinate-attention first step + GradICON-style cascade. Strong abdomen / lung / brain results; **no uncertainty head**.
+- **uniCARL**: preview weights at 160³ (`unicarl.py`, `unicarl-preview` GitHub release); not in the uniGradICON paper.
 
 ## 11. API cheat-sheet
 
 | Call | What it does |
 | --- | --- |
-| `get_unigradicon(loss_fn=icon.LNCC(sigma=5), apply_intensity_conservation_loss=False, weights_location=None)` | builds the 4-UNet network, downloads weights if missing (relative to cwd), strict-loads into `net.regis_net`, moves to `config.device`, `eval()` |
+| `get_unigradicon(loss_fn=icon.LNCC(sigma=5), apply_intensity_conservation_loss=False, weights_location=None, dice_loss_weight=0.0, loss_function_masking=False)` | builds the 4-UNet network, downloads weights if missing (relative to cwd), strict-loads into `net.regis_net`, moves to `config.device`, `eval()`. New 1.0.6 kwargs enable Dice / masked losses used by finetuning and IO. |
 | `make_network(input_shape, include_last_step, lmbda, loss_fn, …)` | same network without weights (used for training and to count parameters on CPU) |
 | `make_sim("lncc" \| "lncc2" \| "mind")` | similarity objects for IO or training |
 | `preprocess(itk_image, modality="ct" \| "mri", segmentation=None)` | intensity normalisation (§3) |
@@ -256,9 +271,9 @@ What an uncertainty-aware variant has to touch. The design choice between these 
 | Optimiser, batch size, GPUs, wall-clock and IO settings not in the paper | paper p4 |
 | No held-out validation during training; the "eval" batch comes from the training set | `train.py:286–292` |
 | Script that builds the pre-serialised training tensors is not released | `dataset.py` |
-| `finetune_execute` leaves IO weights in the model | `IR/itk_wrapper.py:23` |
-| Weights download path is relative to cwd (a new copy per working directory) | `__init__.py:266–273` |
-| No MPS support; `config.device` hard-coded in the loss | `IR/config.py:3–6`, `__init__.py:133` |
+| `finetune_execute` left IO weights in the model on **1.1.7**; **fixed in 1.1.9** (restores state dict). Upgrade the env. | `IR/itk_wrapper.py` 1.1.7 vs 1.1.9 |
+| Weights download path is relative to cwd (a new copy per working directory) | `__init__.py` `get_unigradicon` |
+| No MPS support; `config.device` hard-coded in the loss | `IR/config.py`, `__init__.py` |
 | `dataset_multi.py:185` sets `img_num = len(self.imgs)`, counting modality keys rather than cases | multiGradICON |
-| `ACDCDataset` calls `glob(` and `torch.pad`, which fail | `dataset.py:246, 265` |
-| `setup.cfg` says 1.0.4 while tag 1.0.5 exists | `setup.cfg` |
+| `ACDCDataset` calls `glob(` and `torch.pad`, which fail | `dataset.py` |
+| Editable `biag` install can report metadata 1.0.4 while the checkout is `v1.0.6` | `pip show unigradicon` vs `git describe` |

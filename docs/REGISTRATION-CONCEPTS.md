@@ -2,7 +2,7 @@
 
 Concepts for the **3D** tracks in this repository: **HCP synth** (TorchIO GT + UniGradICON
 error maps + U-Net regression) and **IXI IO** (instance optimization). For dataset specifics see
-`docs/hcp-dataset.md`, `docs/unigrad-synth-experiment.md`, and `docs/unigrad-io-experiment.md`.
+`docs/HCP-DATASET.md`, `docs/UNIGRAD-SYNTH-EXPERIMENT.md`, and `docs/UNIGRAD-IO-EXPERIMENT.md`.
 
 ---
 
@@ -141,7 +141,7 @@ fixed grid x  ──►  φ(x) = x + u(x)  ──►  sample moving  ──►  
 ## Phase I — Synthetic GT displacement (HCP)
 
 Implementation: `experiments/synth-data-gen/torchio/create_synth_data.py`. Detail:
-`docs/hcp-dataset.md`.
+`docs/HCP-DATASET.md`.
 
 ### Pipeline
 
@@ -190,7 +190,7 @@ invert displacement; then z-score images with shared μ, σ from the source brai
 ### NPZ schema (Phase I)
 
 `source`, `moving`, `u_gt` `(3, X, Y, Z)`, `source_mask`, `moving_mask`, `identity_grid_mask`,
-`source_affine`, `deformation_class`, `subject_id`. See `docs/hcp-dataset.md`.
+`source_affine`, `deformation_class`, `subject_id`. See `docs/HCP-DATASET.md`.
 
 ---
 
@@ -240,7 +240,7 @@ error_map = ‖phi_predio − phi_pred‖
 | **Error map** | How much IO improved over zero-shot (per voxel) |
 
 Only voxels inside **`valid_mask`** (atlas foreground) are used for loss and metrics. IO iteration
-count: `sweep_io_iterations.py`. See `docs/unigrad-io-experiment.md`.
+count: `sweep_io_iterations.py`. See `docs/UNIGRAD-IO-EXPERIMENT.md`.
 
 ### Intensity vs geometry (Phase II)
 
@@ -370,7 +370,7 @@ masks, `source_affine`, `deformation_class`, `subject_id`.
 | `experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py` | Phase II — IO volumes |
 | `experiments/regression/unigrad-synth/` | Phase III — HCP error-map U-Net |
 | `experiments/regression/unigrad-io/` | Phase III — IO error-map U-Net |
-| `docs/hcp-dataset.md` | HCP download, layout, synth generation |
-| `docs/unigrad-synth-experiment.md` | HCP three-phase overview |
-| `docs/unigrad-io-experiment.md` | IO track overview |
+| `docs/HCP-DATASET.md` | HCP download, layout, synth generation |
+| `docs/UNIGRAD-SYNTH-EXPERIMENT.md` | HCP three-phase overview |
+| `docs/UNIGRAD-IO-EXPERIMENT.md` | IO track overview |
 | `reports/uniGradICON.pdf` | ICON / IO equations |

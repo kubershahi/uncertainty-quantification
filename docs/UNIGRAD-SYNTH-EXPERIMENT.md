@@ -1,8 +1,8 @@
 # UniGrad Synth experiment — HCP pipeline overview
 
 End-to-end plan for synthetic data and error-map generation, and error-map U-Net training
-on HCP anatomy. For registration vocabulary see `docs/registration-concepts.md`. For HCP download,
-layout, and Phase I script detail see `docs/hcp-dataset.md`.
+on HCP anatomy. For registration vocabulary see `docs/REGISTRATION-CONCEPTS.md`. For HCP download,
+layout, and Phase I script detail see `docs/HCP-DATASET.md`.
 
 ---
 
@@ -42,7 +42,7 @@ backward field; SimpleITK field inversion stores ground-truth **`u_gt`** in voxe
 and balanced class mix.
 
 For NPZ schema, ‖u_gt‖ cleanup, split policy, visualization modes (`per_class`, `random`,
-`min_median_max`), and commands, see **`docs/hcp-dataset.md` § HCP synthetic data generation**.
+`min_median_max`), and commands, see **`docs/HCP-DATASET.md` § HCP synthetic data generation**.
 
 ---
 
@@ -89,7 +89,7 @@ image appearance and predicted deformation, without re-running UniGradICON at in
 **Status:** implemented (`train_unigrad_synth_unet.py`, `eval_unigrad_synth_unet.py`). Example run `error_unet_run1` used
 `base_channels=16`, val starting at epoch 3 then every 3 epochs (80-epoch budget, early stop). Eval writes orthogonal QC
 (`test_random_orthogonal/`, `test_mmm_orthogonal/`) then `test_metrics.json`; use `--mode figures|metrics|both`.
-See `docs/registration-concepts.md` § Phase III for CNN / U-Net background.
+See `docs/REGISTRATION-CONCEPTS.md` § Phase III for CNN / U-Net background.
 
 ---
 
@@ -97,7 +97,7 @@ See `docs/registration-concepts.md` § Phase III for CNN / U-Net background.
 
 Masked z-score on `source` and `moving` does **not** change stored `u_gt` or predicted `u_pred` in
 voxel index space — intensities are rescaled; geometry is not. See
-`docs/registration-concepts.md` for φ vs `u`.
+`docs/REGISTRATION-CONCEPTS.md` for φ vs `u`.
 
 ---
 
@@ -112,5 +112,5 @@ voxel index space — intensities are rescaled; geometry is not. See
 | `experiments/error-map-gen/unigrad-synth/visualize_unigrad_data.py` | Phase 2 — QC |
 | `experiments/regression/unigrad-synth/train_unigrad_synth_unet.py` | Phase 3 — U-Net train |
 | `experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py` | Phase 3 — eval |
-| `docs/hcp-dataset.md` | HCP download, layout, Phase 1 detail |
-| `docs/registration-concepts.md` | Registration / U-Net concepts |
+| `docs/HCP-DATASET.md` | HCP download, layout, Phase 1 detail |
+| `docs/REGISTRATION-CONCEPTS.md` | Registration / U-Net concepts |

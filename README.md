@@ -63,7 +63,7 @@ python experiments/regression/unigrad-synth/train_unigrad_synth_unet.py --data-d
 python experiments/regression/unigrad-synth/eval_unigrad_synth_unet.py --run-path assets/runs/regression/unigrad-synth/hcp/error_unet_run1 --eval-dir datasets/error-map/unigrad-synth/hcp --mode both --no-show
 ```
 
-Data download and Phase I–II commands: [`docs/hcp-dataset.md`](docs/hcp-dataset.md), [`docs/unigrad-synth-experiment.md`](docs/unigrad-synth-experiment.md).
+Data download and Phase I–II commands: [`docs/HCP-DATASET.md`](docs/HCP-DATASET.md), [`docs/UNIGRAD-SYNTH-EXPERIMENT.md`](docs/UNIGRAD-SYNTH-EXPERIMENT.md).
 
 ---
 
@@ -77,7 +77,7 @@ Shared three-stage pattern for both experiments:
 | **II — Foundation registration** | Run UniGradICON; form a **dense error map** vs the reference | NPZ with `u_pred` / `phi_pred` + error magnitude |
 | **III — Error-map regression** | Train a 3D U-Net to predict the error map from **observable** inputs (images + predicted field) | `best_model.pt`, `metrics.csv`, QC figures, `test_metrics.json` |
 
-Displacement convention (HCP synth): `moving(x + u(x)) ≈ source(x)` on the source/fixed lattice. Vocabulary: [`docs/registration-concepts.md`](docs/registration-concepts.md).
+Displacement convention (HCP synth): `moving(x + u(x)) ≈ source(x)` on the source/fixed lattice. Vocabulary: [`docs/REGISTRATION-CONCEPTS.md`](docs/REGISTRATION-CONCEPTS.md).
 
 ---
 
@@ -85,7 +85,7 @@ Displacement convention (HCP synth): `moving(x + u(x)) ≈ source(x)` on the sou
 
 ### Human Connectome Project (HCP) — primary
 
-**HCP Young Adult (S1200)** minimally preprocessed T1w in **native** subject space (~0.7 mm isotropic). Used to build synthetic registration pairs with known `u_gt`. Full download layout, splits, and Phase I schema: **[`docs/hcp-dataset.md`](docs/hcp-dataset.md)**.
+**HCP Young Adult (S1200)** minimally preprocessed T1w in **native** subject space (~0.7 mm isotropic). Used to build synthetic registration pairs with known `u_gt`. Full download layout, splits, and Phase I schema: **[`docs/HCP-DATASET.md`](docs/HCP-DATASET.md)**.
 
 | Artifact | Path |
 | --- | --- |
@@ -95,7 +95,7 @@ Displacement convention (HCP synth): `moving(x + u(x)) ≈ source(x)` on the sou
 
 ### IXI — secondary (IO track)
 
-**IXI** 3D volumes (TransMorph-style preprocessing) for atlas–subject registration with UniGradICON **instance optimization**. Error maps measure how much IO changes the zero-shot field. Details: **[`docs/unigrad-io-experiment.md`](docs/unigrad-io-experiment.md)**.
+**IXI** 3D volumes (TransMorph-style preprocessing) for atlas–subject registration with UniGradICON **instance optimization**. Error maps measure how much IO changes the zero-shot field. Details: **[`docs/UNIGRAD-IO-EXPERIMENT.md`](docs/UNIGRAD-IO-EXPERIMENT.md)**.
 
 | Artifact | Path |
 | --- | --- |
@@ -142,7 +142,7 @@ Displacement convention (HCP synth): `moving(x + u(x)) ≈ source(x)` on the sou
 
 QC: `training_curves.png`, `test_random_orthogonal/`, `test_mmm_orthogonal/`, `test_metrics.json`.
 
-Full pipeline, commands, and interpretation: **[`docs/unigrad-synth-experiment.md`](docs/unigrad-synth-experiment.md)**.
+Full pipeline, commands, and interpretation: **[`docs/UNIGRAD-SYNTH-EXPERIMENT.md`](docs/UNIGRAD-SYNTH-EXPERIMENT.md)**.
 
 ---
 
@@ -168,7 +168,7 @@ Full pipeline, commands, and interpretation: **[`docs/unigrad-synth-experiment.m
 | --- | ---: | ---: | ---: |
 | Test | 115 | 0.563 | 0.479 |
 
-Run comparison (MSE vs L1, TV ablations) and next steps: **[`docs/unigrad-io-experiment.md`](docs/unigrad-io-experiment.md)**.
+Run comparison (MSE vs L1, TV ablations) and next steps: **[`docs/UNIGRAD-IO-EXPERIMENT.md`](docs/UNIGRAD-IO-EXPERIMENT.md)**.
 
 ---
 
@@ -176,10 +176,10 @@ Run comparison (MSE vs L1, TV ablations) and next steps: **[`docs/unigrad-io-exp
 
 | Artifact | Location |
 | --- | --- |
-| **Concepts (φ vs u, U-Net, phases)** | [`docs/registration-concepts.md`](docs/registration-concepts.md) |
-| **HCP data + Phase I synth** | [`docs/hcp-dataset.md`](docs/hcp-dataset.md) |
-| **Primary: UniGrad synth (HCP)** | [`docs/unigrad-synth-experiment.md`](docs/unigrad-synth-experiment.md) |
-| **Secondary: UniGrad IO (IXI)** | [`docs/unigrad-io-experiment.md`](docs/unigrad-io-experiment.md) |
+| **Concepts (φ vs u, U-Net, phases)** | [`docs/REGISTRATION-CONCEPTS.md`](docs/REGISTRATION-CONCEPTS.md) |
+| **HCP data + Phase I synth** | [`docs/HCP-DATASET.md`](docs/HCP-DATASET.md) |
+| **Primary: UniGrad synth (HCP)** | [`docs/UNIGRAD-SYNTH-EXPERIMENT.md`](docs/UNIGRAD-SYNTH-EXPERIMENT.md) |
+| **Secondary: UniGrad IO (IXI)** | [`docs/UNIGRAD-IO-EXPERIMENT.md`](docs/UNIGRAD-IO-EXPERIMENT.md) |
 | **Example HCP U-Net run** | [`assets/runs/regression/unigrad-synth/hcp/error_unet_run1/`](assets/runs/regression/unigrad-synth/hcp/error_unet_run1/) |
 | **Example IXI IO U-Net run** | [`assets/runs/regression/unigrad-io/error_unet_run4/`](assets/runs/regression/unigrad-io/error_unet_run4/) |
 
@@ -189,7 +189,7 @@ Run comparison (MSE vs L1, TV ablations) and next steps: **[`docs/unigrad-io-exp
 
 - Displacement / error units for both 3D tracks are **voxels** (index space).
 - Prefer `argparse --help` and the linked docs over stale one-off scripts.
-- Cluster / PVC setup: `deploy/nautilus/`; GPU tips: [`docs/gpu-memory-optimizations.md`](docs/gpu-memory-optimizations.md).
+- Cluster / PVC setup: `deploy/nautilus/`; GPU tips: [`docs/GPU-MEMORY-OPTIMIZATIONS.md`](docs/GPU-MEMORY-OPTIMIZATIONS.md).
 
 ---
 

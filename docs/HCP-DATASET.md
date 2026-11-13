@@ -1,7 +1,7 @@
 # HCP Dataset Details
 
 Notes for **Human Connectome Project (HCP) Young Adult (S1200)** structural T1w data used in this
-repo. See `docs/registration-concepts.md` for registration vocabulary.
+repo. See `docs/REGISTRATION-CONCEPTS.md` for registration vocabulary.
 
 ---
 
@@ -346,7 +346,7 @@ python experiments/synth-data-gen/torchio/visualize_synth_data.py --data-dir dat
 ## Planned downstream
 
 Error-map generation (UniGradICON) and error-map U-Net training build on this synth cohort. See
-`docs/unigrad-synth-experiment.md` and `docs/registration-concepts.md`.
+`docs/UNIGRAD-SYNTH-EXPERIMENT.md` and `docs/REGISTRATION-CONCEPTS.md`.
 
 ---
 
@@ -359,4 +359,4 @@ Error-map generation (UniGradICON) and error-map U-Net training build on this sy
 | `experiments/synth-data-gen/torchio/create_synth_data.py` | HCP synth NPZ generation |
 | `experiments/synth-data-gen/torchio/visualize_synth_data.py` | NPZ QC figures |
 | `experiments/synth-data-gen/torchio/visualize_hcp_data.py` | Raw HCP T1/mask QC figure |
-| `docs/registration-concepts.md` | Registration / displacement / error-map concepts |
+| `docs/REGISTRATION-CONCEPTS.md` | Registration / displacement / error-map concepts |
