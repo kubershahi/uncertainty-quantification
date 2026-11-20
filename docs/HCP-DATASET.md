@@ -1,5 +1,21 @@
 # HCP Dataset Details
 
+## Contents
+
+- [Role in this project](#role-in-this-project)
+- [Access and download](#access-and-download)
+- [HCP release layout (what we skip)](#hcp-release-layout-what-we-skip)
+  - [Minimal preprocessing in T1w/ (HCP pipeline)](#minimal-preprocessing-in-t1w-hcp-pipeline)
+- [What we store locally](#what-we-store-locally)
+- [Volume geometry](#volume-geometry)
+- [Full cohort split counts (seed 42)](#full-cohort-split-counts-seed-42)
+- [Raw HCP QC visualization](#raw-hcp-qc-visualization)
+- [HCP synthetic data generation](#hcp-synthetic-data-generation)
+  - [createsynthdata.py — generation logic](#createsynthdatapy-generation-logic)
+  - [visualizesynthdata.py — QC figures](#visualizesynthdatapy-qc-figures)
+- [Planned downstream](#planned-downstream)
+- [Related files](#related-files)
+
 Notes for **Human Connectome Project (HCP) Young Adult (S1200)** structural T1w data used in this
 repo. See `docs/REGISTRATION-CONCEPTS.md` for registration vocabulary.
 

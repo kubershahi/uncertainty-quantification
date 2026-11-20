@@ -1,5 +1,26 @@
 # UniGrad IO experiment — data, error-map U-Net, and runs
 
+## Contents
+
+- [Pipeline](#pipeline)
+- [Training (trainunigradiounet.py)](#training-trainunigradiounetpy)
+  - [Loss and metrics](#loss-and-metrics)
+  - [metrics.csv columns (current format)](#metricscsv-columns-current-format)
+  - [Example commands](#example-commands)
+- [Evaluation (evalunigradiounet.py)](#evaluation-evalunigradiounetpy)
+- [Model architecture (runs 1–4, unchanged)](#model-architecture-runs-14-unchanged)
+- [Error-map U-Net runs (1–4)](#error-map-u-net-runs-14)
+  - [Comparison](#comparison)
+  - [run1 — errorunetrun1](#run1-errorunetrun1)
+  - [run2 — errorunetrun2](#run2-errorunetrun2)
+  - [run3 — errorunetrun3](#run3-errorunetrun3)
+  - [Shared QC / metric interpretation](#shared-qc-metric-interpretation)
+  - [run4 — errorunetrun4 (L1 + early stop)](#run4-errorunetrun4-l1-early-stop)
+- [Plan: run4b (optional — stabler val)](#plan-run4b-optional-stabler-val)
+- [Plan: run5 (architecture — not implemented)](#plan-run5-architecture-not-implemented)
+- [IO iteration sweep (upstream)](#io-iteration-sweep-upstream)
+- [Related files](#related-files)
+
 End-to-end notes for **3D UniGrad ICON instance optimization (IO)** on IXI, building
 `error_map` training data, and training a **3D U-Net** to predict per-voxel IO error
 magnitude. IO iteration sweeps are documented briefly at the end.

@@ -1,5 +1,17 @@
 # CLAUDE.md
 
+## Contents
+
+- [What this is](#what-this-is)
+- [Status (2026-09-27)](#status-2026-09-27)
+- [How to work](#how-to-work)
+- [Delegation](#delegation)
+- [Model routing (pass model on every agent call)](#model-routing-pass-model-on-every-agent-call)
+- [Conventions (code and file style)](#conventions-code-and-file-style)
+- [Environments](#environments)
+- [Verified facts and known stale spots](#verified-facts-and-known-stale-spots)
+- [Layout](#layout)
+
 Guidance for Claude Code in this repo.
 
 ## What this is
@@ -56,7 +68,7 @@ Both tracks share one three-phase pattern: **I** dense reference displacement �
 - **Units and conventions.** Displacements and error maps are in **voxels** (index space). HCP convention: `moving(x + u(x)) ≈ source(x)` on the source/fixed lattice. Vocabulary (φ vs u): `docs/REGISTRATION-CONCEPTS.md`. Loss and metrics are always masked (`source_mask` for HCP, atlas `valid_mask` for IXI). Put units on colorbar labels, not repeated in plot titles.
 - **Python.** Black / isort / ruff at line length 100, py39 target, 4-space indent, LF. Each script starts with `#!/usr/bin/env python3`, then a module docstring: purpose, NPZ input/output key schema, model I/O, then `Example:` lines. **Example commands are single-line and copy-pasteable** (no `\` continuations), run from the repo root, with values matching the file's argparse defaults. Also: `from __future__ import annotations`, PEP 604 type hints on signatures, `pathlib.Path`, f-strings, module-level `DEFAULT_*` constants, `parse_args()` + `main(argv)`, `argparse.BooleanOptionalAction` for on-by-default switches, no bare `except`, `set_seed()` covering `random/numpy/torch/cuda`. AMP uses `torch.amp.autocast("cuda")` / `torch.amp.GradScaler("cuda")`. Reuse the 3D IO helpers in `create_unigrad_io_data.py`; keep sweep-only plotting in `sweep_io_iterations.py`.
 - **Shell / Kubernetes.** Start scripts with `set -euo pipefail`. The header gives a one-line purpose and an example invocation. Use `# shellcheck source=/dev/null` before a `source`. Knobs are UPPERCASE environment variables (`FORCE=1`, `SUBJECT_LIST_FILE`, `PARALLEL_JOBS`). `.sh` files and `deploy/nautilus/**/*.yaml` must stay LF (`.gitattributes`). Never commit kubeconfig or credentials. Local overrides go in `deploy/nautilus/local/` (gitignored).
-- **Documents.** Use tables over prose for numbers. Every command block runs from the repo root. Report masked metrics with n volumes and split. No personal names in tracked docs other than this file.
+- **Documents.** Use tables over prose for numbers. Every command block runs from the repo root. Report masked metrics with n volumes and split. No personal names in tracked docs other than this file. **Any Markdown file with `##` sections must open with a `## Contents` table of contents** (right under the `#` title): nested links for every `##` and `###`, GitHub-style anchors (`#slug`), subsections indented two spaces. Refresh the Contents list whenever headings are added, removed, or renamed; do not list `## Contents` itself.
 
 ## Environments
 

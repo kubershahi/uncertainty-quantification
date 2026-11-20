@@ -1,5 +1,14 @@
 # UniGrad Synth experiment — HCP pipeline overview
 
+## Contents
+
+- [Three phases](#three-phases)
+- [Phase 1 — Synthetic data generation](#phase-1-synthetic-data-generation)
+- [Phase 2 — Error-map generation (medical image registration model)](#phase-2-error-map-generation-medical-image-registration-model)
+- [Phase 3 — Error-map U-Net training on HCP synth](#phase-3-error-map-u-net-training-on-hcp-synth)
+- [Intensity normalization and displacement (cross-phase note)](#intensity-normalization-and-displacement-cross-phase-note)
+- [Related files](#related-files)
+
 End-to-end plan for synthetic data and error-map generation, and error-map U-Net training
 on HCP anatomy. For registration vocabulary see `docs/REGISTRATION-CONCEPTS.md`. For HCP download,
 layout, and Phase I script detail see `docs/HCP-DATASET.md`.

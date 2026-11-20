@@ -1,5 +1,18 @@
 # Visualization Registration Script Guide
 
+## Contents
+
+- [Command-Line Options Reference](#command-line-options-reference)
+  - [Input File Arguments](#input-file-arguments)
+  - [Visualization Mode Flags](#visualization-mode-flags)
+  - [Optional Arguments](#optional-arguments)
+- [Visualization Modes](#visualization-modes)
+  - [1. --compare — Before/After Comparison](#1-compare-beforeafter-comparison)
+  - [2. --compare-all — Complete Registration Visualization](#2-compare-all-complete-registration-visualization)
+  - [3. --overlay — Image Overlay Comparison](#3-overlay-image-overlay-comparison)
+  - [4. --deformation-magnitude — Deformation Field Magnitude](#4-deformation-magnitude-deformation-field-magnitude)
+  - [5. --deformation-vectors — Deformation Vector Field](#5-deformation-vectors-deformation-vector-field)
+
 Complete reference for all visualization options in `visualize_registration.py` with exhaustive usage examples.
 
 ## Command-Line Options Reference

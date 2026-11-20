@@ -1,5 +1,30 @@
 # Registration concepts — project vocabulary and pipelines
 
+## Contents
+
+- [Project goal (one paragraph)](#project-goal-one-paragraph)
+- [Three data tracks in this repo](#three-data-tracks-in-this-repo)
+- [Shared vocabulary (all phases)](#shared-vocabulary-all-phases)
+  - [Coordinate spaces](#coordinate-spaces)
+  - [Displacement u vs position map φ](#displacement-u-vs-position-map-φ)
+  - [Backward (pull) warping](#backward-pull-warping)
+  - [Units and masks (3D)](#units-and-masks-3d)
+- [Phase I — Synthetic GT displacement (HCP)](#phase-i-synthetic-gt-displacement-hcp)
+  - [Pipeline](#pipeline)
+  - [Implicit transforms (TorchIO / SimpleITK)](#implicit-transforms-torchio-simpleitk)
+  - [Recovering dense ugt](#recovering-dense-ugt)
+  - [Intensity vs geometry (Phase I)](#intensity-vs-geometry-phase-i)
+  - [NPZ schema (Phase I)](#npz-schema-phase-i)
+- [Phase II — Predicted displacement and error map](#phase-ii-predicted-displacement-and-error-map)
+  - [HCP synth track](#hcp-synth-track)
+  - [IO track (IXI 3D)](#io-track-ixi-3d)
+  - [Intensity vs geometry (Phase II)](#intensity-vs-geometry-phase-ii)
+- [Phase III — Error map regression](#phase-iii-error-map-regression)
+  - [What the U-Net predicts](#what-the-u-net-predicts)
+  - [Convolutional neural networks and U-Net (3D)](#convolutional-neural-networks-and-u-net-3d)
+- [Key NPZ schemas (quick reference)](#key-npz-schemas-quick-reference)
+- [Related files](#related-files)
+
 Concepts for the **3D** tracks in this repository: **HCP synth** (TorchIO GT + UniGradICON
 error maps + U-Net regression) and **IXI IO** (instance optimization). For dataset specifics see
 `docs/HCP-DATASET.md`, `docs/UNIGRAD-SYNTH-EXPERIMENT.md`, and `docs/UNIGRAD-IO-EXPERIMENT.md`.

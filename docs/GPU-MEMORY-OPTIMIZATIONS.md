@@ -1,5 +1,19 @@
 # GPU memory optimizations for UniGradICON instance optimization
 
+## Contents
+
+- [TL;DR](#tldr)
+- [Why GPU memory mattered here](#why-gpu-memory-mattered-here)
+- [The fixes, with mechanism](#the-fixes-with-mechanism)
+  - [1) Back up weights on CPU, not on the GPU](#1-back-up-weights-on-cpu-not-on-the-gpu)
+  - [2) zerograd(settonone=True)](#2-zerogradsettononetrue)
+  - [3) Drop the optimizer + activations as soon as you're done](#3-drop-the-optimizer-activations-as-soon-as-youre-done)
+  - [4) Move the field extraction inside torch.nograd()](#4-move-the-field-extraction-inside-torchnograd)
+  - [5) PYTORCHCUDAALLOCCONF=expandablesegments:True](#5-pytorchcudaallocconfexpandablesegmentstrue)
+  - [6) Eagerly free batch-scope tensors](#6-eagerly-free-batch-scope-tensors)
+- [Things that did not turn out to matter much here](#things-that-did-not-turn-out-to-matter-much-here)
+- [Mental model](#mental-model)
+
 Notes for keeping **`experiments/error-map-gen/unigrad-io/create_unigrad_io_data.py`** IO inside VRAM on ~11 GiB GPUs without changing the UniGradICON protocol (Adam `lr=2e-5`, LNCC, 50 steps).
 
 ## TL;DR

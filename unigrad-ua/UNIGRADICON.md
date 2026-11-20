@@ -1,5 +1,22 @@
 # uniGradICON: how it was pretrained
 
+## Contents
+
+- [1. Identity](#1-identity)
+- [2. Pretraining corpus](#2-pretraining-corpus)
+- [3. Preprocessing (inference)](#3-preprocessing-inference)
+- [4. Architecture](#4-architecture)
+- [5. Objective](#5-objective)
+- [6. Training recipe](#6-training-recipe)
+- [7. Compute](#7-compute)
+- [8. Instance optimisation (IO) and fine-tuning](#8-instance-optimisation-io-and-fine-tuning)
+  - [Official finetuning module (new in 1.0.6)](#official-finetuning-module-new-in-106)
+- [9. Evaluation protocol and headline numbers](#9-evaluation-protocol-and-headline-numbers)
+- [10. multiGradICON and CARL / uniCARL (pointers)](#10-multigradicon-and-carl-unicarl-pointers)
+- [11. API cheat-sheet](#11-api-cheat-sheet)
+- [12. Extension points for a probabilistic output](#12-extension-points-for-a-probabilistic-output)
+- [13. Known gaps and bugs](#13-known-gaps-and-bugs)
+
 Everything needed to continue pretraining, fine-tune, or extend uniGradICON, with the source of each fact. Sources: the paper `reports/uniGradICON.pdf` (arXiv 2403.05780**v1**, 9 Mar 2024; still the only arXiv version as of 2026-11-12) cited as `paper p<N>`; the code at [uncbiag/uniGradICON](https://github.com/uncbiag/uniGradICON) tag **`v1.0.6`** / commit `7678ceb` (PyPI 1.0.6, 15 Oct 2026) cited as `train.py:<line>`, `dataset.py:<line>`, `__init__.py:<line>` (`src/unigradicon/__init__.py`), `finetuning/…`; and `icon_registration` **≥ 1.1.9** (PyPI 1.1.9, 14 Oct 2026) cited as `IR/<file>:<line>`. The laptop conda env `biag` may still pin older wheels (`unigradicon` editable metadata 1.0.4 + `icon_registration` 1.1.7) — upgrade before relying on IO restore or the finetune CLI. Numbers marked **measured** were reproduced by building the network on CPU.
 
 Companion document: [`RECON.md`](RECON.md) (uncertainty-head literature and design). Status refresh: **2026-11-12**.

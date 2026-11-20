@@ -1,5 +1,21 @@
 # Uncertainty Quantification for Medical Image Registration
 
+## Contents
+
+- [Repository layout](#repository-layout)
+- [Quick start](#quick-start)
+- [Pipeline overview](#pipeline-overview)
+- [Datasets](#datasets)
+  - [Human Connectome Project (HCP) — primary](#human-connectome-project-hcp-primary)
+  - [IXI — secondary (IO track)](#ixi-secondary-io-track)
+- [Foundation model: UniGradICON](#foundation-model-unigradicon)
+- [Experiments](#experiments)
+  - [1. UniGrad synthetic experiment (HCP) — primary](#1-unigrad-synthetic-experiment-hcp-primary)
+  - [2. UniGrad IO experiment (IXI) — secondary](#2-unigrad-io-experiment-ixi-secondary)
+- [Artifacts](#artifacts)
+- [Notes](#notes)
+- [License](#license)
+
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)

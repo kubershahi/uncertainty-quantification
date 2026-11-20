@@ -1,5 +1,30 @@
 # Uncertainty-aware uniGradICON: literature and design recon
 
+## Contents
+
+- [Literature review: must-read papers](#literature-review-must-read-papers)
+  - [Tier 1: read first (they define the method, the baseline and the evaluation)](#tier-1-read-first-they-define-the-method-the-baseline-and-the-evaluation)
+  - [Tier 2: read next (design alternatives, error-prediction lineage, uses)](#tier-2-read-next-design-alternatives-error-prediction-lineage-uses)
+  - [Tier 3: background (read as needed)](#tier-3-background-read-as-needed)
+- [0. What is uncertain about what](#0-what-is-uncertain-about-what)
+- [1. Has this been done?](#1-has-this-been-done)
+  - [Tian, Hu & Iglesias in detail (the paper to answer)](#tian-hu-iglesias-in-detail-the-paper-to-answer)
+- [2. Prior art closest to what this repo has done (error prediction)](#2-prior-art-closest-to-what-this-repo-has-done-error-prediction)
+- [3. Ways to make uniGradICON output (μ, σ) directly](#3-ways-to-make-unigradicon-output-μ-σ-directly)
+  - [3.1 Options](#31-options)
+  - [3.2 Output layout: 6 channels, not 9](#32-output-layout-6-channels-not-9)
+  - [3.3 Objective for the variational route](#33-objective-for-the-variational-route)
+  - [3.4 Cascade: from the last residual to the composed field](#34-cascade-from-the-last-residual-to-the-composed-field)
+  - [3.5 Calibration (the one place ugt enters)](#35-calibration-the-one-place-ugt-enters)
+- [4. Training strategies](#4-training-strategies)
+- [5. Evaluating uncertainty when ugt does not exist](#5-evaluating-uncertainty-when-ugt-does-not-exist)
+- [6. Robustness and refinement uses](#6-robustness-and-refinement-uses)
+- [7. Dataset for the proof of concept](#7-dataset-for-the-proof-of-concept)
+- [8. What transfers from this repo](#8-what-transfers-from-this-repo)
+- [9. Recommendation (proposal for the advisor)](#9-recommendation-proposal-for-the-advisor)
+- [10. Open questions for the advisor](#10-open-questions-for-the-advisor)
+- [References (opened 2026-09-26; status rows refreshed 2026-11-12)](#references-opened-2026-09-26-status-rows-refreshed-2026-11-12)
+
 Goal: make uniGradICON output, in one forward pass, a per-voxel uncertainty on its deformation next to the deformation itself. Then train it from the released weights by probing (backbone frozen), fine-tuning, or probing followed by fine-tuning. This document surveys what exists, fixes what the uncertainty is *of*, compares the designs, and ends with a recommendation and an experiment ladder. Model facts come from [`UNIGRADICON.md`](UNIGRADICON.md). Literature search: about 50 queries plus full reads of the key papers, run on **2026-09-26**; status refresh on **2026-11-12** (Tian NeurIPS acceptance, new probabilistic / foundation-model checks, package versions). Every URL below was opened.
 
 **Hard constraint throughout:** a real clinical pair never has a ground-truth deformation `u_gt`. The uncertainty therefore has to be produced **without** any error signal at inference, and it must be trainable without one. `u_gt` is used only where it can be manufactured (synthetic warps of real anatomy): to *measure* whether the uncertainty tracks true error, and to *calibrate* its scale.
